@@ -54,7 +54,8 @@ pub struct BackendPolicies {
 	pub a2a: Option<A2aPolicy>,
 	// bool represents "should use default settings for provider"
 	// second bool represents "tokenize"
-	pub llm_provider: Option<(llm::AIProvider, bool, bool)>,
+	// Mode represents the routing mode (Universal or Messages)
+	pub llm_provider: Option<(llm::AIProvider, bool, bool, llm::Mode)>,
 	pub inference_routing: Option<InferenceRouting>,
 }
 

@@ -720,12 +720,22 @@ async fn make_backend_call(
 						a2a: None,
 						inference_routing: None,
 						// Attach LLM provider, but don't use default setup
-						llm_provider: Some((provider.provider.clone(), false, provider.tokenize)),
+						llm_provider: Some((
+							provider.provider.clone(),
+							false,
+							provider.tokenize,
+							provider.provider.provider_mode(),
+						)),
 					}),
 				),
 				None => {
 					let (tgt, mut pol) = provider.provider.default_connector();
-					pol.llm_provider = Some((provider.provider.clone(), true, provider.tokenize));
+					pol.llm_provider = Some((
+						provider.provider.clone(),
+						true,
+						provider.tokenize,
+						provider.provider.provider_mode(),
+					));
 					(tgt, Some(pol))
 				},
 			};
@@ -843,7 +853,7 @@ async fn make_backend_call(
 	}
 
 	let (mut req, response_policies, llm_request) =
-		if let Some((llm, use_default_policies, tokenize)) = &policies.llm_provider {
+		if let Some((llm, use_default_policies, tokenize, mode)) = &policies.llm_provider {
 			let r = llm
 				.process_request(
 					&client,
@@ -851,6 +861,7 @@ async fn make_backend_call(
 					req,
 					*tokenize,
 					&mut log,
+					*mode,
 				)
 				.await
 				.map_err(|e| ProxyError::Processing(e.into()))?;
@@ -897,7 +908,7 @@ async fn make_backend_call(
 			.await
 			.map_err(ProxyError::Processing)?;
 		let mut resp =
-			if let (Some((llm, _, _)), Some(llm_request)) = (policies.llm_provider, llm_request) {
+			if let (Some((llm, _, _, mode)), Some(llm_request)) = (policies.llm_provider, llm_request) {
 				llm
 					.process_response(
 						&client,
@@ -906,6 +917,7 @@ async fn make_backend_call(
 						llm_response_log.expect("must be set"),
 						include_completion_in_log,
 						resp,
+						mode,
 					)
 					.await
 					.map_err(|e| ProxyError::Processing(e.into()))?

@@ -22,9 +22,18 @@ use crate::types::agent::Target;
 use crate::types::loadbalancer::{ActiveHandle, EndpointWithInfo};
 use crate::{client, *};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+	#[default]
+	Universal,
+	Messages,
+}
+
 pub mod anthropic;
 pub mod bedrock;
 pub mod gemini;
+pub mod messages;
 pub mod openai;
 mod pii;
 pub mod policy;
@@ -154,6 +163,14 @@ impl AIProvider {
 			AIProvider::Bedrock(_p) => bedrock::Provider::NAME,
 		}
 	}
+
+	/// Get the provider-specific mode (if supported)
+	pub fn provider_mode(&self) -> Mode {
+		match self {
+			AIProvider::Bedrock(provider) => provider.mode,
+			_ => Mode::Universal,
+		}
+	}
 	pub fn default_connector(&self) -> (Target, BackendPolicies) {
 		let btls = BackendPolicies {
 			backend_tls: Some(http::backendtls::SYSTEM_TRUST.clone()),
@@ -251,12 +268,95 @@ impl AIProvider {
 					})?;
 					// Store the region in request extensions so AWS signing can use it
 					req.extensions.insert(bedrock::AwsRegion {
-						region: provider.region.as_str().to_string(),
+						region: provider.common.region.as_str().to_string(),
 					});
 					Ok(())
 				})
 			},
 		}
+	}
+
+	/// Estimate tokens from Anthropic Messages format without conversion
+	/// Uses simple heuristic: ~4 characters per token, rounded up
+	/// Only counts text content (matches universal route behavior)
+	fn estimate_tokens_from_anthropic(req: &crate::llm::messages::MessagesRequest) -> Option<u64> {
+		let mut token_count = 0u64;
+
+		// System message estimation - only text content
+		if let Some(system) = &req.system {
+			let system_chars = match system {
+				crate::llm::messages::SystemPrompt::String(text) => text.len(),
+				crate::llm::messages::SystemPrompt::Blocks(blocks) => {
+					blocks.iter().map(|block| block.text.len()).sum()
+				},
+			};
+			token_count += (system_chars as u64).div_ceil(4); // chars/4, round up
+		}
+
+		// Message content estimation - only simple text (like universal route)
+		for message in &req.messages {
+			if let crate::llm::messages::MessageContent::String(text) = &message.content {
+				token_count += (text.len() as u64).div_ceil(4);
+			}
+			// Ignore complex blocks completely (matches universal route behavior)
+		}
+
+		// Add message formatting overhead
+		token_count += (req.messages.len() as u64) * 5;
+
+		Some(token_count)
+	}
+
+	#[tracing::instrument(skip(self, provider, parts, bytes), fields(provider = "aws.bedrock"))]
+	async fn process_messages_request(
+		&self,
+		provider: &bedrock::anthropic::Provider,
+		mut parts: ::http::request::Parts,
+		bytes: &bytes::Bytes,
+		tokenize: bool,
+	) -> Result<RequestResult, AIError> {
+		let anthropic_request: crate::llm::messages::MessagesRequest =
+			serde_json::from_slice(bytes).map_err(AIError::RequestParsing)?;
+
+		// TODO: Inject policy data from request extensions into metadata if needed
+		// inject_policy_data_into_metadata(&mut anthropic_request, &parts.extensions, &MetadataInjectionStrategy::default());
+
+		let streaming = anthropic_request.stream.unwrap_or(false);
+
+		let anthropic_headers =
+			crate::llm::bedrock::anthropic::Provider::extract_headers(&parts.headers)?;
+
+		// CRITICAL: Resolve model ID for path construction BEFORE processing
+		let bedrock_model_id = provider.resolve_model_id(&anthropic_request.model)?;
+
+		// Build LLMRequest metadata with proper token counts (match universal route behavior)
+		let llm_info = LLMRequest {
+			input_tokens: if tokenize {
+				Self::estimate_tokens_from_anthropic(&anthropic_request)
+			} else {
+				None // Same as universal route with tokenize: false
+			},
+			request_model: strng::new(&bedrock_model_id),
+			provider: bedrock::anthropic::Provider::NAME,
+			streaming,
+			params: LLMRequestParams {
+				temperature: anthropic_request.temperature.map(|x| x as f64),
+				max_tokens: Some(anthropic_request.max_tokens as u64),
+				top_p: anthropic_request.top_p.map(|x| x as f64),
+				..Default::default()
+			},
+		};
+
+		// Process the request through the direct Anthropic provider
+		let bedrock_request = provider
+			.process_request(anthropic_request, None, &anthropic_headers)
+			.await?;
+
+		let body_bytes = serde_json::to_vec(&bedrock_request).map_err(AIError::RequestMarshal)?;
+		parts.headers.remove(header::CONTENT_LENGTH);
+		let resp = Body::from(body_bytes);
+		let req = Request::from_parts(parts, resp);
+		Ok(RequestResult::Success(req, llm_info))
 	}
 
 	pub async fn process_request(
@@ -266,12 +366,32 @@ impl AIProvider {
 		req: Request,
 		tokenize: bool,
 		log: &mut Option<&mut RequestLog>,
+		mode: Mode,
 	) -> Result<RequestResult, AIError> {
 		// Buffer the body, max 2mb
 		let (mut parts, body) = req.into_parts();
 		let Ok(bytes) = axum::body::to_bytes(body, 2_097_152).await else {
 			return Err(AIError::RequestTooLarge);
 		};
+
+
+		// Messages front-door (Bedrock first)
+		if let Mode::Messages = mode {
+			match self {
+				AIProvider::Bedrock(u) => {
+					// Reuse Anthropic translator via shared common config
+					let p_msg = crate::llm::bedrock::anthropic::Provider {
+						common: u.common.clone(),
+					};
+					return self
+						.process_messages_request(&p_msg, parts, &bytes, tokenize)
+						.await;
+				},
+				_ => return Err(AIError::UnsupportedModeForProvider),
+			}
+		}
+
+		// For all other providers, use universal format parsing
 		let mut req: universal::Request = if let Some(p) = policies {
 			p.unmarshal_request(&bytes)?
 		} else {
@@ -314,6 +434,7 @@ impl AIProvider {
 				include_usage: true,
 			});
 		}
+
 		let resp_json = match self {
 			AIProvider::OpenAI(p) => serde_json::to_vec(&p.process_request(req).await?),
 			AIProvider::Gemini(p) => serde_json::to_vec(&p.process_request(req).await?),
@@ -328,6 +449,68 @@ impl AIProvider {
 		Ok(RequestResult::Success(req, llm_info))
 	}
 
+	/// Process Messages API response with direct Anthropic format handling
+	#[tracing::instrument(skip(self, provider, req, log, parts, bytes), fields(provider = "aws.bedrock", status = %parts.status))]
+	#[allow(clippy::too_many_arguments)]
+	async fn process_messages_response(
+		&self,
+		provider: &bedrock::anthropic::Provider,
+		req: LLMRequest,
+		rate_limit: LLMResponsePolicies,
+		log: AsyncLog<llm::LLMResponse>,
+		include_completion_in_log: bool,
+		mut parts: ::http::response::Parts,
+		bytes: &bytes::Bytes,
+	) -> Result<Response, AIError> {
+		if parts.status.is_success() {
+			// Process success response directly as native Anthropic format
+			let anthropic_response = provider
+				.process_response_direct(&req.request_model, bytes, &parts.headers)
+				.await?;
+
+			let llm_resp = LLMResponse {
+				request: req,
+				input_tokens_from_response: Some(anthropic_response.usage.input_tokens as u64),
+				output_tokens: Some(anthropic_response.usage.output_tokens as u64),
+				total_tokens: Some(
+					(anthropic_response.usage.input_tokens + anthropic_response.usage.output_tokens) as u64,
+				),
+				provider_model: Some(strng::new(&anthropic_response.model)),
+				completion: if include_completion_in_log {
+					Some(
+						anthropic_response
+							.content
+							.iter()
+							.filter_map(|block| match block {
+								crate::llm::messages::ResponseContentBlock::Text(text_block) => {
+									Some(text_block.text.clone())
+								},
+								_ => None,
+							})
+							.collect::<Vec<_>>(),
+					)
+				} else {
+					None
+				},
+				first_token: Default::default(),
+			};
+
+			amend_tokens(rate_limit, &llm_resp);
+			log.store(Some(llm_resp));
+			let body = serde_json::to_vec(&anthropic_response).map_err(AIError::ResponseMarshal)?;
+			parts.headers.remove(header::CONTENT_LENGTH);
+			let response = Response::from_parts(parts, Body::from(body));
+			Ok(response)
+		} else {
+			// Handle error response for Messages API
+			let anthropic_error_response = provider.process_error_direct(parts.status, bytes).await?;
+			let body = serde_json::to_vec(&anthropic_error_response).map_err(AIError::ResponseMarshal)?;
+			parts.headers.remove(header::CONTENT_LENGTH);
+			let response = Response::from_parts(parts, Body::from(body));
+			Ok(response)
+		}
+	}
+
 	pub async fn process_response(
 		&self,
 		client: &client::Client,
@@ -336,10 +519,11 @@ impl AIProvider {
 		log: AsyncLog<llm::LLMResponse>,
 		include_completion_in_log: bool,
 		resp: Response,
+		mode: Mode,
 	) -> Result<Response, AIError> {
 		if req.streaming {
 			return self
-				.process_streaming(req, rate_limit, log, include_completion_in_log, resp)
+				.process_streaming(req, rate_limit, log, include_completion_in_log, resp, mode)
 				.await;
 		}
 		// Buffer the body, max 2mb
@@ -350,6 +534,32 @@ impl AIProvider {
 		else {
 			return Err(AIError::RequestTooLarge);
 		};
+
+
+		// Messages front-door (Bedrock first)
+		if let Mode::Messages = mode {
+			match self {
+				AIProvider::Bedrock(u) => {
+					// Reuse Anthropic translator via shared common config
+					let p_msg = crate::llm::bedrock::anthropic::Provider {
+						common: u.common.clone(),
+					};
+					return self
+						.process_messages_response(
+							&p_msg,
+							req,
+							rate_limit,
+							log,
+							include_completion_in_log,
+							parts,
+							&bytes,
+						)
+						.await;
+				},
+				_ => return Err(AIError::UnsupportedModeForProvider),
+			}
+		}
+
 		// 3 cases: success, error properly handled, and unexpected error we need to synthesize
 		let openai_response = self
 			.process_response_status(&req, parts.status, &bytes)
@@ -454,10 +664,7 @@ impl AIProvider {
 				AIProvider::Gemini(p) => p.process_response(bytes).await?,
 				AIProvider::Vertex(p) => p.process_response(bytes).await?,
 				AIProvider::Anthropic(p) => p.process_response(bytes).await?,
-				AIProvider::Bedrock(p) => {
-					p.process_response(req.request_model.as_str(), bytes)
-						.await?
-				},
+				AIProvider::Bedrock(p) => p.process_response(&req.request_model, bytes).await?,
 			};
 			Ok(Ok(openai_response))
 		} else {
@@ -479,6 +686,7 @@ impl AIProvider {
 		log: AsyncLog<llm::LLMResponse>,
 		include_completion_in_log: bool,
 		resp: Response,
+		mode: Mode,
 	) -> Result<Response, AIError> {
 		let model = req.request_model.clone();
 		// Store an empty response, as we stream in info we will parse into it
@@ -492,6 +700,24 @@ impl AIProvider {
 			first_token: Default::default(),
 		};
 		log.store(Some(llmresp));
+
+
+		// Messages streaming for Bedrock
+		if let Mode::Messages = mode {
+			let resp = match self {
+				AIProvider::Bedrock(u) => {
+					let p_msg = crate::llm::bedrock::anthropic::Provider {
+						common: u.common.clone(),
+					};
+					p_msg
+						.process_streaming(log, rate_limit, resp, model.as_str())
+						.await
+				},
+				_ => return Err(AIError::UnsupportedModeForProvider),
+			};
+			return Ok(resp);
+		}
+
 		let resp = match self {
 			AIProvider::Anthropic(p) => p.process_streaming(log, resp).await,
 			AIProvider::Bedrock(p) => p.process_streaming(log, resp, model.as_str()).await,
@@ -681,6 +907,8 @@ pub enum AIError {
 	StreamingUnsupported,
 	#[error("unsupported model")]
 	UnsupportedModel,
+	#[error("provider does not support mode")]
+	UnsupportedModeForProvider,
 	#[error("unsupported content")]
 	UnsupportedContent,
 	#[error("request was too large")]
