@@ -10,7 +10,7 @@ use crate::http::auth::{AwsAuth, BackendAuth, SimpleBackendAuth};
 use crate::http::transformation_cel::{LocalTransform, LocalTransformationConfig, Transformation};
 use crate::http::{StatusCode, authorization, backendtls, ext_proc, filters, localratelimit, uri};
 use crate::llm::{AIBackend, AIProvider, NamedAIProvider};
-use crate::mcp::rbac::McpAuthorization;
+use crate::mcp::McpAuthorization;
 use crate::types::discovery::NamespacedHostname;
 use crate::types::proto;
 use crate::types::proto::ProtoError;
@@ -906,13 +906,13 @@ impl TryFrom<&proto::agent::PolicySpec> for Policy {
 					defaults: Some(
 						ai.defaults
 							.iter()
-							.map(|(k, v)| serde_json::to_value(v).map(|v| (k.clone(), v)))
+							.map(|(k, v)| serde_json::from_str(v).map(|v| (k.clone(), v)))
 							.collect::<Result<_, _>>()?,
 					),
 					overrides: Some(
 						ai.overrides
 							.iter()
-							.map(|(k, v)| serde_json::to_value(v).map(|v| (k.clone(), v)))
+							.map(|(k, v)| serde_json::from_str(v).map(|v| (k.clone(), v)))
 							.collect::<Result<_, _>>()?,
 					),
 					prompts: ai.prompts.as_ref().map(convert_prompt_enrichment),
