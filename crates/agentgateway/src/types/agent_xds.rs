@@ -302,10 +302,16 @@ impl TryFrom<&proto::agent::Backend> for Backend {
 							},
 							Some(proto::agent::ai_backend::provider::Provider::Bedrock(bedrock)) => {
 								AIProvider::Bedrock(llm::bedrock::Provider {
-									model: bedrock.model.as_deref().map(strng::new),
-									region: strng::new(&bedrock.region),
-									guardrail_identifier: bedrock.guardrail_identifier.as_deref().map(strng::new),
-									guardrail_version: bedrock.guardrail_version.as_deref().map(strng::new),
+									common: llm::bedrock::common::Common {
+										model: bedrock.model.as_deref().map(strng::new),
+										region: strng::new(&bedrock.region),
+										guardrail_identifier: bedrock.guardrail_identifier.as_deref().map(strng::new),
+										guardrail_version: bedrock.guardrail_version.as_deref().map(strng::new),
+										model_mappings: None,
+										additional_model_fields: None,
+										anthropic_beta: None,
+										observability: Default::default(),
+									},
 								})
 							},
 							None => {

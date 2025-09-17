@@ -860,14 +860,19 @@ async fn make_backend_call(
 		log.add(|l| l.a2a_method = Some(method));
 	}
 
+	let route_type = if let Some(llm) = &policies.llm_provider {
+		llm.resolve_route(req.uri().path())
+	} else {
+		RouteType::Completions // Default route type
+	};
+
 	let (mut req, response_policies, llm_request) = if let Some(llm) = &policies.llm_provider {
-		let route_type = llm.resolve_route(req.uri().path());
 		trace!("llm: route {} to {route_type:?}", req.uri().path());
 		// First, we process the incoming request. This entails translating to the relevant provider,
 		// and parsing the request to build the LLMRequest for logging/etc, and applying LLM policies like
 		// prompt enrichment, prompt guard, etc.
 		match route_type {
-			RouteType::Completions => {
+			RouteType::Completions | RouteType::Messages => {
 				let r = llm
 					.provider
 					.process_request(
@@ -876,6 +881,7 @@ async fn make_backend_call(
 						req,
 						llm.tokenize,
 						&mut log,
+						route_type,
 					)
 					.await
 					.map_err(|e| ProxyError::Processing(e.into()))?;
@@ -904,15 +910,18 @@ async fn make_backend_call(
 				log.add(|l| l.llm_request = Some(llm_request.clone()));
 				(req, response_policies, Some(llm_request))
 			},
-			RouteType::Messages | RouteType::Models => {
+			RouteType::Models => {
+				// Get the list of models from the provider
+				let models_response = llm.provider.list_models();
+				let response_json = serde_json::to_vec(&models_response)
+					.map_err(|e| ProxyError::ProcessingString(format!("Failed to serialize models response: {e}")))?;
+				
 				return Ok(Box::pin(async move {
 					Ok(
 						::http::Response::builder()
-							.status(::http::StatusCode::NOT_IMPLEMENTED)
+							.status(::http::StatusCode::OK)
 							.header(::http::header::CONTENT_TYPE, "application/json")
-							.body(http::Body::from(format!(
-								"{{\"error\":\"Route '{route_type:?}' not implemented\"}}"
-							)))
+							.body(http::Body::from(response_json))
 							.expect("Failed to build response"),
 					)
 				}));
@@ -959,6 +968,7 @@ async fn make_backend_call(
 					llm_response_log.expect("must be set"),
 					include_completion_in_log,
 					resp,
+					route_type,
 				)
 				.await
 				.map_err(|e| ProxyError::Processing(e.into()))?
@@ -1223,6 +1233,7 @@ impl PolicyClient {
 		self.inputs.upstream.simple_call(req).await
 	}
 }
+
 trait OptLogger {
 	fn add<F>(&mut self, f: F)
 	where
