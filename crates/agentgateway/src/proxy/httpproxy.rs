@@ -1098,7 +1098,7 @@ async fn make_backend_call(
 			.await
 			.map_err(ProxyError::Processing)?;
 		let mut resp = if let (Some(llm), Some(llm_request)) = (policies.llm_provider, llm_request) {
-			llm
+			let mut processed_resp = llm
 				.provider
 				.process_response(
 					&client,
@@ -1109,7 +1109,27 @@ async fn make_backend_call(
 					resp,
 				)
 				.await
-				.map_err(|e| ProxyError::Processing(e.into()))?
+				.map_err(|e| ProxyError::Processing(e.into()))?;
+
+			// Convert response format based on route type
+			if llm_request.route_type == RouteType::Messages {
+				// For Messages API, convert Universal format response to Anthropic Messages API format
+				if let Ok(body_bytes) = axum::body::to_bytes(processed_resp.body_mut(), 2_097_152).await {
+					if let Ok(universal_response) = serde_json::from_slice::<universal::Response>(&body_bytes) {
+						match messages::egress::from_universal_json(&universal_response) {
+							Ok(messages_response) => {
+								let messages_json = serde_json::to_vec(&messages_response)
+									.map_err(|e| ProxyError::Processing(format!("Failed to serialize Messages response: {}", e).into()))?;
+								*processed_resp.body_mut() = http::Body::from(messages_json);
+							}
+							Err(e) => {
+								debug!("Failed to convert to Messages format, keeping Universal format: {:?}", e);
+							}
+						}
+					}
+				}
+			}
+			processed_resp
 		} else {
 			resp
 		};

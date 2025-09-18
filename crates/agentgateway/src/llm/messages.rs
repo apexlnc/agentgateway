@@ -1080,13 +1080,6 @@ pub mod ingress {
         Ok(())
     }
 
-    /// Convert Messages API input message to Universal format (legacy - use convert_input_message_with_vendor_data)
-    fn convert_input_message(msg: &types::InputMessage) -> Result<universal::RequestMessage, AIError> {
-        // Legacy function doesn't have beta features, so pass empty array (restrictive)
-        let (universal_msg, _vendor_data) = convert_input_message_with_vendor_data(msg, &[])?;
-        Ok(universal_msg)
-    }
-
     /// Convert Messages API input message to Universal format and return vendor data
     fn convert_input_message_with_vendor_data(msg: &types::InputMessage, beta_features: &[String]) -> Result<(universal::RequestMessage, VendorData), AIError> {
         match &msg.content {
