@@ -235,6 +235,18 @@ impl LocalAIBackend {
 						policy: Policy::BackendAuth(bauth),
 					});
 				}
+				// Set up default routes if none configured
+				let routes = if p.routes.is_empty() {
+					let mut default_routes = IndexMap::new();
+					// Add default route mappings for common AI API endpoints
+					default_routes.insert("/v1/messages".into(), RouteType::Messages);
+					default_routes.insert("/v1/chat/completions".into(), RouteType::Completions);
+					default_routes.insert("/v1/models".into(), RouteType::Models);
+					default_routes
+				} else {
+					p.routes
+				};
+
 				group.push((
 					p.name.clone(),
 					NamedAIProvider {
@@ -243,7 +255,7 @@ impl LocalAIBackend {
 						host_override: p.host_override,
 						path_override: p.path_override,
 						tokenize: p.tokenize,
-						routes: p.routes,
+						routes,
 					},
 				));
 			}

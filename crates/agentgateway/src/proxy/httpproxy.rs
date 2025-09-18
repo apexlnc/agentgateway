@@ -862,8 +862,11 @@ async fn make_backend_call(
 		log.add(|l| l.a2a_method = Some(method));
 	}
 
+	debug!("DEBUG: policies.llm_provider is_some: {}", policies.llm_provider.is_some());
 	let (mut req, response_policies, llm_request) = if let Some(llm) = &policies.llm_provider {
+		debug!("DEBUG: LLM provider found, calling resolve_route");
 		let route_type = llm.resolve_route(req.uri().path());
+		debug!("DEBUG: Route resolved to: {:?}", route_type);
 		trace!("llm: route {} to {route_type:?}", req.uri().path());
 		// First, we process the incoming request. This entails translating to the relevant provider,
 		// and parsing the request to build the LLMRequest for logging/etc, and applying LLM policies like
