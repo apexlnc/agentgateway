@@ -863,11 +863,8 @@ async fn make_backend_call(
 		log.add(|l| l.a2a_method = Some(method));
 	}
 
-	debug!("DEBUG: policies.llm_provider is_some: {}", policies.llm_provider.is_some());
 	let (mut req, response_policies, llm_request) = if let Some(llm) = &policies.llm_provider {
-		debug!("DEBUG: LLM provider found, calling resolve_route");
 		let route_type = llm.resolve_route(req.uri().path());
-		debug!("DEBUG: Route resolved to: {:?}", route_type);
 		trace!("llm: route {} to {route_type:?}", req.uri().path());
 		// First, we process the incoming request. This entails translating to the relevant provider,
 		// and parsing the request to build the LLMRequest for logging/etc, and applying LLM policies like
@@ -912,7 +909,6 @@ async fn make_backend_call(
 				(req, response_policies, Some(llm_request))
 			},
 			RouteType::Messages => {
-				// Phase 2A: Messages API Request Processing
 				// Read and parse Messages API request body
 				let body = std::mem::replace(req.body_mut(), http::Body::empty());
 				let body_bytes = match axum::body::to_bytes(body, 2_097_152).await {
@@ -945,7 +941,7 @@ async fn make_backend_call(
 					}
 				};
 
-				// Phase 2B: Convert Messages -> Universal format
+				// Convert Messages to Universal format
 				let universal_request = match messages::ingress::to_universal(&messages_request, req.headers()) {
 					Ok(universal_req) => universal_req,
 					Err(e) => {
@@ -961,12 +957,11 @@ async fn make_backend_call(
 					}
 				};
 
-				// Phase 2C: Convert Universal → Provider format (Bedrock)
+				// Convert Universal to provider format
 				let provider_request_body = match llm.provider {
 					llm::AIProvider::Bedrock(ref bedrock_provider) => {
-						// Convert to UniversalRequest format for BackendAdapter
 						let universal_req = crate::llm::universal::convert_to_universal_request(&universal_request);
-						// Use BackendAdapter to convert Universal → Bedrock format
+						// Convert to Bedrock format
 						match bedrock_provider.to_backend(&universal_req) {
 							Ok(bedrock_req) => match serde_json::to_vec(&bedrock_req) {
 								Ok(json_bytes) => json_bytes,
@@ -996,7 +991,6 @@ async fn make_backend_call(
 						}
 					},
 					_ => {
-						// For other providers, use Universal format as fallback
 						match serde_json::to_vec(&universal_request) {
 							Ok(json_bytes) => json_bytes,
 							Err(e) => {
@@ -1016,7 +1010,7 @@ async fn make_backend_call(
 
 				*req.body_mut() = http::Body::from(provider_request_body);
 
-				// Phase 2D: Create LLMRequest for logging and policies  
+				// Create LLMRequest for logging and policies  
 				let llm_request = LLMRequest {
 					input_tokens: Some(messages::estimate_tokens(&messages_request) as u64),
 					request_model: messages_request.model.clone().into(),
@@ -1033,7 +1027,7 @@ async fn make_backend_call(
 					},
 				};
 
-				// Phase 2E: Apply standard LLM processing
+				// Apply standard LLM processing
 				if llm.use_default_policies() {
 					llm
 						.provider
@@ -1117,7 +1111,6 @@ async fn make_backend_call(
 
 			// Convert response format based on route type
 			if route_type == RouteType::Messages {
-				// For Messages API, convert Universal format response to Anthropic Messages API format
 				let body = std::mem::replace(processed_resp.body_mut(), http::Body::empty());
 				if let Ok(body_bytes) = axum::body::to_bytes(body, 2_097_152).await {
 					if let Ok(universal_response) = serde_json::from_slice::<universal::Response>(&body_bytes) {

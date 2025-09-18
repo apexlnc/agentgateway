@@ -26,7 +26,7 @@ pub use async_openai::types::{
 	ChatCompletionRequestUserMessageContent as RequestUserMessageContent,
 	ChatCompletionResponseMessage as ResponseMessage, ChatCompletionStreamOptions as StreamOptions,
 	ChatCompletionStreamResponseDelta as StreamResponseDelta, ChatCompletionTool,
-	ChatCompletionToolChoiceOption as ToolChoiceOption, ChatCompletionToolChoiceOption,
+	ChatCompletionToolChoiceOption as ToolChoiceOption,
 	ChatCompletionToolType as ToolType, CompletionUsage as Usage, CreateChatCompletionRequest,
 	CreateChatCompletionResponse as Response, CreateChatCompletionStreamResponse as StreamResponse,
 	FinishReason, FunctionCall, FunctionObject, FunctionName, PredictionContent, ReasoningEffort, ResponseFormat, Role,
@@ -448,13 +448,66 @@ pub fn convert_to_universal_request(req: &Request) -> UniversalRequest {
 					RequestMessage::Developer(_) => MessageRole::User, // Map developer to user
 				};
 				
-				// Extract content blocks - simplified for now
+				// Extract content blocks including tool calls
 				let mut blocks = Vec::new();
 				if let Some(text) = message_text(msg) {
 					blocks.push(ContentBlock::Text { text: text.to_string() });
 				}
 				
-				// TODO: Extract tool calls, function calls, etc.
+				match msg {
+					RequestMessage::Assistant(assistant_msg) => {
+						if let Some(tool_calls) = &assistant_msg.tool_calls {
+							for tool_call in tool_calls {
+								blocks.push(ContentBlock::ToolUse {
+									id: tool_call.id.clone(),
+									name: tool_call.function.name.clone(),
+									input: serde_json::from_str(&tool_call.function.arguments)
+										.unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+								});
+							}
+						}
+						
+						// Handle deprecated function_call field
+						#[allow(deprecated)]
+						if let Some(function_call) = &assistant_msg.function_call {
+							blocks.push(ContentBlock::ToolUse {
+								id: format!("func-{}", chrono::Utc::now().timestamp_nanos()),
+								name: function_call.name.clone(),
+								input: serde_json::from_str(&function_call.arguments)
+									.unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+							});
+						}
+					},
+					RequestMessage::Tool(tool_msg) => {
+						let content_text = match &tool_msg.content {
+							RequestToolMessageContent::Text(text) => text.clone(),
+							RequestToolMessageContent::Array(parts) => {
+								parts.iter()
+									.filter_map(|part| match part {
+										async_openai::types::ChatCompletionRequestToolMessageContentPart::Text(t) => Some(t.text.as_str()),
+									})
+									.collect::<Vec<_>>()
+									.join("\n")
+							}
+						};
+						
+						blocks.push(ContentBlock::ToolResult {
+							tool_use_id: tool_msg.tool_call_id.clone(),
+							content: vec![ContentBlock::Text { text: content_text }],
+							status: Some(ToolResultStatus::Success), // Assume success unless we can parse error info
+						});
+					},
+					RequestMessage::Function(function_msg) => {
+						blocks.push(ContentBlock::ToolResult {
+							tool_use_id: format!("func-{}", function_msg.name),
+							content: vec![ContentBlock::Text { 
+								text: function_msg.content.clone().unwrap_or_default() 
+							}],
+							status: Some(ToolResultStatus::Success),
+						});
+					},
+					_ => {}
+				}
 				
 				messages.push(UniversalMessage {
 					id: format!("msg-{}", chrono::Utc::now().timestamp_nanos()),

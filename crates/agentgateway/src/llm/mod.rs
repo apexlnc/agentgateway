@@ -27,7 +27,6 @@ pub mod anthropic;
 pub mod bedrock;
 pub mod gemini;
 pub mod messages;
-pub mod messages_streaming;
 pub mod openai;
 mod pii;
 pub mod policy;
@@ -91,22 +90,14 @@ impl NamedAIProvider {
 		self.host_override.is_none()
 	}
 	pub fn resolve_route(&self, path: &str) -> RouteType {
-		eprintln!("DEBUG: resolve_route called with path: {}", path);
-		eprintln!("DEBUG: routes map: {:?}", self.routes);
-		eprintln!("DEBUG: routes map size: {}", self.routes.len());
-		
 		for (path_suffix, rt) in &self.routes {
-			eprintln!("DEBUG: checking route '{}' -> {:?}", path_suffix, rt);
 			if path_suffix == DEFAULT_ROUTE {
-				eprintln!("DEBUG: matched default route '*', returning {:?}", rt);
 				return *rt;
 			}
 			if path.ends_with(path_suffix.as_str()) {
-				eprintln!("DEBUG: matched suffix '{}', returning {:?}", path_suffix, rt);
 				return *rt;
 			}
 		}
-		eprintln!("DEBUG: no match found, returning Completions");
 		RouteType::Completions
 	}
 }
