@@ -32,6 +32,8 @@ use crate::telemetry::metrics::TCPLabels;
 use crate::telemetry::trc::TraceParent;
 use crate::transport::stream::{Extension, TCPConnectionInfo, TLSConnectionInfo};
 use crate::{ProxyInputs, store, *};
+use crate::llm::messages;
+use crate::llm::LLMRequestParams;
 
 fn select_backend(route: &Route, _req: &Request) -> Option<RouteBackendReference> {
 	route
@@ -904,7 +906,111 @@ async fn make_backend_call(
 				log.add(|l| l.llm_request = Some(llm_request.clone()));
 				(req, response_policies, Some(llm_request))
 			},
-			RouteType::Messages | RouteType::Models => {
+			RouteType::Messages => {
+				// Phase 2A: Messages API Request Processing
+				// Read and parse Messages API request body
+				let body = std::mem::replace(req.body_mut(), http::Body::empty());
+				let body_bytes = match axum::body::to_bytes(body, 2_097_152).await {
+					Ok(bytes) => bytes,
+					Err(e) => {
+						return Ok(Box::pin(async move {
+							Ok(::http::Response::builder()
+								.status(::http::StatusCode::BAD_REQUEST)
+								.header(::http::header::CONTENT_TYPE, "application/json")
+								.body(http::Body::from(format!(
+									"{{\"error\":\"Failed to read request body: {}\"}}", e
+								)))
+								.expect("Failed to build response"))
+						}));
+					}
+				};
+
+				let messages_request: messages::MessagesRequest = match serde_json::from_slice(&body_bytes) {
+					Ok(req) => req,
+					Err(e) => {
+						return Ok(Box::pin(async move {
+							Ok(::http::Response::builder()
+								.status(::http::StatusCode::BAD_REQUEST)
+								.header(::http::header::CONTENT_TYPE, "application/json")
+								.body(http::Body::from(format!(
+									"{{\"error\":\"Invalid JSON in request body: {}\"}}", e
+								)))
+								.expect("Failed to build response"))
+						}));
+					}
+				};
+
+				// Phase 2B: Convert Messages -> Universal format
+				let universal_request = match messages::ingress::to_universal(&messages_request, req.headers()) {
+					Ok(universal_req) => universal_req,
+					Err(e) => {
+						return Ok(Box::pin(async move {
+							Ok(::http::Response::builder()
+								.status(::http::StatusCode::BAD_REQUEST)
+								.header(::http::header::CONTENT_TYPE, "application/json")
+								.body(http::Body::from(format!(
+									"{{\"error\":\"Request validation failed: {}\"}}", e
+								)))
+								.expect("Failed to build response"))
+						}));
+					}
+				};
+
+				// Phase 2C: Replace request body with Universal format JSON
+				let universal_body = match serde_json::to_vec(&universal_request) {
+					Ok(json_bytes) => json_bytes,
+					Err(e) => {
+						return Ok(Box::pin(async move {
+							Ok(::http::Response::builder()
+								.status(::http::StatusCode::INTERNAL_SERVER_ERROR)
+								.header(::http::header::CONTENT_TYPE, "application/json")
+								.body(http::Body::from(format!(
+									"{{\"error\":\"Failed to serialize Universal request: {}\"}}", e
+								)))
+								.expect("Failed to build response"))
+						}));
+					}
+				};
+
+				*req.body_mut() = http::Body::from(universal_body);
+
+				// Phase 2D: Create LLMRequest for logging and policies  
+				let llm_request = LLMRequest {
+					input_tokens: Some(messages::estimate_tokens(&messages_request) as u64),
+					request_model: messages_request.model.clone().into(),
+					provider: llm.provider.provider(),
+					streaming: messages_request.stream.unwrap_or(false),
+					params: LLMRequestParams {
+						temperature: messages_request.temperature.map(|t| t as f64),
+						top_p: messages_request.top_p.map(|t| t as f64),
+						max_tokens: Some(messages_request.max_tokens as u64),
+						frequency_penalty: None,
+						presence_penalty: None,
+						seed: None,
+					},
+				};
+
+				// Phase 2E: Apply standard LLM processing
+				if llm.use_default_policies() {
+					llm
+						.provider
+						.setup_request(&mut req, route_type, Some(&llm_request))
+						.map_err(ProxyError::Processing)?;
+				}
+
+				let response_policies = apply_llm_request_policies(
+					&route_policies,
+					policy_client,
+					&mut log,
+					&mut req,
+					&llm_request,
+					response_headers,
+				)
+				.await?;
+				log.add(|l| l.llm_request = Some(llm_request.clone()));
+				(req, response_policies, Some(llm_request))
+			},
+			RouteType::Models => {
 				return Ok(Box::pin(async move {
 					Ok(
 						::http::Response::builder()

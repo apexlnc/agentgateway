@@ -25,6 +25,7 @@ use crate::{client, *};
 pub mod anthropic;
 pub mod bedrock;
 pub mod gemini;
+pub mod messages;
 pub mod openai;
 mod pii;
 pub mod policy;
@@ -748,6 +749,34 @@ pub enum AIError {
 	Encoding(axum_core::Error),
 	#[error("error computing tokens")]
 	JoinError(#[from] tokio::task::JoinError),
+	
+	// === Messages API Validation Errors (400 Bad Request) ===
+	#[error("invalid role: {0}. Messages API only supports 'user' and 'assistant' roles")]
+	InvalidRole(String),
+	#[error("max_tokens is required and must be greater than 0")]
+	MissingMaxTokens,
+	#[error("invalid max_tokens: {0}. Must be greater than 0")]
+	InvalidMaxTokens(u32),
+	#[error("unpaired tool use: tool_use with id '{0}' has no matching tool_result")]
+	UnpairedToolUse(String),
+	#[error("unpaired tool result: tool_result for id '{0}' has no matching tool_use")]
+	UnpairedToolResult(String),
+	#[error("invalid message sequence: {0}")]
+	InvalidMessageSequence(String),
+	#[error("empty message content")]
+	EmptyMessageContent,
+	#[error("empty messages array")]
+	EmptyMessages,
+	#[error("invalid tool definition: {0}")]
+	InvalidToolDefinition(String),
+	#[error("duplicate tool name: '{0}'")]
+	DuplicateToolName(String),
+	#[error("invalid tool name: '{0}'. Tool names must be valid identifiers")]
+	InvalidToolName(String),
+	#[error("missing tool input_schema")]
+	MissingToolSchema,
+	#[error("not implemented")]
+	NotImplemented,
 }
 
 fn amend_tokens(rate_limit: store::LLMResponsePolicies, llm_resp: &LLMResponse) {

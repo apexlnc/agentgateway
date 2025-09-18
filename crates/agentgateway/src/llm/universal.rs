@@ -28,7 +28,7 @@ pub use async_openai::types::{
 	ChatCompletionToolChoiceOption as ToolChoiceOption, ChatCompletionToolChoiceOption,
 	ChatCompletionToolType as ToolType, CompletionUsage as Usage, CreateChatCompletionRequest,
 	CreateChatCompletionResponse as Response, CreateChatCompletionStreamResponse as StreamResponse,
-	FinishReason, FunctionCall, PredictionContent, ReasoningEffort, ResponseFormat, Role,
+	FinishReason, FunctionCall, FunctionObject, FunctionName, PredictionContent, ReasoningEffort, ResponseFormat, Role,
 	ServiceTier, WebSearchOptions,
 };
 use serde::{Deserialize, Serialize};
@@ -187,6 +187,11 @@ pub struct Request {
 	/// A unique identifier representing your end-user, which can help OpenAI to monitor and detect abuse. [Learn more](https://platform.openai.com/docs/guides/safety-best-practices#end-user-ids).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub user: Option<String>,
+
+	/// Vendor-specific data for provider compatibility and observability.
+	/// Structure: {"provider_name": {"key": "value"}}
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub vendor: Option<HashMap<String, serde_json::Value>>,
 
 	/// This tool searches the web for relevant results to use in a response.
 	/// Learn more about the [web search tool](https://platform.openai.com/docs/guides/tools-web-search?api-mode=chat).
