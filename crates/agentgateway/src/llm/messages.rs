@@ -739,44 +739,20 @@ pub mod ingress {
         Ok(())
     }
 
-    /// Validate message sequences for impossible conversations
+    /// Validate message sequences (relaxed validation)
     fn validate_message_sequences(m: &types::MessagesRequest) -> Result<(), AIError> {
         if m.messages.is_empty() {
             return Ok(()); // Already checked in basic validation
         }
 
-        // Rule 1: First message should be user (assistants need context)
+        // Only warn about assistant-first conversations in logs, don't reject
         if let Some(first) = m.messages.first() {
             if first.role == types::MessageRole::Assistant {
-                return Err(AIError::InvalidMessageSequence(
-                    "conversation cannot start with assistant message".to_string()
-                ));
+                tracing::warn!("Conversation starting with assistant message - this is unusual but allowed");
             }
         }
 
-        // Rule 2: Check for reasonable alternating pattern (no strict enforcement, just warn about long sequences)
-        let mut consecutive_count = 1;
-        let mut prev_role = &m.messages[0].role;
-        
-        for message in m.messages.iter().skip(1) {
-            if message.role == *prev_role {
-                consecutive_count += 1;
-                // Allow up to 3 consecutive messages from same role before flagging
-                if consecutive_count > 3 {
-                    return Err(AIError::InvalidMessageSequence(format!(
-                        "more than 3 consecutive {} messages detected. Consider alternating roles for better conversation flow",
-                        match message.role {
-                            types::MessageRole::User => "user",
-                            types::MessageRole::Assistant => "assistant",
-                        }
-                    )));
-                }
-            } else {
-                consecutive_count = 1;
-                prev_role = &message.role;
-            }
-        }
-
+        // No restrictions on consecutive messages - users may have valid use cases
         Ok(())
     }
 
@@ -867,51 +843,69 @@ pub mod ingress {
         name.chars().all(|c| c.is_alphanumeric() || c == '_')
     }
 
-    /// Validate tool use/result pairing
-    /// Each tool_use must have a matching tool_result with same id
+    /// Validate tool use/result pairing for the current conversation window
+    /// Rule: Any assistant tool_use must be answered by a user tool_result in the subsequent user message
     fn validate_tool_pairing(m: &types::MessagesRequest) -> Result<(), AIError> {
-        let mut tool_uses: HashMap<String, usize> = HashMap::new();
-        let mut tool_results: HashMap<String, usize> = HashMap::new();
+        if m.messages.is_empty() {
+            return Ok(());
+        }
+
+        // Find the last assistant message with tool_use (if any)
+        let mut last_assistant_tool_uses: Vec<String> = Vec::new();
         
-        // Collect all tool_use and tool_result blocks
-        for (msg_idx, message) in m.messages.iter().enumerate() {
-            if let types::MessageContent::Blocks(blocks) = &message.content {
-                for block in blocks {
-                    match block {
-                        types::RequestContentBlock::ToolUse(tool_use) => {
-                            if tool_uses.insert(tool_use.id.clone(), msg_idx).is_some() {
-                                return Err(AIError::InvalidToolDefinition(format!(
-                                    "duplicate tool_use id: '{}'", tool_use.id
-                                )));
+        for message in m.messages.iter().rev() {
+            match message.role {
+                types::MessageRole::Assistant => {
+                    // Look for tool_use blocks in this assistant message
+                    if let types::MessageContent::Blocks(blocks) = &message.content {
+                        for block in blocks {
+                            if let types::RequestContentBlock::ToolUse(tool_use) = block {
+                                last_assistant_tool_uses.push(tool_use.id.clone());
                             }
-                        },
-                        types::RequestContentBlock::ToolResult(tool_result) => {
-                            if tool_results.insert(tool_result.tool_use_id.clone(), msg_idx).is_some() {
-                                return Err(AIError::InvalidToolDefinition(format!(
-                                    "duplicate tool_result for tool_use_id: '{}'", tool_result.tool_use_id
-                                )));
-                            }
-                        },
-                        _ => {}
+                        }
                     }
+                    break; // Stop at first assistant message (going backwards)
+                },
+                types::MessageRole::User => {
+                    // If we hit a user message first, no tool_use to check
+                    break;
                 }
             }
         }
-        
-        // Check for unpaired tool_uses
-        for (tool_use_id, _) in &tool_uses {
-            if !tool_results.contains_key(tool_use_id) {
-                return Err(AIError::UnpairedToolUse(tool_use_id.clone()));
+
+        // If the last assistant message had tool_use blocks, ensure they have matching tool_results
+        if !last_assistant_tool_uses.is_empty() {
+            let mut found_tool_results: Vec<String> = Vec::new();
+
+            // Look for tool_results in subsequent user messages
+            let mut found_assistant = false;
+            for message in m.messages.iter().rev() {
+                if message.role == types::MessageRole::Assistant {
+                    found_assistant = true;
+                    continue;
+                }
+                
+                if found_assistant && message.role == types::MessageRole::User {
+                    // Check this user message for tool_results
+                    if let types::MessageContent::Blocks(blocks) = &message.content {
+                        for block in blocks {
+                            if let types::RequestContentBlock::ToolResult(tool_result) = block {
+                                found_tool_results.push(tool_result.tool_use_id.clone());
+                            }
+                        }
+                    }
+                    break; // Only check the immediate next user message
+                }
+            }
+
+            // Validate that all tool_uses have corresponding tool_results
+            for tool_use_id in &last_assistant_tool_uses {
+                if !found_tool_results.contains(tool_use_id) {
+                    return Err(AIError::UnpairedToolUse(tool_use_id.clone()));
+                }
             }
         }
-        
-        // Check for unpaired tool_results
-        for (tool_use_id, _) in &tool_results {
-            if !tool_uses.contains_key(tool_use_id) {
-                return Err(AIError::UnpairedToolResult(tool_use_id.clone()));
-            }
-        }
-        
+
         Ok(())
     }
 
@@ -1086,18 +1080,25 @@ pub mod ingress {
         Ok(())
     }
 
-    /// Convert Messages API input message to Universal format
+    /// Convert Messages API input message to Universal format (legacy - use convert_input_message_with_vendor_data)
     fn convert_input_message(msg: &types::InputMessage) -> Result<universal::RequestMessage, AIError> {
+        // Legacy function doesn't have beta features, so pass empty array (restrictive)
+        let (universal_msg, _vendor_data) = convert_input_message_with_vendor_data(msg, &[])?;
+        Ok(universal_msg)
+    }
+
+    /// Convert Messages API input message to Universal format and return vendor data
+    fn convert_input_message_with_vendor_data(msg: &types::InputMessage, beta_features: &[String]) -> Result<(universal::RequestMessage, VendorData), AIError> {
         match &msg.content {
             types::MessageContent::String(text) => {
-                match msg.role {
-                    types::MessageRole::User => Ok(universal::RequestMessage::User(
+                let universal_msg = match msg.role {
+                    types::MessageRole::User => universal::RequestMessage::User(
                         universal::RequestUserMessage {
                             content: universal::RequestUserMessageContent::Text(text.clone()),
                             name: None,
                         }
-                    )),
-                    types::MessageRole::Assistant => Ok(universal::RequestMessage::Assistant(
+                    ),
+                    types::MessageRole::Assistant => universal::RequestMessage::Assistant(
                         universal::RequestAssistantMessage {
                             content: Some(universal::RequestAssistantMessageContent::Text(text.clone())),
                             name: None,
@@ -1107,8 +1108,9 @@ pub mod ingress {
                             function_call: None,
                             audio: None,
                         }
-                    )),
-                }
+                    ),
+                };
+                Ok((universal_msg, VendorData::default()))
             },
             types::MessageContent::Blocks(blocks) => {
                 // Process content blocks into unified structure
@@ -1121,11 +1123,11 @@ pub mod ingress {
 
                 // Process each content block
                 for block in blocks {
-                    process_content_block(block, &mut result)?;
+                    process_content_block(block, &mut result, beta_features)?;
                 }
 
                 // Build Universal message based on role and converted content
-                match msg.role {
+                let universal_msg = match msg.role {
                     types::MessageRole::User => {
                         // User messages: combine text, ignore tool_calls, handle tool_results separately
                         let combined_text = if result.text_parts.is_empty() {
@@ -1134,12 +1136,12 @@ pub mod ingress {
                             result.text_parts.join("\n\n")
                         };
 
-                        Ok(universal::RequestMessage::User(
+                        universal::RequestMessage::User(
                             universal::RequestUserMessage {
                                 content: universal::RequestUserMessageContent::Text(combined_text),
                                 name: None,
                             }
-                        ))
+                        )
                     },
                     types::MessageRole::Assistant => {
                         // Assistant messages: combine text + tool_calls
@@ -1157,7 +1159,7 @@ pub mod ingress {
                             Some(result.tool_calls)
                         };
 
-                        Ok(universal::RequestMessage::Assistant(
+                        universal::RequestMessage::Assistant(
                             universal::RequestAssistantMessage {
                                 content,
                                 name: None,
@@ -1167,9 +1169,11 @@ pub mod ingress {
                                 function_call: None,
                                 audio: None,
                             }
-                        ))
+                        )
                     }
-                }
+                };
+
+                Ok((universal_msg, result.vendor_data))
             }
         }
     }
@@ -1190,11 +1194,11 @@ pub mod ingress {
     /// Vendor-specific data preservation for provider egress
     #[derive(Debug, Default)]
     struct VendorData {
-        /// Images/documents stashed for Bedrock provider compatibility
-        bedrock_content_blocks: Vec<types::RequestContentBlock>,
+        /// Original Anthropic content blocks for lossless reconstruction
+        anthropic_content_blocks: Vec<types::RequestContentBlock>,
         /// Thinking blocks for providers that support them
         thinking_blocks: Vec<types::RequestThinkingBlock>,
-        /// Search results for enhanced responses
+        /// Search results for enhanced responses (experimental)
         search_results: Vec<types::RequestSearchResultBlock>,
     }
 
@@ -1205,11 +1209,12 @@ pub mod ingress {
     /// - ToolUse blocks: convert to tool_calls array
     /// - ToolResult blocks: store for separate Tool messages (current limitation: not fully implemented)
     /// - Image/Document blocks: stash in vendor data + add placeholder text
-    /// - Thinking blocks: preserve + add to text for compatibility
-    /// - SearchResult blocks: preserve + extract searchable content
+    /// - Thinking blocks: EXPERIMENTAL - only allowed with appropriate anthropic-beta header
+    /// - SearchResult blocks: EXPERIMENTAL - only allowed with appropriate anthropic-beta header
     fn process_content_block(
         block: &types::RequestContentBlock,
         result: &mut ContentBlockConversionResult,
+        beta_features: &[String],
     ) -> Result<(), AIError> {
         match block {
             // Text blocks: accumulate for concatenation
@@ -1264,30 +1269,46 @@ pub mod ingress {
                 result.text_parts.push(format!("[TOOL_RESULT:{}] {}", tool_result.tool_use_id, final_content));
             },
 
-            // Thinking blocks: preserve for compatible providers + add to text
+            // Thinking blocks: EXPERIMENTAL - gate behind beta header
             types::RequestContentBlock::Thinking(thinking) => {
+                // Check if thinking blocks are enabled via anthropic-beta header
+                if !beta_features.iter().any(|f| f.contains("thinking") || f.contains("experimental")) {
+                    return Err(AIError::UnsupportedContent);
+                }
+                
                 result.vendor_data.thinking_blocks.push((**thinking).clone());
                 // Add thinking content to text for providers that don't support thinking
                 result.text_parts.push(format!("[THINKING] {}", thinking.thinking));
             },
 
-            // Image/Document blocks: preserve for provider-specific egress + add placeholders
-            types::RequestContentBlock::Image(_) | types::RequestContentBlock::Document(_) => {
-                result.vendor_data.bedrock_content_blocks.push(block.clone());
-                
-                // Add descriptive placeholder for text-only providers
-                let placeholder = match block {
-                    types::RequestContentBlock::Image(_) => "[IMAGE_ATTACHMENT]".to_string(),
-                    types::RequestContentBlock::Document(doc) => {
-                        format!("[DOCUMENT: {}]", doc.title.as_deref().unwrap_or("Untitled"))
-                    },
-                    _ => unreachable!(),
-                };
-                result.text_parts.push(placeholder);
+            // Image blocks: standard feature, always allowed
+            types::RequestContentBlock::Image(_) => {
+                // Store in vendor data for lossless reconstruction
+                result.vendor_data.anthropic_content_blocks.push(block.clone());
+                // Add descriptive fallback for text-only providers
+                result.text_parts.push("[IMAGE_ATTACHMENT]".to_string());
             },
 
-            // Search result blocks: preserve + extract searchable content
+            // Document blocks: EXPERIMENTAL - gate behind beta header
+            types::RequestContentBlock::Document(doc) => {
+                // Check if document blocks are enabled via anthropic-beta header
+                if !beta_features.iter().any(|f| f.contains("document") || f.contains("experimental")) {
+                    return Err(AIError::UnsupportedContent);
+                }
+
+                // Store in vendor data for lossless reconstruction
+                result.vendor_data.anthropic_content_blocks.push(block.clone());
+                // Add descriptive fallback for text-only providers
+                result.text_parts.push(format!("[DOCUMENT: {}]", doc.title.as_deref().unwrap_or("Untitled")));
+            },
+
+            // Search result blocks: EXPERIMENTAL - gate behind beta header
             types::RequestContentBlock::SearchResult(search) => {
+                // Check if search result blocks are enabled via anthropic-beta header
+                if !beta_features.iter().any(|f| f.contains("search") || f.contains("experimental")) {
+                    return Err(AIError::UnsupportedContent);
+                }
+
                 result.vendor_data.search_results.push((**search).clone());
                 
                 // Extract and add searchable content to main text
@@ -1338,11 +1359,13 @@ pub mod ingress {
         }
     }
 
-    /// Build Universal messages array with system message first
+    /// Build Universal messages array with system message first and collect vendor data
     fn build_universal_messages(
-        messages_req: &types::MessagesRequest
-    ) -> Result<Vec<universal::RequestMessage>, AIError> {
+        messages_req: &types::MessagesRequest,
+        beta_features: &[String],
+    ) -> Result<(Vec<universal::RequestMessage>, VendorData), AIError> {
         let mut universal_messages = Vec::new();
+        let mut collected_vendor_data = VendorData::default();
         
         // 1. Add system message first (if present)
         if let Some(system) = &messages_req.system {
@@ -1351,12 +1374,18 @@ pub mod ingress {
             }
         }
         
-        // 2. Add conversation messages
+        // 2. Add conversation messages and collect vendor data
         for msg in &messages_req.messages {
-            universal_messages.push(convert_input_message(msg)?);
+            let (universal_msg, msg_vendor_data) = convert_input_message_with_vendor_data(msg, beta_features)?;
+            universal_messages.push(universal_msg);
+            
+            // Merge vendor data from this message
+            collected_vendor_data.anthropic_content_blocks.extend(msg_vendor_data.anthropic_content_blocks);
+            collected_vendor_data.thinking_blocks.extend(msg_vendor_data.thinking_blocks);
+            collected_vendor_data.search_results.extend(msg_vendor_data.search_results);
         }
         
-        Ok(universal_messages)
+        Ok((universal_messages, collected_vendor_data))
     }
 
     pub fn to_universal(
@@ -1372,10 +1401,38 @@ pub mod ingress {
         }
         
         // Extract vendor-specific headers for Anthropic provider
-        let vendor_data = build_vendor_data(headers, "anthropic");
+        let mut vendor_data = build_vendor_data(headers, "anthropic");
         
-        // Build messages array with system message first
-        let messages = build_universal_messages(m)?;
+        // Extract beta features for experimental content gating
+        let beta_features = extract_beta_features(headers);
+        
+        // Build messages array and collect vendor data from content blocks
+        let (messages, content_vendor_data) = build_universal_messages(m, &beta_features)?;
+        
+        // Merge content vendor data into header vendor data for lossless preservation
+        if !content_vendor_data.anthropic_content_blocks.is_empty() 
+           || !content_vendor_data.thinking_blocks.is_empty() 
+           || !content_vendor_data.search_results.is_empty() {
+            
+            let vendor_map = vendor_data.get_or_insert_with(HashMap::new);
+            let anthropic_data = vendor_map.entry("anthropic".to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            
+            if !content_vendor_data.anthropic_content_blocks.is_empty() {
+                anthropic_data["content_blocks"] = serde_json::to_value(&content_vendor_data.anthropic_content_blocks)
+                    .unwrap_or_else(|_| serde_json::json!([]));
+            }
+            
+            if !content_vendor_data.thinking_blocks.is_empty() {
+                anthropic_data["thinking_blocks"] = serde_json::to_value(&content_vendor_data.thinking_blocks)
+                    .unwrap_or_else(|_| serde_json::json!([]));
+            }
+            
+            if !content_vendor_data.search_results.is_empty() {
+                anthropic_data["search_results"] = serde_json::to_value(&content_vendor_data.search_results)
+                    .unwrap_or_else(|_| serde_json::json!([]));
+            }
+        }
         
         // Ensure we have at least one message
         if messages.is_empty() {
