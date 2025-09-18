@@ -9,6 +9,7 @@ use headers::{ContentEncoding, HeaderMapExt};
 use itertools::Itertools;
 pub use policy::Policy;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use tiktoken_rs::CoreBPE;
 use tiktoken_rs::tokenizer::{Tokenizer, get_tokenizer};
 
@@ -126,6 +127,26 @@ pub enum AIProvider {
 
 trait Provider {
 	const NAME: Strng;
+}
+
+/// Backend adapter trait for Universal ⇄ Provider-specific format conversion.
+/// This trait enables clean separation between Universal format processing and provider-specific APIs.
+pub trait BackendAdapter {
+	/// Provider-specific request type (e.g., bedrock::ConverseRequest)
+	type BReq: Send;
+	/// Provider-specific response type (e.g., bedrock::ConverseResponse)  
+	type BResp: Send;
+	/// Provider-specific streaming event type (e.g., bedrock::ConverseStreamOutput)
+	type BStream: Send;
+
+	/// Convert Universal request to provider-specific request format
+	fn to_backend(&self, ureq: &universal::UniversalRequest) -> Result<Self::BReq, AIError>;
+	
+	/// Convert provider-specific response to Universal message format
+	fn from_backend(&self, bresp: Self::BResp, model_id: &str) -> Result<universal::UniversalMessage, AIError>;
+	
+	/// Convert provider-specific streaming events to Universal frames
+	fn stream_map(&mut self, ev: Self::BStream) -> Result<Vec<universal::UFrame>, AIError>;
 }
 
 #[derive(Debug, Clone)]
@@ -369,7 +390,12 @@ impl AIProvider {
 			AIProvider::Gemini(p) => serde_json::to_vec(&p.process_request(req).await?),
 			AIProvider::Vertex(p) => serde_json::to_vec(&p.process_request(req).await?),
 			AIProvider::Anthropic(p) => serde_json::to_vec(&p.process_request(req).await?),
-			AIProvider::Bedrock(p) => serde_json::to_vec(&p.process_request(req).await?),
+			AIProvider::Bedrock(p) => {
+				// Use BackendAdapter path for Bedrock
+				let universal_req = universal::convert_to_universal_request(&req);
+				let bedrock_req = p.to_backend(&universal_req)?;
+				serde_json::to_vec(&bedrock_req)
+			},
 		};
 		let body = resp_json.map_err(AIError::RequestMarshal)?;
 		let resp = Body::from(body);
@@ -505,8 +531,11 @@ impl AIProvider {
 				AIProvider::Vertex(p) => p.process_response(bytes).await?,
 				AIProvider::Anthropic(p) => p.process_response(bytes).await?,
 				AIProvider::Bedrock(p) => {
-					p.process_response(req.request_model.as_str(), bytes)
-						.await?
+					// Use BackendAdapter path for Bedrock
+					let bedrock_resp: bedrock::types::ConverseResponse = 
+						serde_json::from_slice(bytes).map_err(AIError::ResponseParsing)?;
+					let universal_msg = p.from_backend(bedrock_resp, req.request_model.as_str())?;
+					universal::convert_from_universal_message(universal_msg)
 				},
 			};
 			Ok(Ok(openai_response))

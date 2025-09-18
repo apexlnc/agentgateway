@@ -12,7 +12,7 @@ use crate::llm::bedrock::types::{
 	ContentBlock, ContentBlockDelta, ConverseErrorResponse, ConverseRequest, ConverseResponse,
 	ConverseStreamOutput, StopReason,
 };
-use crate::llm::{AIError, LLMResponse, universal};
+use crate::llm::{AIError, BackendAdapter, LLMResponse, universal};
 use crate::telemetry::log::AsyncLog;
 use crate::*;
 
@@ -36,6 +36,206 @@ pub struct Provider {
 
 impl super::Provider for Provider {
 	const NAME: Strng = strng::literal!("bedrock");
+}
+
+// Implement BackendAdapter trait for Provider
+impl BackendAdapter for Provider {
+	type BReq = ConverseRequest;
+	type BResp = ConverseResponse; 
+	type BStream = ConverseStreamOutput;
+
+	/// Convert Universal request to Bedrock ConverseRequest format
+	fn to_backend(&self, ureq: &universal::UniversalRequest) -> Result<Self::BReq, AIError> {
+		// Use provider's model if configured, otherwise use request model
+		let model = if let Some(provider_model) = &self.model {
+			provider_model.to_string()
+		} else {
+			ureq.caps.model.clone()
+		};
+		
+		Ok(translate_universal_request(ureq, self, &model))
+	}
+	
+	/// Convert Bedrock ConverseResponse to Universal message format
+	fn from_backend(&self, bresp: Self::BResp, model_id: &str) -> Result<universal::UniversalMessage, AIError> {
+		let model = self.model.as_deref().unwrap_or(model_id);
+		
+		// Get the output content from the response
+		let output = bresp.output.ok_or(AIError::IncompleteResponse)?;
+		
+		// Extract the message from the output
+		let message = match output {
+			types::ConverseOutput::Message(msg) => msg,
+			types::ConverseOutput::Unknown => return Err(AIError::IncompleteResponse),
+		};
+		
+		// Convert Bedrock content blocks to Universal blocks
+		let mut blocks = Vec::new();
+		for block in &message.content {
+			match block {
+				ContentBlock::Text(text) => {
+					blocks.push(universal::ContentBlock::Text { text: text.clone() });
+				},
+				ContentBlock::Image { source, media_type, data } => {
+					// Convert Bedrock image to Universal with DataRef
+					let data_ref = if source.starts_with("data:") {
+						// Base64 data URI
+						universal::DataRef::Base64(data.clone())
+					} else {
+						// External URI
+						universal::DataRef::Uri(source.clone())
+					};
+					blocks.push(universal::ContentBlock::Image {
+						mime: media_type.clone(),
+						data: data_ref,
+					});
+				},
+				ContentBlock::ToolResult(tr) => {
+					// Convert Bedrock ToolResult to lossless Universal format
+					let content = tr.content
+						.iter()
+						.map(|content_block| match content_block {
+							types::ToolResultContentBlock::Text(text) => {
+								universal::ContentBlock::Text { text: text.clone() }
+							}
+						})
+						.collect();
+					
+					let status = tr.status.as_ref().map(|s| match s {
+						types::ToolResultStatus::Success => universal::ToolResultStatus::Success,
+						types::ToolResultStatus::Error => universal::ToolResultStatus::Error,
+					});
+
+					blocks.push(universal::ContentBlock::ToolResult {
+						tool_use_id: tr.tool_use_id.clone(),
+						content,
+						status,
+					});
+				},
+				ContentBlock::ToolUse(tu) => {
+					blocks.push(universal::ContentBlock::ToolUse {
+						id: tu.tool_use_id.clone(),
+						name: tu.name.clone(),
+						input: tu.input.clone(),
+					});
+				},
+			}
+		}
+		
+		// Map Bedrock stop reason to Universal stop reason
+		let stop_reason = match bresp.stop_reason {
+			StopReason::EndTurn => universal::StopReason::EndTurn,
+			StopReason::MaxTokens => universal::StopReason::MaxTokens,
+			StopReason::StopSequence => universal::StopReason::StopSequence,
+			StopReason::ContentFiltered => universal::StopReason::ContentFilter,
+			StopReason::GuardrailIntervened => universal::StopReason::ContentFilter,
+			StopReason::ToolUse => universal::StopReason::ToolUse,
+		};
+		
+		// Convert usage from Bedrock format to Universal format
+		let usage = bresp.usage.map(|token_usage| universal::Usage {
+			prompt_tokens: token_usage.input_tokens as u32,
+			completion_tokens: token_usage.output_tokens as u32,
+			total_tokens: token_usage.total_tokens as u32,
+			prompt_tokens_details: None,
+			completion_tokens_details: None,
+		});
+		
+		// Generate a unique ID since it's not provided in the response
+		let id = format!("bedrock-{}", chrono::Utc::now().timestamp_millis());
+		
+		Ok(universal::UniversalMessage {
+			id,
+			model: model.to_string(),
+			role: universal::MessageRole::Assistant,
+			blocks,
+			usage,
+			stop_reason: Some(stop_reason),
+			vendor: None, // TODO: Add vendor-specific data if needed
+		})
+	}
+	
+	/// Convert Bedrock streaming events to Universal frames
+	fn stream_map(&mut self, ev: Self::BStream) -> Result<Vec<universal::UFrame>, AIError> {
+		let mut frames = Vec::new();
+		
+		match ev {
+			ConverseStreamOutput::MessageStart(start) => {
+				let role = match start.role {
+					types::Role::Assistant => universal::MessageRole::Assistant,
+					types::Role::User => universal::MessageRole::User,
+				};
+				// Generate a temporary ID for streaming
+				let id = format!("bedrock-stream-{}", chrono::Utc::now().timestamp_millis());
+				frames.push(universal::UFrame::MessageStart {
+					id,
+					model: self.model.as_deref().unwrap_or("unknown").to_string(),
+					role,
+				});
+			},
+			ConverseStreamOutput::ContentBlockStart(start) => {
+				if let Some(ref start_info) = start.start {
+					match start_info {
+						types::ContentBlockStart::ToolUse(tool_start) => {
+							// Emit ToolUseStart frame for tool use
+							frames.push(universal::UFrame::ToolUseStart {
+								idx: start.content_block_index as usize,
+								id: tool_start.tool_use_id.clone(),
+								name: tool_start.name.clone(),
+							});
+						}
+					}
+				} else {
+					// Default to text block if no start info
+					frames.push(universal::UFrame::BlockStart {
+						idx: start.content_block_index as usize,
+						kind: universal::BlockKind::Text,
+					});
+				}
+			},
+			ConverseStreamOutput::ContentBlockDelta(delta) => {
+				if let Some(ContentBlockDelta::Text(text)) = delta.delta {
+					frames.push(universal::UFrame::Delta {
+						idx: delta.content_block_index as usize,
+						text,
+					});
+				}
+				// TODO: Handle ToolUse deltas when they're added to ContentBlockDelta
+			},
+			ConverseStreamOutput::ContentBlockStop(stop) => {
+				frames.push(universal::UFrame::BlockStop {
+					idx: stop.content_block_index as usize,
+				});
+			},
+			ConverseStreamOutput::MessageStop(stop) => {
+				let stop_reason = match stop.stop_reason {
+					StopReason::EndTurn => universal::StopReason::EndTurn,
+					StopReason::MaxTokens => universal::StopReason::MaxTokens,
+					StopReason::StopSequence => universal::StopReason::StopSequence,
+					StopReason::ContentFiltered => universal::StopReason::ContentFilter,
+					StopReason::GuardrailIntervened => universal::StopReason::ContentFilter,
+					StopReason::ToolUse => universal::StopReason::ToolUse,
+				};
+				frames.push(universal::UFrame::MessageStop { stop_reason });
+			},
+			ConverseStreamOutput::Metadata(metadata) => {
+				if let Some(usage) = metadata.usage {
+					// Emit usage as MessageDelta before MessageStop (Anthropic requirement)
+					frames.push(universal::UFrame::MessageDelta {
+						usage: universal::Usage {
+							prompt_tokens: usage.input_tokens as u32,
+							completion_tokens: usage.output_tokens as u32,
+							total_tokens: usage.total_tokens as u32,
+							prompt_tokens_details: None,
+							completion_tokens_details: None,
+						},
+					});
+				}
+			},
+		}
+		
+		Ok(frames)
+	}
 }
 
 impl Provider {
@@ -353,6 +553,155 @@ fn translate_stop_reason(resp: &StopReason) -> FinishReason {
 	}
 }
 
+pub(super) fn translate_universal_request(ureq: &universal::UniversalRequest, provider: &Provider, model: &str) -> ConverseRequest {
+	// Convert system blocks to Bedrock system content blocks
+	let system = if ureq.system.is_empty() {
+		None
+	} else {
+		let system_text = ureq.system
+			.iter()
+			.filter_map(|block| match block {
+				universal::ContentBlock::Text { text } => Some(text.clone()),
+				_ => None, // Skip non-text system blocks for now
+			})
+			.collect::<Vec<String>>()
+			.join("\n");
+		
+		if system_text.is_empty() {
+			None
+		} else {
+			Some(vec![types::SystemContentBlock::Text { text: system_text }])
+		}
+	};
+
+	// Convert Universal messages to Bedrock format
+	let messages = ureq.messages
+		.iter()
+		.filter_map(|msg| {
+			let role = match msg.role {
+				universal::MessageRole::Assistant => types::Role::Assistant,
+				universal::MessageRole::User => types::Role::User,
+				universal::MessageRole::System => return None, // Skip system (handled above)
+				universal::MessageRole::Tool => types::Role::User, // Tool messages become user
+			};
+
+			let content: Vec<ContentBlock> = msg.blocks
+				.iter()
+				.filter_map(|block| match block {
+					universal::ContentBlock::Text { text } => {
+						Some(ContentBlock::Text(text.clone()))
+					},
+					universal::ContentBlock::ToolUse { id, name, input } => {
+						Some(ContentBlock::ToolUse(types::ToolUseBlock {
+							tool_use_id: id.clone(),
+							name: name.clone(),
+							input: input.clone(),
+						}))
+					},
+					universal::ContentBlock::ToolResult { tool_use_id, content, status } => {
+						// Convert array of ContentBlocks to ToolResultContentBlocks
+						let tool_content = content
+							.iter()
+							.filter_map(|block| match block {
+								universal::ContentBlock::Text { text } => {
+									Some(types::ToolResultContentBlock::Text(text.clone()))
+								},
+								_ => None, // Only text supported in tool results for now
+							})
+							.collect();
+						
+						let bedrock_status = status.as_ref().map(|s| match s {
+							universal::ToolResultStatus::Success => types::ToolResultStatus::Success,
+							universal::ToolResultStatus::Error => types::ToolResultStatus::Error,
+						});
+
+						Some(ContentBlock::ToolResult(types::ToolResultBlock {
+							tool_use_id: tool_use_id.clone(),
+							content: tool_content,
+							status: bedrock_status,
+						}))
+					},
+					universal::ContentBlock::Image { .. } => {
+						// TODO: Handle images when needed
+						None
+					},
+					universal::ContentBlock::Document { .. } => {
+						// TODO: Handle documents when needed  
+						None
+					},
+					universal::ContentBlock::Thinking { .. } => {
+						// Skip thinking blocks (Anthropic-specific)
+						None
+					},
+				})
+				.collect();
+
+			if !content.is_empty() {
+				Some(types::Message { role, content })
+			} else {
+				None
+			}
+		})
+		.collect();
+
+	// Build inference configuration from caps
+	let inference_config = types::InferenceConfiguration {
+		max_tokens: ureq.caps.max_tokens as usize,
+		temperature: ureq.caps.temperature,
+		top_p: ureq.caps.top_p,
+		stop_sequences: ureq.caps.stop_sequences.clone().unwrap_or_default(),
+		anthropic_version: None, // Not used for Bedrock
+	};
+
+	// Build guardrail configuration if specified
+	let guardrail_config = if let (Some(identifier), Some(version)) =
+		(&provider.guardrail_identifier, &provider.guardrail_version)
+	{
+		Some(types::GuardrailConfiguration {
+			guardrail_identifier: identifier.to_string(),
+			guardrail_version: version.to_string(),
+			trace: Some("enabled".to_string()),
+		})
+	} else {
+		None
+	};
+
+	// Convert tools to Bedrock format
+	let tool_config = ureq.tools.as_ref().map(|tools| {
+		let bedrock_tools = tools
+			.iter()
+			.map(|tool| {
+				let tool_spec = types::ToolSpecification {
+					name: tool.name.clone(),
+					description: tool.description.clone(),
+					input_schema: Some(types::ToolInputSchema::Json(tool.input_schema.clone())),
+				};
+				types::Tool::ToolSpec(tool_spec)
+			})
+			.collect();
+
+		types::ToolConfiguration {
+			tools: bedrock_tools,
+			tool_choice: None, // TODO: Add tool choice support
+		}
+	});
+
+	ConverseRequest {
+		model_id: model.to_string(),
+		messages,
+		system,
+		inference_config: Some(inference_config),
+		tool_config,
+		guardrail_config,
+		additional_model_request_fields: None,
+		prompt_variables: None,
+		additional_model_response_field_paths: None,
+		request_metadata: None, // TODO: Extract from vendor data if needed
+		performance_config: None,
+	}
+}
+
+// Keep old function for backward compatibility
 pub(super) fn translate_request(req: universal::Request, provider: &Provider) -> ConverseRequest {
 	// Bedrock has system prompts in a separate field. Join them
 	let system = req
@@ -533,7 +882,7 @@ pub(super) mod types {
 		pub content: Vec<ContentBlock>,
 	}
 
-	#[derive(Clone, Serialize, Debug, PartialEq)]
+	#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 	pub struct InferenceConfiguration {
 		/// The maximum number of tokens to generate before stopping.
 		#[serde(rename = "maxTokens")]
@@ -552,7 +901,7 @@ pub(super) mod types {
 		pub anthropic_version: Option<String>,
 	}
 
-	#[derive(Clone, Serialize, Debug)]
+	#[derive(Clone, Serialize, Deserialize, Debug)]
 	pub struct ConverseRequest {
 		/// Specifies the model or throughput with which to run inference.
 		#[serde(rename = "modelId")]
@@ -594,7 +943,7 @@ pub(super) mod types {
 		pub performance_config: Option<PerformanceConfiguration>,
 	}
 
-	#[derive(Clone, Serialize, Debug)]
+	#[derive(Clone, Serialize, Deserialize, Debug)]
 	pub struct ToolConfiguration {
 		/// An array of tools that you want to pass to a model.
 		pub tools: Vec<Tool>,
@@ -602,7 +951,7 @@ pub(super) mod types {
 		pub tool_choice: Option<ToolChoice>,
 	}
 
-	#[derive(Clone, std::fmt::Debug, ::serde::Serialize)]
+	#[derive(Clone, std::fmt::Debug, ::serde::Serialize, ::serde::Deserialize)]
 	#[serde(rename_all = "camelCase")]
 	pub enum Tool {
 		/// CachePoint to include in the tool configuration.
@@ -634,7 +983,7 @@ pub(super) mod types {
 		Default,
 	}
 
-	#[derive(Clone, Serialize, Debug, PartialEq)]
+	#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 	pub struct GuardrailConfiguration {
 		/// The unique identifier of the guardrail
 		#[serde(rename = "guardrailIdentifier")]
@@ -647,7 +996,7 @@ pub(super) mod types {
 		pub trace: Option<String>,
 	}
 
-	#[derive(Clone, Serialize, Debug, PartialEq)]
+	#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 	pub struct PromptVariableValues {
 		// TODO: Implement prompt variable values
 	}
@@ -738,7 +1087,7 @@ pub(super) mod types {
 		ToolUse,
 	}
 
-	#[derive(Clone, Debug, Serialize)]
+	#[derive(Clone, Debug, Serialize, Deserialize)]
 	#[serde(rename_all = "camelCase")]
 	pub enum ToolChoice {
 		/// The model must request at least one tool (no text is generated).
@@ -758,7 +1107,7 @@ pub(super) mod types {
 		Unknown,
 	}
 
-	#[derive(Clone, std::fmt::Debug, ::serde::Serialize)]
+	#[derive(Clone, std::fmt::Debug, ::serde::Serialize, ::serde::Deserialize)]
 	#[serde(rename_all = "camelCase")]
 	pub struct ToolSpecification {
 		/// The name for the tool.
@@ -769,7 +1118,7 @@ pub(super) mod types {
 		pub input_schema: Option<ToolInputSchema>,
 	}
 
-	#[derive(Clone, Debug, Serialize)]
+	#[derive(Clone, Debug, Serialize, Deserialize)]
 	#[serde(rename_all = "camelCase")]
 	pub enum ToolInputSchema {
 		Json(serde_json::Value),

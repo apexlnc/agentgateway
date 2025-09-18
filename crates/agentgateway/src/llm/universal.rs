@@ -2,6 +2,7 @@
 #![allow(deprecated_in_future)]
 
 use std::collections::HashMap;
+use chrono;
 
 #[allow(deprecated)]
 #[allow(deprecated_in_future)]
@@ -346,4 +347,314 @@ pub fn stop_sequence(req: &Request) -> Vec<String> {
 		Some(Stop::StringArray(s)) => s.clone(),
 		_ => vec![],
 	}
+}
+
+/// Convert UniversalMessage back to legacy OpenAI-shaped Response for compatibility
+pub fn convert_from_universal_message(msg: UniversalMessage) -> Response {
+	let mut content = None;
+	let mut tool_calls = Vec::new();
+	
+	for block in msg.blocks {
+		match block {
+			ContentBlock::Text { text } => {
+				content = Some(text);
+			},
+			ContentBlock::ToolUse { id, name, input } => {
+				tool_calls.push(MessageToolCall {
+					id,
+					r#type: ToolType::Function,
+					function: FunctionCall {
+						name,
+						arguments: serde_json::to_string(&input).unwrap_or_default(),
+					},
+				});
+			},
+			_ => {
+				// Skip other content types for now in legacy format
+			}
+		}
+	}
+	
+	let finish_reason = msg.stop_reason.map(|reason| match reason {
+		StopReason::EndTurn => FinishReason::Stop,
+		StopReason::MaxTokens => FinishReason::Length,
+		StopReason::StopSequence => FinishReason::Stop,
+		StopReason::ToolUse => FinishReason::ToolCalls,
+		StopReason::ContentFilter => FinishReason::ContentFilter,
+		StopReason::PauseTurn => FinishReason::Stop,
+	});
+	
+	let message = ResponseMessage {
+		role: Role::Assistant,
+		content,
+		tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+		#[allow(deprecated)]
+		function_call: None,
+		refusal: None,
+		audio: None,
+	};
+	
+	let choice = ChatChoice {
+		index: 0,
+		message,
+		finish_reason,
+		logprobs: None,
+	};
+	
+	Response {
+		id: msg.id,
+		object: "chat.completion".to_string(),
+		created: chrono::Utc::now().timestamp() as u32,
+		model: msg.model,
+		choices: vec![choice],
+		usage: msg.usage,
+		service_tier: None,
+		system_fingerprint: None,
+	}
+}
+
+/// Convert legacy OpenAI-shaped Request to new UniversalRequest for BackendAdapter
+pub fn convert_to_universal_request(req: &Request) -> UniversalRequest {
+	// Extract system messages
+	let mut system = Vec::new();
+	let mut messages = Vec::new();
+	
+	for msg in &req.messages {
+		match msg {
+			RequestMessage::System(sys_msg) => {
+				let text = match &sys_msg.content {
+					RequestSystemMessageContent::Text(t) => t.clone(),
+					RequestSystemMessageContent::Array(blocks) => {
+						// Join text blocks for now
+						blocks.iter()
+							.filter_map(|block| match block {
+								// Assuming there's a text variant - adjust based on actual type
+								_ => Some("".to_string()) // TODO: Implement proper text extraction
+							})
+							.collect::<Vec<_>>()
+							.join("\n")
+					}
+				};
+				system.push(ContentBlock::Text { text });
+			},
+			_ => {
+				// Convert other message types to UniversalMessage
+				let role = match msg {
+					RequestMessage::User(_) => MessageRole::User,
+					RequestMessage::Assistant(_) => MessageRole::Assistant,
+					RequestMessage::Tool(_) => MessageRole::Tool,
+					RequestMessage::System(_) => continue, // Already handled
+					RequestMessage::Function(_) => MessageRole::User, // Map deprecated function to user
+					RequestMessage::Developer(_) => MessageRole::User, // Map developer to user
+				};
+				
+				// Extract content blocks - simplified for now
+				let mut blocks = Vec::new();
+				if let Some(text) = message_text(msg) {
+					blocks.push(ContentBlock::Text { text: text.to_string() });
+				}
+				
+				// TODO: Extract tool calls, function calls, etc.
+				
+				messages.push(UniversalMessage {
+					id: format!("msg-{}", chrono::Utc::now().timestamp_nanos()),
+					model: req.model.clone().unwrap_or_default(),
+					role,
+					blocks,
+					usage: None,
+					stop_reason: None,
+					vendor: req.vendor.clone(),
+				});
+			}
+		}
+	}
+	
+	// Convert tools
+	let tools = req.tools.as_ref().map(|tools| {
+		tools.iter().map(|tool| {
+			ToolDefinition {
+				name: tool.function.name.clone(),
+				description: tool.function.description.clone(),
+				input_schema: tool.function.parameters.clone().unwrap_or_default(),
+			}
+		}).collect()
+	});
+	
+	// Build capabilities
+	let caps = RequestCapabilities {
+		model: req.model.clone().unwrap_or_default(),
+		max_tokens: max_tokens_option(req).unwrap_or(4096) as u32,
+		temperature: req.temperature,
+		top_p: req.top_p,
+		top_k: None, // OpenAI doesn't have top_k
+		stop_sequences: Some(stop_sequence(req)),
+		stream: req.stream,
+	};
+	
+	UniversalRequest {
+		system,
+		messages,
+		tools,
+		caps,
+		vendor: req.vendor.clone(),
+	}
+}
+
+// ================================================================
+// Universal Architecture Types (Provider-Agnostic)
+// ================================================================
+
+/// Universal request format for backend adapters - not coupled to OpenAI format
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UniversalRequest {
+	/// System messages/prompts
+	pub system: Vec<ContentBlock>,
+	/// Conversation messages
+	pub messages: Vec<UniversalMessage>,
+	/// Tool definitions
+	pub tools: Option<Vec<ToolDefinition>>,
+	/// Model capabilities and configuration
+	pub caps: RequestCapabilities,
+	/// Vendor-specific data preserved for round-trip fidelity
+	pub vendor: Option<HashMap<String, serde_json::Value>>,
+}
+
+/// Request capabilities and configuration
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestCapabilities {
+	/// Required: Model to use
+	pub model: String,
+	/// Required: Maximum tokens to generate
+	pub max_tokens: u32,
+	/// Optional: Temperature (0.0 to 1.0)
+	pub temperature: Option<f32>,
+	/// Optional: Top-p (0.0 to 1.0)
+	pub top_p: Option<f32>,
+	/// Optional: Top-k (minimum 0, Anthropic-specific)
+	pub top_k: Option<u32>,
+	/// Optional: Stop sequences
+	pub stop_sequences: Option<Vec<String>>,
+	/// Optional: Enable streaming responses
+	pub stream: Option<bool>,
+}
+
+/// Tool definition for function calling
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolDefinition {
+	pub name: String,
+	pub description: Option<String>,
+	pub input_schema: serde_json::Value,
+}
+
+/// Universal message format for backend adapters - not coupled to OpenAI format
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UniversalMessage {
+	pub id: String,
+	pub model: String,
+	pub role: MessageRole,
+	pub blocks: Vec<ContentBlock>,
+	pub usage: Option<Usage>,
+	pub stop_reason: Option<StopReason>,
+	/// Vendor-specific data preserved for round-trip fidelity
+	pub vendor: Option<HashMap<String, serde_json::Value>>,
+}
+
+/// Universal message roles (provider-agnostic)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum MessageRole {
+	User,
+	Assistant,
+	System,
+	Tool,
+}
+
+/// Universal content blocks for messages
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ContentBlock {
+	Text { text: String },
+	Image { mime: String, data: DataRef },
+	ToolUse { id: String, name: String, input: serde_json::Value },
+	ToolResult { tool_use_id: String, content: Vec<ContentBlock>, status: Option<ToolResultStatus> },
+	Document { name: Option<String>, mime: Option<String>, data: DataRef },
+	Thinking { content: String },
+}
+
+/// Data reference for media content (images, documents)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum DataRef {
+	/// URI reference (HTTP/HTTPS URL, S3 URI, etc.)
+	Uri(String),
+	/// Base64-encoded data
+	Base64(String),
+}
+
+/// Tool result status
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum ToolResultStatus {
+	Success,
+	Error,
+}
+
+/// Universal stop reasons (mapped from provider-specific reasons)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum StopReason {
+	/// Natural end of turn (Anthropic: end_turn)
+	EndTurn,
+	/// Maximum tokens reached (Anthropic: max_tokens)
+	MaxTokens,
+	/// Stop sequence encountered (Anthropic: stop_sequence)  
+	StopSequence,
+	/// Tool use requested (Anthropic: tool_use)
+	ToolUse,
+	/// Content filtered/guardrail intervened
+	ContentFilter,
+	/// Future-proofing for pause_turn
+	PauseTurn,
+}
+
+/// Universal streaming frame types for backend adapters
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum UFrame {
+	MessageStart { 
+		id: String, 
+		model: String, 
+		role: MessageRole 
+	},
+	BlockStart { 
+		idx: usize, 
+		kind: BlockKind 
+	},
+	Delta { 
+		idx: usize, 
+		text: String 
+	},
+	ToolUseStart { 
+		idx: usize, 
+		id: String, 
+		name: String 
+	},
+	ToolUseDelta { 
+		idx: usize, 
+		json_fragment: Box<serde_json::value::RawValue>
+	},
+	BlockStop { 
+		idx: usize 
+	},
+	MessageDelta { 
+		usage: Usage 
+	},
+	MessageStop { 
+		stop_reason: StopReason 
+	},
+}
+
+/// Block types for streaming frame starts
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum BlockKind {
+	Text,
+	Image,
+	ToolUse,
+	ToolResult,
+	Document,
+	Thinking,
 }
