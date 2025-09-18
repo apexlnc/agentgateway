@@ -911,100 +911,28 @@ async fn make_backend_call(
 			RouteType::Messages => {
 				// Read and parse Messages API request body
 				let body = std::mem::replace(req.body_mut(), http::Body::empty());
-				let body_bytes = match axum::body::to_bytes(body, 2_097_152).await {
-					Ok(bytes) => bytes,
-					Err(e) => {
-						return Ok(Box::pin(async move {
-							Ok(::http::Response::builder()
-								.status(::http::StatusCode::BAD_REQUEST)
-								.header(::http::header::CONTENT_TYPE, "application/json")
-								.body(http::Body::from(format!(
-									"{{\"error\":\"Failed to read request body: {}\"}}", e
-								)))
-								.expect("Failed to build response"))
-						}));
-					}
-				};
+				let body_bytes = axum::body::to_bytes(body, 2_097_152).await
+					.map_err(|e| ProxyError::ProcessingString(format!("Failed to read request body: {}", e)))?;
 
-				let messages_request: messages::MessagesRequest = match serde_json::from_slice(&body_bytes) {
-					Ok(req) => req,
-					Err(e) => {
-						return Ok(Box::pin(async move {
-							Ok(::http::Response::builder()
-								.status(::http::StatusCode::BAD_REQUEST)
-								.header(::http::header::CONTENT_TYPE, "application/json")
-								.body(http::Body::from(format!(
-									"{{\"error\":\"Invalid JSON in request body: {}\"}}", e
-								)))
-								.expect("Failed to build response"))
-						}));
-					}
-				};
+				let messages_request: messages::MessagesRequest = serde_json::from_slice(&body_bytes)
+					.map_err(|e| ProxyError::ProcessingString(format!("Invalid JSON in request body: {}", e)))?;
 
 				// Convert Messages to Universal format
-				let universal_request = match messages::ingress::to_universal(&messages_request, req.headers()) {
-					Ok(universal_req) => universal_req,
-					Err(e) => {
-						return Ok(Box::pin(async move {
-							Ok(::http::Response::builder()
-								.status(::http::StatusCode::BAD_REQUEST)
-								.header(::http::header::CONTENT_TYPE, "application/json")
-								.body(http::Body::from(format!(
-									"{{\"error\":\"Request validation failed: {}\"}}", e
-								)))
-								.expect("Failed to build response"))
-						}));
-					}
-				};
+				let universal_request = messages::ingress::to_universal(&messages_request, req.headers())
+					.map_err(|e| ProxyError::ProcessingString(format!("Request validation failed: {}", e)))?;
 
-				// Convert Universal to provider format
-				let provider_request_body = match llm.provider {
-					llm::AIProvider::Bedrock(ref bedrock_provider) => {
+				// Convert Universal to provider format using BackendAdapter
+				let provider_request_body = match &llm.provider {
+					llm::AIProvider::Bedrock(bedrock_provider) => {
 						let universal_req = crate::llm::universal::convert_to_universal_request(&universal_request);
-						// Convert to Bedrock format
-						match bedrock_provider.to_backend(&universal_req) {
-							Ok(bedrock_req) => match serde_json::to_vec(&bedrock_req) {
-								Ok(json_bytes) => json_bytes,
-								Err(e) => {
-									return Ok(Box::pin(async move {
-										Ok(::http::Response::builder()
-											.status(::http::StatusCode::INTERNAL_SERVER_ERROR)
-											.header(::http::header::CONTENT_TYPE, "application/json")
-											.body(http::Body::from(format!(
-												"{{\"error\":\"Failed to serialize Bedrock request: {}\"}}", e
-											)))
-											.expect("Failed to build response"))
-									}));
-								}
-							},
-							Err(e) => {
-								return Ok(Box::pin(async move {
-									Ok(::http::Response::builder()
-										.status(::http::StatusCode::BAD_REQUEST)
-										.header(::http::header::CONTENT_TYPE, "application/json")
-										.body(http::Body::from(format!(
-											"{{\"error\":\"Failed to convert to Bedrock format: {}\"}}", e
-										)))
-										.expect("Failed to build response"))
-								}));
-							}
-						}
+						let bedrock_req = bedrock_provider.to_backend(&universal_req)
+							.map_err(|e| ProxyError::ProcessingString(format!("Failed to convert to Bedrock format: {}", e)))?;
+						serde_json::to_vec(&bedrock_req)
+							.map_err(|e| ProxyError::ProcessingString(format!("Failed to serialize Bedrock request: {}", e)))?
 					},
 					_ => {
-						match serde_json::to_vec(&universal_request) {
-							Ok(json_bytes) => json_bytes,
-							Err(e) => {
-								return Ok(Box::pin(async move {
-									Ok(::http::Response::builder()
-										.status(::http::StatusCode::INTERNAL_SERVER_ERROR)
-										.header(::http::header::CONTENT_TYPE, "application/json")
-										.body(http::Body::from(format!(
-											"{{\"error\":\"Failed to serialize Universal request: {}\"}}", e
-										)))
-										.expect("Failed to build response"))
-								}));
-							}
-						}
+						serde_json::to_vec(&universal_request)
+							.map_err(|e| ProxyError::ProcessingString(format!("Failed to serialize Universal request: {}", e)))?
 					}
 				};
 
@@ -1046,19 +974,6 @@ async fn make_backend_call(
 				.await?;
 				log.add(|l| l.llm_request = Some(llm_request.clone()));
 				(req, response_policies, Some(llm_request))
-			},
-			RouteType::Models => {
-				return Ok(Box::pin(async move {
-					Ok(
-						::http::Response::builder()
-							.status(::http::StatusCode::NOT_IMPLEMENTED)
-							.header(::http::header::CONTENT_TYPE, "application/json")
-							.body(http::Body::from(format!(
-								"{{\"error\":\"Route '{route_type:?}' not implemented\"}}"
-							)))
-							.expect("Failed to build response"),
-					)
-				}));
 			},
 			RouteType::Passthrough => {
 				// For passthrough, we only need to setup the response so we get default TLS, hostname, etc set.
