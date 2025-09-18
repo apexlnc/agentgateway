@@ -1693,10 +1693,6 @@ pub struct ConverseErrorResponse {
 	/// Error message
 	pub message: String,
 
-	/// Error type (if available)
-	#[serde(rename = "__type")]
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub error_type: Option<String>,
 }
 
 /// Stream error event structure
@@ -1791,40 +1787,6 @@ impl InferenceConfiguration {
 			top_p: None,
 		}
 	}
-}
-
-/// Helper to create tool specification
-pub fn tool_spec(
-	name: String,
-	description: Option<String>,
-	input_schema: Option<serde_json::Value>,
-) -> Tool {
-	Tool::ToolSpec(ToolSpecification {
-		name,
-		description,
-		input_schema: input_schema.map(ToolInputSchema::Json),
-	})
-}
-
-/// Helper to create auto tool choice
-pub fn auto_tool_choice() -> ToolChoice {
-	ToolChoice::Auto(AutoToolChoice {
-		auto: serde_json::Value::Object(serde_json::Map::new()),
-	})
-}
-
-/// Helper to create any tool choice  
-pub fn any_tool_choice() -> ToolChoice {
-	ToolChoice::Any(AnyToolChoice {
-		any: serde_json::Value::Object(serde_json::Map::new()),
-	})
-}
-
-/// Helper to create specific tool choice
-pub fn tool_choice(name: String) -> ToolChoice {
-	ToolChoice::Tool(ToolChoiceSpecific {
-		tool: ToolChoiceToolSpec { name },
-	})
 }
 
 } // end types module

@@ -1099,6 +1099,9 @@ async fn make_backend_call(
 			.await
 			.map_err(ProxyError::Processing)?;
 		let mut resp = if let (Some(llm), Some(llm_request)) = (policies.llm_provider, llm_request) {
+			// Extract route type before moving llm_request
+			let route_type = llm_request.route_type;
+			
 			let mut processed_resp = llm
 				.provider
 				.process_response(
@@ -1113,7 +1116,7 @@ async fn make_backend_call(
 				.map_err(|e| ProxyError::Processing(e.into()))?;
 
 			// Convert response format based on route type
-			if llm_request.route_type == RouteType::Messages {
+			if route_type == RouteType::Messages {
 				// For Messages API, convert Universal format response to Anthropic Messages API format
 				let body = std::mem::replace(processed_resp.body_mut(), http::Body::empty());
 				if let Ok(body_bytes) = axum::body::to_bytes(body, 2_097_152).await {
