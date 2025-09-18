@@ -13,6 +13,7 @@ use crate::llm::bedrock::types::{
 	ConverseStreamOutput, StopReason,
 };
 use crate::llm::{AIError, BackendAdapter, LLMResponse, universal};
+use crate::llm::messages_streaming::AnthropicStreamBody;
 use crate::telemetry::log::AsyncLog;
 use crate::*;
 
@@ -65,8 +66,7 @@ impl BackendAdapter for Provider {
 		
 		// Extract the message from the output
 		let message = match output {
-			types::ConverseOutput::Message(msg) => msg,
-			types::ConverseOutput::Unknown => return Err(AIError::IncompleteResponse),
+			types::ConverseOutput::Message { message: msg } => msg,
 		};
 		
 		// Convert Bedrock content blocks to Universal blocks
@@ -76,17 +76,31 @@ impl BackendAdapter for Provider {
 				ContentBlock::Text(text) => {
 					blocks.push(universal::ContentBlock::Text { text: text.clone() });
 				},
-				ContentBlock::Image { source, media_type, data } => {
+				ContentBlock::Image(image_block) => {
 					// Convert Bedrock image to Universal with DataRef
-					let data_ref = if source.starts_with("data:") {
-						// Base64 data URI
-						universal::DataRef::Base64(data.clone())
-					} else {
-						// External URI
-						universal::DataRef::Uri(source.clone())
+					let (data_ref, mime) = match &image_block.source {
+						types::ImageSource::Bytes { data } => {
+							let mime = match image_block.format {
+								types::ImageFormat::Png => "image/png".to_string(),
+								types::ImageFormat::Jpeg => "image/jpeg".to_string(),
+								types::ImageFormat::Gif => "image/gif".to_string(),
+								types::ImageFormat::Webp => "image/webp".to_string(),
+							};
+							(universal::DataRef::Base64(data.clone()), mime)
+						},
+						types::ImageSource::S3Location { s3_location } => {
+							// Use the S3 URI directly
+							let mime = match image_block.format {
+								types::ImageFormat::Png => "image/png".to_string(),
+								types::ImageFormat::Jpeg => "image/jpeg".to_string(),
+								types::ImageFormat::Gif => "image/gif".to_string(),
+								types::ImageFormat::Webp => "image/webp".to_string(),
+							};
+							(universal::DataRef::Uri(s3_location.uri.clone()), mime)
+						},
 					};
 					blocks.push(universal::ContentBlock::Image {
-						mime: media_type.clone(),
+						mime,
 						data: data_ref,
 					});
 				},
@@ -95,8 +109,12 @@ impl BackendAdapter for Provider {
 					let content = tr.content
 						.iter()
 						.map(|content_block| match content_block {
-							types::ToolResultContentBlock::Text(text) => {
+							ContentBlock::Text(text) => {
 								universal::ContentBlock::Text { text: text.clone() }
+							},
+							_ => {
+								// Handle other content block types as needed
+								universal::ContentBlock::Text { text: "Unsupported content type".to_string() }
 							}
 						})
 						.collect();
@@ -119,17 +137,32 @@ impl BackendAdapter for Provider {
 						input: tu.input.clone(),
 					});
 				},
+				ContentBlock::Document(_doc) => {
+					// TODO: Implement document support
+					// For now, skip document blocks
+					continue;
+				},
+				ContentBlock::CachePoint(_) => {
+					// Cache points are metadata, not content - skip them
+					continue;
+				},
+				ContentBlock::ReasoningContent(_reasoning) => {
+					// TODO: Implement reasoning content support
+					// For now, skip reasoning blocks
+					continue;
+				},
 			}
 		}
 		
 		// Map Bedrock stop reason to Universal stop reason
 		let stop_reason = match bresp.stop_reason {
-			StopReason::EndTurn => universal::StopReason::EndTurn,
-			StopReason::MaxTokens => universal::StopReason::MaxTokens,
-			StopReason::StopSequence => universal::StopReason::StopSequence,
-			StopReason::ContentFiltered => universal::StopReason::ContentFilter,
-			StopReason::GuardrailIntervened => universal::StopReason::ContentFilter,
-			StopReason::ToolUse => universal::StopReason::ToolUse,
+			Some(StopReason::EndTurn) => universal::StopReason::EndTurn,
+			Some(StopReason::MaxTokens) => universal::StopReason::MaxTokens,
+			Some(StopReason::StopSequence) => universal::StopReason::StopSequence,
+			Some(StopReason::ContentFiltered) => universal::StopReason::ContentFilter,
+			Some(StopReason::GuardrailIntervened) => universal::StopReason::ContentFilter,
+			Some(StopReason::ToolUse) => universal::StopReason::ToolUse,
+			None => universal::StopReason::EndTurn, // Default if no stop reason provided
 		};
 		
 		// Convert usage from Bedrock format to Universal format
@@ -174,30 +207,29 @@ impl BackendAdapter for Provider {
 				});
 			},
 			ConverseStreamOutput::ContentBlockStart(start) => {
-				if let Some(ref start_info) = start.start {
-					match start_info {
-						types::ContentBlockStart::ToolUse(tool_start) => {
-							// Emit ToolUseStart frame for tool use
-							frames.push(universal::UFrame::ToolUseStart {
-								idx: start.content_block_index as usize,
-								id: tool_start.tool_use_id.clone(),
-								name: tool_start.name.clone(),
-							});
-						}
+				match &start.start {
+					types::ContentBlockStart::ToolUse(tool_start) => {
+						// Emit ToolUseStart frame for tool use
+						frames.push(universal::UFrame::ToolUseStart {
+							idx: start.content_block_index as usize,
+							id: tool_start.tool_use_id.clone(),
+							name: tool_start.name.clone(),
+						});
+					},
+					_ => {
+						// Default to text block for Text or Reasoning blocks
+						frames.push(universal::UFrame::BlockStart {
+							idx: start.content_block_index as usize,
+							kind: universal::BlockKind::Text,
+						});
 					}
-				} else {
-					// Default to text block if no start info
-					frames.push(universal::UFrame::BlockStart {
-						idx: start.content_block_index as usize,
-						kind: universal::BlockKind::Text,
-					});
 				}
 			},
 			ConverseStreamOutput::ContentBlockDelta(delta) => {
-				if let Some(ContentBlockDelta::Text(text)) = delta.delta {
+				if let ContentBlockDelta::Text { text } = &delta.delta {
 					frames.push(universal::UFrame::Delta {
 						idx: delta.content_block_index as usize,
-						text,
+						text: text.clone(),
 					});
 				}
 				// TODO: Handle ToolUse deltas when they're added to ContentBlockDelta
@@ -231,6 +263,21 @@ impl BackendAdapter for Provider {
 						},
 					});
 				}
+			},
+			ConverseStreamOutput::InternalServerException(_) => {
+				// Skip error events in UFrame conversion
+			},
+			ConverseStreamOutput::ModelStreamErrorException(_) => {
+				// Skip error events in UFrame conversion
+			},
+			ConverseStreamOutput::ServiceUnavailableException(_) => {
+				// Skip error events in UFrame conversion
+			},
+			ConverseStreamOutput::ThrottlingException(_) => {
+				// Skip error events in UFrame conversion
+			},
+			ConverseStreamOutput::ValidationException(_) => {
+				// Skip error events in UFrame conversion
 			},
 		}
 		
@@ -276,6 +323,44 @@ impl Provider {
 		translate_error(resp)
 	}
 
+	/// Process streaming responses with direct Anthropic Messages API SSE output
+	pub(super) async fn process_streaming_messages(
+		&self,
+		log: AsyncLog<LLMResponse>,
+		rate_limit: crate::store::LLMResponsePolicies,
+		resp: Response,
+		model: &str,
+	) -> Response {
+		// Extract message ID from AWS Request ID header if available, otherwise use random ID
+		// Always prefix with msg_ for Anthropic client compatibility
+		let message_id = resp
+			.headers()
+			.get(crate::http::x_headers::X_AMZN_REQUESTID)
+			.and_then(|s| s.to_str().ok().map(|s| format!("msg_{}", s)))
+			.unwrap_or_else(|| format!("msg_{:016x}", rand::rng().random::<u64>()));
+
+		let (parts, body) = resp.into_parts();
+		let anthropic_body = AnthropicStreamBody::new(
+			body,
+			message_id,
+			self.model.as_deref().unwrap_or(model).to_string(),
+			log,
+			Some(rate_limit),
+		);
+		let mut sse_response = Response::from_parts(parts, crate::http::Body::new(anthropic_body));
+		let headers = sse_response.headers_mut();
+		headers.insert(
+			"content-type",
+			http::HeaderValue::from_static("text/event-stream; charset=utf-8"),
+		);
+		headers.insert("cache-control", http::HeaderValue::from_static("no-cache"));
+		headers.insert("connection", http::HeaderValue::from_static("keep-alive"));
+		headers.insert("x-accel-buffering", http::HeaderValue::from_static("no"));
+		headers.remove("content-length");
+
+		sse_response
+	}
+
 	pub(super) async fn process_streaming(
 		&self,
 		log: AsyncLog<LLMResponse>,
@@ -316,14 +401,14 @@ impl Provider {
 								r.first_token = Some(Instant::now());
 							});
 						}
-						match d.delta {
-							Some(ContentBlockDelta::Text(s)) => {
+						match &d.delta {
+							ContentBlockDelta::Text { text: s } => {
 								let choice = universal::ChatChoiceStream {
 									index: 0,
 									logprobs: None,
 									delta: universal::StreamResponseDelta {
 										role: None,
-										content: Some(s),
+										content: Some(s.clone()),
 										refusal: None,
 										#[allow(deprecated)]
 										function_call: None,
@@ -405,6 +490,31 @@ impl Provider {
 							None
 						}
 					},
+					ConverseStreamOutput::InternalServerException(error_event) => {
+						// Return error - this will terminate the stream
+						eprintln!("Bedrock internal server error: {:?}", error_event);
+						None
+					},
+					ConverseStreamOutput::ModelStreamErrorException(error_event) => {
+						// Return error - this will terminate the stream
+						eprintln!("Bedrock model stream error: {:?}", error_event);
+						None
+					},
+					ConverseStreamOutput::ServiceUnavailableException(error_event) => {
+						// Return error - this will terminate the stream
+						eprintln!("Bedrock service unavailable: {:?}", error_event);
+						None
+					},
+					ConverseStreamOutput::ThrottlingException(error_event) => {
+						// Return error - this will terminate the stream
+						eprintln!("Bedrock throttling error: {:?}", error_event);
+						None
+					},
+					ConverseStreamOutput::ValidationException(error_event) => {
+						// Return error - this will terminate the stream
+						eprintln!("Bedrock validation error: {:?}", error_event);
+						None
+					},
 				}
 			})
 		})
@@ -448,8 +558,7 @@ pub(super) fn translate_response(
 
 	// Extract the message from the output
 	let message = match output {
-		types::ConverseOutput::Message(msg) => msg,
-		types::ConverseOutput::Unknown => return Err(AIError::IncompleteResponse),
+		types::ConverseOutput::Message { message: msg } => msg,
 	};
 	// Bedrock has a vec of possible content types, while openai allows 1 text content and many tool calls
 	// Assume the bedrock response has only one text
@@ -478,7 +587,10 @@ pub(super) fn translate_response(
 						arguments: args,
 					},
 				});
-			}, // TODO: guard content, reasoning
+			},
+			ContentBlock::Document(_) => continue, // Skip documents for now
+			ContentBlock::CachePoint(_) => continue, // Skip cache points
+			ContentBlock::ReasoningContent(_) => continue, // Skip reasoning content for now
 		};
 	}
 
@@ -495,7 +607,7 @@ pub(super) fn translate_response(
 		refusal: None,
 		audio: None,
 	};
-	let finish_reason = Some(translate_stop_reason(&resp.stop_reason));
+	let finish_reason = resp.stop_reason.as_ref().map(translate_stop_reason);
 	// Only one choice for Bedrock
 	let choice = universal::ChatChoice {
 		index: 0,
@@ -570,12 +682,12 @@ pub(super) fn translate_universal_request(ureq: &universal::UniversalRequest, pr
 		if system_text.is_empty() {
 			None
 		} else {
-			Some(vec![types::SystemContentBlock::Text { text: system_text }])
+			Some(vec![types::SystemContentBlock::Text(system_text)])
 		}
 	};
 
 	// Convert Universal messages to Bedrock format
-	let messages = ureq.messages
+	let messages: Vec<types::Message> = ureq.messages
 		.iter()
 		.filter_map(|msg| {
 			let role = match msg.role {
@@ -604,7 +716,7 @@ pub(super) fn translate_universal_request(ureq: &universal::UniversalRequest, pr
 							.iter()
 							.filter_map(|block| match block {
 								universal::ContentBlock::Text { text } => {
-									Some(types::ToolResultContentBlock::Text(text.clone()))
+									Some(ContentBlock::Text(text.clone()))
 								},
 								_ => None, // Only text supported in tool results for now
 							})
@@ -646,11 +758,10 @@ pub(super) fn translate_universal_request(ureq: &universal::UniversalRequest, pr
 
 	// Build inference configuration from caps
 	let inference_config = types::InferenceConfiguration {
-		max_tokens: ureq.caps.max_tokens as usize,
+		max_tokens: Some(ureq.caps.max_tokens as i32),
 		temperature: ureq.caps.temperature,
 		top_p: ureq.caps.top_p,
-		stop_sequences: ureq.caps.stop_sequences.clone().unwrap_or_default(),
-		anthropic_version: None, // Not used for Bedrock
+		stop_sequences: Some(ureq.caps.stop_sequences.clone().unwrap_or_default()),
 	};
 
 	// Build guardrail configuration if specified
@@ -660,7 +771,7 @@ pub(super) fn translate_universal_request(ureq: &universal::UniversalRequest, pr
 		Some(types::GuardrailConfiguration {
 			guardrail_identifier: identifier.to_string(),
 			guardrail_version: version.to_string(),
-			trace: Some("enabled".to_string()),
+			trace: Some(types::GuardrailTrace::Enabled),
 		})
 	} else {
 		None
@@ -688,13 +799,12 @@ pub(super) fn translate_universal_request(ureq: &universal::UniversalRequest, pr
 
 	ConverseRequest {
 		model_id: model.to_string(),
-		messages,
+		messages: Some(messages),
 		system,
 		inference_config: Some(inference_config),
 		tool_config,
 		guardrail_config,
 		additional_model_request_fields: None,
-		prompt_variables: None,
 		additional_model_response_field_paths: None,
 		request_metadata: None, // TODO: Extract from vendor data if needed
 		performance_config: None,
@@ -718,7 +828,7 @@ pub(super) fn translate_request(req: universal::Request, provider: &Provider) ->
 		.join("\n");
 
 	// Convert messages to Bedrock format
-	let messages = req
+	let messages: Vec<types::Message> = req
 		.messages
 		.iter()
 		.filter(|msg| universal::message_role(msg) != universal::SYSTEM_ROLE)
@@ -737,11 +847,10 @@ pub(super) fn translate_request(req: universal::Request, provider: &Provider) ->
 
 	// Build inference configuration
 	let inference_config = types::InferenceConfiguration {
-		max_tokens: universal::max_tokens(&req),
+		max_tokens: Some(universal::max_tokens(&req) as i32),
 		temperature: req.temperature,
 		top_p: req.top_p,
-		stop_sequences: universal::stop_sequence(&req),
-		anthropic_version: None, // Not used for Bedrock
+		stop_sequences: Some(universal::stop_sequence(&req)),
 	};
 
 	// Build guardrail configuration if specified
@@ -751,7 +860,7 @@ pub(super) fn translate_request(req: universal::Request, provider: &Provider) ->
 		Some(types::GuardrailConfiguration {
 			guardrail_identifier: identifier.to_string(),
 			guardrail_version: version.to_string(),
-			trace: Some("enabled".to_string()),
+			trace: Some(types::GuardrailTrace::Enabled),
 		})
 	} else {
 		None
@@ -765,11 +874,15 @@ pub(super) fn translate_request(req: universal::Request, provider: &Provider) ->
 		Some(universal::ToolChoiceOption::Named(universal::NamedToolChoice {
 			r#type: _,
 			function,
-		})) => Some(types::ToolChoice::Tool {
-			name: function.name,
-		}),
-		Some(universal::ToolChoiceOption::Auto) => Some(types::ToolChoice::Auto),
-		Some(universal::ToolChoiceOption::Required) => Some(types::ToolChoice::Any),
+		})) => Some(types::ToolChoice::Tool(types::ToolChoiceSpecific {
+			tool: types::ToolChoiceToolSpec { name: function.name },
+		})),
+		Some(universal::ToolChoiceOption::Auto) => Some(types::ToolChoice::Auto(types::AutoToolChoice {
+			auto: serde_json::Value::Object(serde_json::Map::new()),
+		})),
+		Some(universal::ToolChoiceOption::Required) => Some(types::ToolChoice::Any(types::AnyToolChoice {
+			any: serde_json::Value::Object(serde_json::Map::new()),
+		})),
 		Some(universal::ToolChoiceOption::None) => None,
 		None => None,
 	};
@@ -790,17 +903,16 @@ pub(super) fn translate_request(req: universal::Request, provider: &Provider) ->
 	let tool_config = tools.map(|tools| types::ToolConfiguration { tools, tool_choice });
 	ConverseRequest {
 		model_id: req.model.unwrap_or_default(),
-		messages,
+		messages: Some(messages),
 		system: if system.is_empty() {
 			None
 		} else {
-			Some(vec![types::SystemContentBlock::Text { text: system }])
+			Some(vec![types::SystemContentBlock::Text(system)])
 		},
 		inference_config: Some(inference_config),
 		tool_config,
 		guardrail_config,
 		additional_model_request_fields: None,
-		prompt_variables: None,
 		additional_model_response_field_paths: None,
 		request_metadata: metadata,
 		performance_config: None,
@@ -808,461 +920,911 @@ pub(super) fn translate_request(req: universal::Request, provider: &Provider) ->
 }
 
 pub(super) mod types {
+	//! Complete Bedrock Converse API types from vendors/messages
+	
+	use serde::{Deserialize, Serialize};
 	use std::collections::HashMap;
 
-	use serde::{Deserialize, Serialize};
+/// Bedrock Converse request structure
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConverseRequest {
+	/// Required: Model ID to invoke (URI parameter in actual API)
+	#[serde(skip)]
+	pub model_id: String,
 
-	#[derive(Copy, Clone, Deserialize, Serialize, Debug, Default)]
-	#[serde(rename_all = "camelCase")]
-	pub enum Role {
-		#[default]
-		User,
-		Assistant,
-	}
+	/// Optional: Array of messages (max conversation length varies by model)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub messages: Option<Vec<Message>>,
 
-	#[derive(Clone, Deserialize, Serialize, Debug)]
-	#[serde(rename_all = "camelCase")]
-	pub enum ContentBlock {
-		Text(String),
-		Image {
-			source: String,
-			media_type: String,
-			data: String,
-		},
-		ToolResult(ToolResultBlock),
-		ToolUse(ToolUseBlock),
-	}
-	#[derive(Clone, Deserialize, Serialize, Debug)]
-	#[serde(rename_all = "camelCase")]
-	pub struct ToolResultBlock {
-		/// The ID of the tool request that this is the result for.
-		pub tool_use_id: String,
-		/// The content for tool result content block.
-		pub content: Vec<ToolResultContentBlock>,
-		/// The status for the tool result content block.
-		/// This field is only supported Anthropic Claude 3 models.
-		pub status: Option<ToolResultStatus>,
-	}
+	/// Optional: System prompt content blocks
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub system: Option<Vec<SystemContentBlock>>,
 
-	#[derive(Clone, Deserialize, Serialize, Debug)]
-	#[serde(rename_all = "camelCase")]
-	pub enum ToolResultStatus {
-		Error,
-		Success,
-	}
+	/// Optional: Inference configuration parameters
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub inference_config: Option<InferenceConfiguration>,
 
-	#[derive(Clone, Deserialize, Serialize, Debug)]
-	#[serde(rename_all = "camelCase")]
-	pub struct ToolUseBlock {
-		/// The ID for the tool request.
-		pub tool_use_id: String,
-		/// The name of the tool that the model wants to use.
-		pub name: String,
-		/// The input to pass to the tool.
-		pub input: serde_json::Value,
-	}
+	/// Optional: Tool configuration
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub tool_config: Option<ToolConfiguration>,
 
-	#[derive(Clone, Deserialize, Serialize, Debug)]
-	#[serde(rename_all = "camelCase")]
-	pub enum ToolResultContentBlock {
-		/// A tool result that is text.
-		Text(String),
-	}
-	#[derive(Clone, Deserialize, Serialize, Debug)]
-	#[serde(rename_all = "camelCase")]
-	#[serde(untagged)]
-	pub enum SystemContentBlock {
-		Text { text: String },
-	}
+	/// Optional: Guardrail configuration
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub guardrail_config: Option<GuardrailConfiguration>,
 
-	#[derive(Clone, Deserialize, Serialize, Debug)]
-	#[serde(rename_all = "camelCase")]
-	pub struct Message {
-		pub role: Role,
-		pub content: Vec<ContentBlock>,
-	}
+	/// Optional: Model-specific additional request fields
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub additional_model_request_fields: Option<serde_json::Value>,
 
-	#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
-	pub struct InferenceConfiguration {
-		/// The maximum number of tokens to generate before stopping.
-		#[serde(rename = "maxTokens")]
-		pub max_tokens: usize,
-		/// Amount of randomness injected into the response.
-		#[serde(skip_serializing_if = "Option::is_none")]
-		pub temperature: Option<f32>,
-		/// Use nucleus sampling.
-		#[serde(skip_serializing_if = "Option::is_none")]
-		pub top_p: Option<f32>,
-		/// The stop sequences to use.
-		#[serde(rename = "stopSequences", skip_serializing_if = "Vec::is_empty")]
-		pub stop_sequences: Vec<String>,
-		/// Anthropic version (not used for Bedrock)
-		#[serde(rename = "anthropicVersion", skip_serializing_if = "Option::is_none")]
-		pub anthropic_version: Option<String>,
-	}
+	/// Optional: Response field paths to include
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub additional_model_response_field_paths: Option<Vec<String>>,
 
-	#[derive(Clone, Serialize, Deserialize, Debug)]
-	pub struct ConverseRequest {
-		/// Specifies the model or throughput with which to run inference.
-		#[serde(rename = "modelId")]
-		pub model_id: String,
-		/// The messages that you want to send to the model.
-		pub messages: Vec<Message>,
-		/// A prompt that provides instructions or context to the model.
-		#[serde(skip_serializing_if = "Option::is_none")]
-		pub system: Option<Vec<SystemContentBlock>>,
-		/// Inference parameters to pass to the model.
-		#[serde(rename = "inferenceConfig", skip_serializing_if = "Option::is_none")]
-		pub inference_config: Option<InferenceConfiguration>,
-		/// Configuration information for the tools that the model can use.
-		#[serde(rename = "toolConfig", skip_serializing_if = "Option::is_none")]
-		pub tool_config: Option<ToolConfiguration>,
-		/// Configuration information for a guardrail.
-		#[serde(rename = "guardrailConfig", skip_serializing_if = "Option::is_none")]
-		pub guardrail_config: Option<GuardrailConfiguration>,
-		/// Additional model request fields.
-		#[serde(
-			rename = "additionalModelRequestFields",
-			skip_serializing_if = "Option::is_none"
-		)]
-		pub additional_model_request_fields: Option<serde_json::Value>,
-		/// Prompt variables.
-		#[serde(rename = "promptVariables", skip_serializing_if = "Option::is_none")]
-		pub prompt_variables: Option<HashMap<String, PromptVariableValues>>,
-		/// Additional model response field paths.
-		#[serde(
-			rename = "additionalModelResponseFieldPaths",
-			skip_serializing_if = "Option::is_none"
-		)]
-		pub additional_model_response_field_paths: Option<Vec<String>>,
-		/// Request metadata.
-		#[serde(rename = "requestMetadata", skip_serializing_if = "Option::is_none")]
-		pub request_metadata: Option<HashMap<String, String>>,
-		/// Performance configuration.
-		#[serde(rename = "performanceConfig", skip_serializing_if = "Option::is_none")]
-		pub performance_config: Option<PerformanceConfiguration>,
-	}
+	/// Optional: Performance configuration
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub performance_config: Option<PerformanceConfiguration>,
 
-	#[derive(Clone, Serialize, Deserialize, Debug)]
-	pub struct ToolConfiguration {
-		/// An array of tools that you want to pass to a model.
-		pub tools: Vec<Tool>,
-		/// If supported by model, forces the model to request a tool.
-		pub tool_choice: Option<ToolChoice>,
-	}
+	/// Optional: Request metadata (string key-value pairs)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub request_metadata: Option<HashMap<String, String>>,
+}
 
-	#[derive(Clone, std::fmt::Debug, ::serde::Serialize, ::serde::Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	pub enum Tool {
-		/// CachePoint to include in the tool configuration.
-		CachePoint(CachePointBlock),
-		/// The specification for the tool.
-		ToolSpec(ToolSpecification),
-	}
+/// Message structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+	pub role: ConversationRole,
+	pub content: Vec<ContentBlock>,
+}
 
-	#[derive(Clone, std::fmt::Debug, ::serde::Serialize, ::serde::Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	pub struct CachePointBlock {
-		/// Specifies the type of cache point within the CachePointBlock.
-		pub r#type: CachePointType,
-	}
+/// Conversation roles
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ConversationRole {
+	User,
+	Assistant,
+}
 
-	#[derive(
-		Clone,
-		Eq,
-		Ord,
-		PartialEq,
-		PartialOrd,
-		std::fmt::Debug,
-		std::hash::Hash,
-		::serde::Serialize,
-		::serde::Deserialize,
-	)]
-	#[serde(rename_all = "camelCase")]
-	pub enum CachePointType {
-		Default,
-	}
+// Alias for backward compatibility with existing bedrock.rs code
+pub type Role = ConversationRole;
 
-	#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
-	pub struct GuardrailConfiguration {
-		/// The unique identifier of the guardrail
-		#[serde(rename = "guardrailIdentifier")]
-		pub guardrail_identifier: String,
-		/// The version of the guardrail
-		#[serde(rename = "guardrailVersion")]
-		pub guardrail_version: String,
-		/// Whether to enable trace output from the guardrail
-		#[serde(rename = "trace", skip_serializing_if = "Option::is_none")]
-		pub trace: Option<String>,
-	}
+/// CRITICAL: ContentBlock is a strict UNION type - exactly one variant must be set
+/// Multiple variants will cause validation errors
+/// FORMAT: Tuple variants to match AWS SDK serialization exactly
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ContentBlock {
+	/// Text content block
+	#[serde(rename = "text")]
+	Text(String),
 
-	#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
-	pub struct PromptVariableValues {
-		// TODO: Implement prompt variable values
-	}
+	/// Image content block (Claude 3 only)  
+	#[serde(rename = "image")]
+	Image(ImageBlock),
 
-	#[derive(Clone, Serialize, Deserialize, Debug)]
-	pub struct PerformanceConfiguration {
-		// TODO: Implement performance configuration
-	}
+	/// Document content block
+	#[serde(rename = "document")]
+	Document(DocumentBlock),
 
-	/// The actual response from the Bedrock Converse API (matches AWS SDK ConverseOutput)
-	#[derive(Debug, Deserialize, Clone)]
-	pub struct ConverseResponse {
-		/// The result from the call to Converse
-		pub output: Option<ConverseOutput>,
-		/// The reason why the model stopped generating output
-		#[serde(rename = "stopReason")]
-		pub stop_reason: StopReason,
-		/// The total number of tokens used in the call to Converse
-		pub usage: Option<TokenUsage>,
-		/// Metrics for the call to Converse
-		#[allow(dead_code)]
-		pub metrics: Option<ConverseMetrics>,
-		/// Additional fields in the response that are unique to the model
-		#[allow(dead_code)]
-		#[serde(rename = "additionalModelResponseFields")]
-		pub additional_model_response_fields: Option<serde_json::Value>,
-		/// A trace object that contains information about the Guardrail behavior
-		pub trace: Option<ConverseTrace>,
-		/// Model performance settings for the request
-		#[serde(rename = "performanceConfig")]
-		#[allow(dead_code)]
-		pub performance_config: Option<PerformanceConfiguration>,
-	}
+	/// Tool use content block
+	#[serde(rename = "toolUse")]
+	ToolUse(ToolUseBlock),
 
-	#[derive(Debug, Deserialize, Clone)]
-	pub struct ConverseErrorResponse {
-		pub message: String,
-	}
+	/// Tool result content block
+	#[serde(rename = "toolResult")]
+	ToolResult(ToolResultBlock),
 
-	/// The actual content output from the model
-	#[derive(Debug, Deserialize, Clone)]
-	#[serde(rename_all = "camelCase")]
-	pub enum ConverseOutput {
-		Message(Message),
-		#[serde(other)]
-		Unknown,
-	}
+	/// Cache point for performance optimization
+	#[serde(rename = "cachePoint")]
+	CachePoint(CachePointBlock),
 
-	/// Token usage information
-	#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
-	pub struct TokenUsage {
-		/// The number of input tokens which were used
-		#[serde(rename = "inputTokens")]
-		pub input_tokens: usize,
-		/// The number of output tokens which were used
-		#[serde(rename = "outputTokens")]
-		pub output_tokens: usize,
-		/// The total number of tokens used
-		#[serde(rename = "totalTokens")]
-		pub total_tokens: usize,
-	}
+	/// Reasoning content (for thinking mode)
+	#[serde(rename = "reasoningContent")]
+	ReasoningContent(ReasoningContentBlock),
+}
 
-	/// Metrics for the Converse call
-	#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
-	pub struct ConverseMetrics {
-		/// Latency in milliseconds
-		#[serde(rename = "latencyMs")]
-		pub latency_ms: u64,
-	}
+/// Image content block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageBlock {
+	/// Image format
+	pub format: ImageFormat,
 
-	/// Trace information for Guardrail behavior
-	#[derive(Clone, Debug, Serialize, Deserialize)]
-	pub struct ConverseTrace {
-		/// Guardrail trace information
-		#[serde(rename = "guardrail", skip_serializing_if = "Option::is_none")]
-		pub guardrail: Option<serde_json::Value>,
-	}
+	/// Image source
+	pub source: ImageSource,
+}
 
-	/// Reason for stopping the response generation.
-	#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
-	#[serde(rename_all = "snake_case")]
-	pub enum StopReason {
-		ContentFiltered,
-		EndTurn,
-		GuardrailIntervened,
-		MaxTokens,
-		StopSequence,
-		ToolUse,
-	}
+/// Supported image formats
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageFormat {
+	Png,
+	Jpeg,
+	Gif,
+	Webp,
+}
 
-	#[derive(Clone, Debug, Serialize, Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	pub enum ToolChoice {
-		/// The model must request at least one tool (no text is generated).
-		Any,
-		/// (Default). The Model automatically decides if a tool should be called or whether to generate text instead.
-		Auto,
-		/// The Model must request the specified tool. Only supported by Anthropic Claude 3 models.
-		Tool { name: String },
-		/// The `Unknown` variant represents cases where new union variant was received. Consider upgrading the SDK to the latest available version.
-		/// An unknown enum variant
-		///
-		/// _Note: If you encounter this error, consider upgrading your SDK to the latest version._
-		/// The `Unknown` variant represents cases where the server sent a value that wasn't recognized
-		/// by the client. This can happen when the server adds new functionality, but the client has not been updated.
-		/// To investigate this, consider turning on debug logging to print the raw HTTP response.
-		#[non_exhaustive]
-		Unknown,
-	}
+/// Image source types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ImageSource {
+	/// Base64-encoded image data
+	Bytes {
+		#[serde(rename = "bytes")]
+		data: String, // Base64 encoded
+	},
 
-	#[derive(Clone, std::fmt::Debug, ::serde::Serialize, ::serde::Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	pub struct ToolSpecification {
-		/// The name for the tool.
-		pub name: String,
-		/// The description for the tool.
-		pub description: Option<String>,
-		/// The input schema for the tool in JSON format.
-		pub input_schema: Option<ToolInputSchema>,
-	}
+	/// S3 location
+	S3Location {
+		#[serde(rename = "s3Location")]
+		s3_location: S3Location,
+	},
+}
 
-	#[derive(Clone, Debug, Serialize, Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	pub enum ToolInputSchema {
-		Json(serde_json::Value),
-	}
+/// S3 location structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3Location {
+	pub uri: String,
 
-	// This is NOT deserialized directly, see the associated method
-	#[derive(Clone, Debug)]
-	pub enum ConverseStreamOutput {
-		/// The messages output content block delta.
-		ContentBlockDelta(ContentBlockDeltaEvent),
-		/// Start information for a content block.
-		#[allow(unused)]
-		ContentBlockStart(ContentBlockStartEvent),
-		/// Stop information for a content block.
-		#[allow(unused)]
-		ContentBlockStop(ContentBlockStopEvent),
-		/// Message start information.
-		MessageStart(MessageStartEvent),
-		/// Message stop information.
-		MessageStop(MessageStopEvent),
-		/// Metadata for the converse output stream.
-		Metadata(ConverseStreamMetadataEvent),
-	}
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub bucket_owner: Option<String>,
+}
 
-	impl ConverseStreamOutput {
-		pub fn deserialize(m: aws_event_stream_parser::Message) -> anyhow::Result<Self> {
-			let Some(v) = m
-				.headers
-				.headers
-				.iter()
-				.find(|h| h.key.as_str() == ":event-type")
-				.and_then(|v| match &v.value {
-					aws_event_stream_parser::HeaderValue::String(s) => Some(s.to_string()),
-					_ => None,
-				})
-			else {
-				anyhow::bail!("no event type header")
-			};
-			Ok(match v.as_str() {
-				"contentBlockDelta" => ConverseStreamOutput::ContentBlockDelta(serde_json::from_slice::<
-					ContentBlockDeltaEvent,
-				>(&m.body)?),
-				"contentBlockStart" => ConverseStreamOutput::ContentBlockStart(serde_json::from_slice::<
-					ContentBlockStartEvent,
-				>(&m.body)?),
-				"contentBlockStop" => ConverseStreamOutput::ContentBlockStop(serde_json::from_slice::<
-					ContentBlockStopEvent,
-				>(&m.body)?),
-				"messageStart" => {
-					ConverseStreamOutput::MessageStart(serde_json::from_slice::<MessageStartEvent>(&m.body)?)
-				},
-				"messageStop" => {
-					ConverseStreamOutput::MessageStop(serde_json::from_slice::<MessageStopEvent>(&m.body)?)
-				},
-				"metadata" => ConverseStreamOutput::Metadata(serde_json::from_slice::<
-					ConverseStreamMetadataEvent,
-				>(&m.body)?),
-				m => anyhow::bail!("unexpected event type: {m}"),
+/// Document content block  
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentBlock {
+	/// Document name (required, 1-200 chars)
+	pub name: String,
+
+	/// Document source (required)
+	pub source: DocumentSource,
+
+	/// Document format (optional)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub format: Option<String>,
+
+	/// Citations configuration (optional)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub citations: Option<CitationsConfig>,
+
+	/// Context information (optional)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub context: Option<String>,
+}
+
+/// Citations configuration for documents
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CitationsConfig {
+	/// Whether citations are enabled
+	pub enabled: bool,
+}
+
+/// Supported document formats
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DocumentFormat {
+	Pdf,
+	Csv,
+	Doc,
+	Docx,
+	Xls,
+	Xlsx,
+	Html,
+	Txt,
+	Md,
+}
+
+/// Document source types  
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DocumentSource {
+	/// Base64-encoded document data
+	Bytes {
+		#[serde(rename = "bytes")]
+		data: String,
+	},
+
+	/// S3 location
+	S3Location {
+		#[serde(rename = "s3Location")]
+		s3_location: S3Location,
+	},
+}
+
+/// Tool use content block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUseBlock {
+	/// Tool use identifier
+	pub tool_use_id: String,
+
+	/// Tool name
+	pub name: String,
+
+	/// Tool input (JSON object)
+	pub input: serde_json::Value,
+}
+
+/// Tool result content block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResultBlock {
+	/// Tool use ID this result corresponds to
+	pub tool_use_id: String,
+
+	/// Result content blocks - Must use ContentBlock to match Bedrock API
+	pub content: Vec<ContentBlock>,
+
+	/// Result status (Claude 3 only)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub status: Option<ToolResultStatus>,
+}
+
+/// Tool result status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolResultStatus {
+	Success,
+	Error,
+}
+
+/// Cache point for performance optimization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachePointBlock {
+	#[serde(rename = "type")]
+	pub cache_type: CachePointType,
+}
+
+/// Cache point types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CachePointType {
+	Default,
+}
+
+/// Reasoning content (chain of thought) - UNION type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningContentBlock {
+	/// Reasoning text with optional signature
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub reasoning_text: Option<ReasoningTextBlock>,
+
+	/// Redacted content (base64-encoded)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub redacted_content: Option<String>,
+}
+
+/// Reasoning text block with signature
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReasoningTextBlock {
+	pub text: String,
+
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub signature: Option<String>,
+}
+
+/// System content blocks
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SystemContentBlock {
+	/// Text system content
+	#[serde(rename = "text")]
+	Text(String),
+
+	/// Cache point in system
+	#[serde(rename = "cachePoint")]
+	CachePoint(CachePointBlock),
+}
+
+/// Inference configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceConfiguration {
+	/// Maximum tokens to generate (minimum 1)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub max_tokens: Option<i32>,
+
+	/// Stop sequences
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub stop_sequences: Option<Vec<String>>,
+
+	/// Temperature (0.0 to 1.0)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub temperature: Option<f32>,
+
+	/// Top-p nucleus sampling (0.0 to 1.0)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub top_p: Option<f32>,
+}
+
+/// Tool configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolConfiguration {
+	/// Array of tools
+	pub tools: Vec<Tool>,
+
+	/// Tool choice configuration
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub tool_choice: Option<ToolChoice>,
+}
+
+/// Tool definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Tool {
+	/// Cache point
+	#[serde(rename = "cachePoint")]
+	CachePoint(CachePointBlock),
+
+	/// Tool specification
+	#[serde(rename = "toolSpec")]
+	ToolSpec(ToolSpecification),
+}
+
+/// Tool specification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolSpecification {
+	/// Tool name
+	pub name: String,
+
+	/// Tool description
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub description: Option<String>,
+
+	/// Input schema
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub input_schema: Option<ToolInputSchema>,
+}
+
+/// Tool input schema
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ToolInputSchema {
+	/// JSON schema
+	#[serde(rename = "json")]
+	Json(serde_json::Value),
+}
+
+/// Tool choice options
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolChoice {
+	/// Model decides (default)
+	Auto(AutoToolChoice),
+
+	/// Must use any tool  
+	Any(AnyToolChoice),
+
+	/// Must use specific tool (Claude 3 only)
+	Tool(ToolChoiceSpecific),
+}
+
+/// Auto tool choice (Bedrock format)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoToolChoice {
+	pub auto: serde_json::Value, // Empty object {}
+}
+
+/// Any tool choice (Bedrock format)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnyToolChoice {
+	pub any: serde_json::Value, // Empty object {}
+}
+
+/// Specific tool choice (Bedrock format)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolChoiceSpecific {
+	pub tool: ToolChoiceToolSpec,
+}
+
+/// Tool specification for specific tool choice
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolChoiceToolSpec {
+	pub name: String,
+}
+
+/// Guardrail trace setting
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuardrailTrace {
+	Enabled,
+	Disabled,
+}
+
+/// Guardrail configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuardrailConfiguration {
+	/// Guardrail identifier
+	pub guardrail_identifier: String,
+
+	/// Guardrail version
+	pub guardrail_version: String,
+
+	/// Enable trace output
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub trace: Option<GuardrailTrace>,
+}
+
+/// Performance configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceConfiguration {
+	/// Latency optimization mode
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub latency: Option<LatencyMode>,
+}
+
+/// Latency optimization modes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LatencyMode {
+	Standard,
+	Optimized,
+}
+
+/// Converse response structure
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConverseResponse {
+	/// Response output
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub output: Option<ConverseOutput>,
+
+	/// Stop reason
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub stop_reason: Option<StopReason>,
+
+	/// Token usage
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub usage: Option<TokenUsage>,
+
+	/// Request metrics
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub metrics: Option<ConverseMetrics>,
+
+	/// Error message (if this is actually an error response in success format)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub message: Option<String>,
+
+	/// Additional model response fields
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub additional_model_response_fields: Option<serde_json::Value>,
+
+	/// Performance configuration
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub performance_config: Option<PerformanceConfiguration>,
+
+	/// Trace information
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub trace: Option<ConverseTrace>,
+}
+
+/// Response output types
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ConverseOutput {
+	/// Message output with nested message field
+	Message { message: Message },
+}
+
+/// Stop reasons
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+	EndTurn,
+	ToolUse,
+	MaxTokens,
+	StopSequence,
+	GuardrailIntervened,
+	ContentFiltered,
+}
+
+/// Token usage information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+	pub input_tokens: u32,
+	pub output_tokens: u32,
+	pub total_tokens: u32,
+
+	/// Cache-specific token counts
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub cache_read_input_tokens: Option<u32>,
+
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub cache_write_input_tokens: Option<u32>,
+}
+
+/// Request metrics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConverseMetrics {
+	/// Latency in milliseconds
+	pub latency_ms: u64,
+}
+
+/// Trace information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConverseTrace {
+	/// Guardrail trace data
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub guardrail: Option<serde_json::Value>,
+}
+
+/// ConverseStream output event types
+#[derive(Debug, Clone)]
+pub enum ConverseStreamOutput {
+	MessageStart(MessageStartEvent),
+	ContentBlockStart(ContentBlockStartEvent),
+	ContentBlockDelta(ContentBlockDeltaEvent),
+	ContentBlockStop(ContentBlockStopEvent),
+	MessageStop(MessageStopEvent),
+	Metadata(ConverseStreamMetadataEvent),
+
+	// Error events
+	InternalServerException(StreamErrorEvent),
+	ModelStreamErrorException(StreamErrorEvent),
+	ServiceUnavailableException(StreamErrorEvent),
+	ThrottlingException(StreamErrorEvent),
+	ValidationException(StreamErrorEvent),
+}
+
+impl ConverseStreamOutput {
+	/// Deserialize from AWS event-stream message
+	pub fn deserialize(message: aws_event_stream_parser::Message) -> Result<Self, crate::llm::AIError> {
+		// Extract event type from headers
+		let event_type = message
+			.headers
+			.headers
+			.iter()
+			.find(|h| h.key.as_str() == ":event-type")
+			.and_then(|v| match &v.value {
+				aws_event_stream_parser::HeaderValue::String(s) => Some(s.as_str()),
+				_ => None,
 			})
+			.ok_or_else(|| crate::llm::AIError::MissingField(":event-type header".into()))?;
+
+		// Parse body based on event type
+		match event_type {
+			"messageStart" => Ok(ConverseStreamOutput::MessageStart(serde_json::from_slice(
+				&message.body,
+			).map_err(crate::llm::AIError::ResponseParsing)?)),
+			"contentBlockStart" => Ok(ConverseStreamOutput::ContentBlockStart(
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
+			)),
+			"contentBlockDelta" => Ok(ConverseStreamOutput::ContentBlockDelta(
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
+			)),
+			"contentBlockStop" => Ok(ConverseStreamOutput::ContentBlockStop(
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
+			)),
+			"messageStop" => Ok(ConverseStreamOutput::MessageStop(serde_json::from_slice(
+				&message.body,
+			).map_err(crate::llm::AIError::ResponseParsing)?)),
+			"metadata" => Ok(ConverseStreamOutput::Metadata(serde_json::from_slice(
+				&message.body,
+			).map_err(crate::llm::AIError::ResponseParsing)?)),
+
+			// Error events
+			"internalServerException" => Ok(ConverseStreamOutput::InternalServerException(
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
+			)),
+			"modelStreamErrorException" => Ok(ConverseStreamOutput::ModelStreamErrorException(
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
+			)),
+			"serviceUnavailableException" => Ok(ConverseStreamOutput::ServiceUnavailableException(
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
+			)),
+			"throttlingException" => Ok(ConverseStreamOutput::ThrottlingException(
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
+			)),
+			"validationException" => Ok(ConverseStreamOutput::ValidationException(
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
+			)),
+
+			_unknown => Err(crate::llm::AIError::UnsupportedContent),
+		}
+	}
+}
+
+/// Message start event
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageStartEvent {
+	pub role: ConversationRole,
+}
+
+/// Content block start event
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentBlockStartEvent {
+	pub content_block_index: usize,
+	pub start: ContentBlockStart,
+}
+
+/// Content block start types
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ContentBlockStart {
+	ToolUse(ToolUseBlockStart),
+	Text(String),      // Usually empty for text blocks
+	Reasoning(String), // For reasoning blocks
+}
+
+/// Tool use block start
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUseBlockStart {
+	pub tool_use_id: String,
+	pub name: String,
+}
+
+/// Content block delta event
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentBlockDeltaEvent {
+	pub content_block_index: usize,
+	pub delta: ContentBlockDelta,
+}
+
+/// Content block delta types
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ContentBlockDelta {
+	/// Text content delta - matches {"text": "content"}
+	Text { text: String },
+
+	/// Tool use input delta - matches {"toolUse": {"input": "..."}}
+	ToolUse {
+		#[serde(rename = "toolUse")]
+		tool_use: ToolUseBlockDelta,
+	},
+
+	/// Reasoning content delta
+	ReasoningContent(ReasoningContentBlockDelta),
+
+	/// Citations delta
+	Citation(CitationsDelta),
+}
+
+/// Tool use block delta
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolUseBlockDelta {
+	/// Incremental JSON input string
+	pub input: String,
+}
+
+/// Reasoning content delta - UNION type (exactly one variant)
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ReasoningContentBlockDelta {
+	/// Text reasoning delta
+	Text(String),
+}
+
+/// Citations delta with location tracking
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CitationsDelta {
+	/// Citation location information
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub location: Option<CitationLocation>,
+
+	/// Source content fragments
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub source_content: Option<Vec<CitationSourceContentDelta>>,
+
+	/// Citation title
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub title: Option<String>,
+
+	/// Legacy citations array (backward compatibility)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub citations: Option<Vec<Citation>>,
+}
+
+/// Citation location for incremental building
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CitationLocation {
+	/// Start position
+	pub start: usize,
+
+	/// End position
+	pub end: usize,
+
+	/// Location type (page, character, block, etc.)
+	pub location_type: String,
+}
+
+/// Citation source content delta
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CitationSourceContentDelta {
+	/// Content fragment
+	pub content: String,
+
+	/// Fragment position
+	pub position: usize,
+}
+
+/// Citation structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Citation {
+	pub source: String,
+	pub content: String,
+}
+
+/// Content block stop event
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentBlockStopEvent {
+	pub content_block_index: usize,
+}
+
+/// Message stop event
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageStopEvent {
+	pub stop_reason: StopReason,
+
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub additional_model_response_fields: Option<serde_json::Value>,
+}
+
+/// Stream metadata event
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConverseStreamMetadataEvent {
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub usage: Option<TokenUsage>,
+
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub metrics: Option<ConverseMetrics>,
+
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub performance_config: Option<PerformanceConfiguration>,
+}
+
+/// Bedrock error response
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConverseErrorResponse {
+	/// Error message
+	pub message: String,
+
+	/// Error type (if available)
+	#[serde(rename = "__type")]
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub error_type: Option<String>,
+}
+
+/// Stream error event structure
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamErrorEvent {
+	pub message: String,
+}
+
+impl ConverseRequest {
+	/// Create new request with model ID
+	pub fn new(model_id: String) -> Self {
+		Self {
+			model_id,
+			messages: None,
+			system: None,
+			inference_config: None,
+			tool_config: None,
+			guardrail_config: None,
+			additional_model_request_fields: None,
+			additional_model_response_field_paths: None,
+			performance_config: None,
+			request_metadata: None,
 		}
 	}
 
-	#[derive(Clone, Debug, Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	pub struct ContentBlockDeltaEvent {
-		/// The delta for a content block delta event.
-		pub delta: Option<ContentBlockDelta>,
-		/// The block index for a content block delta event.
-		#[allow(dead_code)]
-		pub content_block_index: i32,
+	/// Add messages
+	pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
+		self.messages = Some(messages);
+		self
 	}
 
-	#[derive(Clone, Debug, Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	#[allow(unused)]
-	pub struct ContentBlockStartEvent {
-		/// Start information about a content block start event.
-		pub start: Option<ContentBlockStart>,
-		/// The index for a content block start event.
-		pub content_block_index: i32,
+	/// Add system prompt
+	pub fn with_system(mut self, system: Vec<SystemContentBlock>) -> Self {
+		self.system = Some(system);
+		self
 	}
 
-	#[derive(Clone, Debug, Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	#[allow(unused)]
-	pub struct ContentBlockStopEvent {
-		/// The index for a content block.
-		pub content_block_index: i32,
+	/// Add inference config
+	pub fn with_inference_config(mut self, config: InferenceConfiguration) -> Self {
+		self.inference_config = Some(config);
+		self
 	}
 
-	#[derive(Clone, Debug, Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	pub struct MessageStartEvent {
-		/// The role for the message.
-		pub role: Role,
-	}
-
-	#[derive(Clone, Debug, Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	pub struct MessageStopEvent {
-		/// The reason why the model stopped generating output.
-		pub stop_reason: StopReason,
-		/// The additional model response fields.
-		#[allow(dead_code)]
-		pub additional_model_response_fields: Option<serde_json::Value>,
-	}
-
-	#[derive(Clone, Debug, Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	pub struct ConverseStreamMetadataEvent {
-		/// Usage information for the conversation stream event.
-		pub usage: Option<TokenUsage>,
-		/// The metrics for the conversation stream metadata event.
-		#[allow(dead_code)]
-		pub metrics: Option<ConverseMetrics>,
-		/// Model performance configuration metadata for the conversation stream event.
-		#[allow(dead_code)]
-		pub performance_config: Option<PerformanceConfiguration>,
-	}
-
-	#[derive(Clone, Debug, Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	pub enum ContentBlockDelta {
-		/// The content text.
-		Text(String),
-		// TODO: tool use, reasoning
-	}
-
-	#[derive(Clone, Debug, Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	pub enum ContentBlockStart {
-		/// Information about a tool that the model is requesting to use.
-		#[allow(dead_code)]
-		ToolUse(ToolUseBlockStart),
-	}
-
-	#[derive(Clone, Debug, Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	pub struct ToolUseBlockStart {
-		/// The ID for the tool request.
-		#[allow(dead_code)]
-		pub tool_use_id: String,
-		/// The name of the tool that the model is requesting to use.
-		#[allow(dead_code)]
-		pub name: String,
+	/// Add tool configuration
+	pub fn with_tools(mut self, tools: Vec<Tool>, tool_choice: Option<ToolChoice>) -> Self {
+		self.tool_config = Some(ToolConfiguration { tools, tool_choice });
+		self
 	}
 }
+
+impl Message {
+	/// Create user message with text
+	pub fn user_text(text: String) -> Self {
+		Self {
+			role: ConversationRole::User,
+			content: vec![ContentBlock::Text(text)],
+		}
+	}
+
+	/// Create assistant message with text
+	pub fn assistant_text(text: String) -> Self {
+		Self {
+			role: ConversationRole::Assistant,
+			content: vec![ContentBlock::Text(text)],
+		}
+	}
+
+	/// Create user message with tool result
+	pub fn user_tool_result(
+		tool_use_id: String,
+		content: Vec<ContentBlock>,
+		status: Option<ToolResultStatus>,
+	) -> Self {
+		Self {
+			role: ConversationRole::User,
+			content: vec![ContentBlock::ToolResult(ToolResultBlock {
+				tool_use_id,
+				content,
+				status,
+			})],
+		}
+	}
+}
+
+impl InferenceConfiguration {
+	/// Create basic inference config
+	pub fn new(max_tokens: i32) -> Self {
+		Self {
+			max_tokens: Some(max_tokens),
+			stop_sequences: None,
+			temperature: None,
+			top_p: None,
+		}
+	}
+}
+
+/// Helper to create tool specification
+pub fn tool_spec(
+	name: String,
+	description: Option<String>,
+	input_schema: Option<serde_json::Value>,
+) -> Tool {
+	Tool::ToolSpec(ToolSpecification {
+		name,
+		description,
+		input_schema: input_schema.map(ToolInputSchema::Json),
+	})
+}
+
+/// Helper to create auto tool choice
+pub fn auto_tool_choice() -> ToolChoice {
+	ToolChoice::Auto(AutoToolChoice {
+		auto: serde_json::Value::Object(serde_json::Map::new()),
+	})
+}
+
+/// Helper to create any tool choice  
+pub fn any_tool_choice() -> ToolChoice {
+	ToolChoice::Any(AnyToolChoice {
+		any: serde_json::Value::Object(serde_json::Map::new()),
+	})
+}
+
+/// Helper to create specific tool choice
+pub fn tool_choice(name: String) -> ToolChoice {
+	ToolChoice::Tool(ToolChoiceSpecific {
+		tool: ToolChoiceToolSpec { name },
+	})
+}
+
+} // end types module

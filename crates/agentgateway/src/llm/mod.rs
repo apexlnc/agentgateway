@@ -9,7 +9,7 @@ use headers::{ContentEncoding, HeaderMapExt};
 use itertools::Itertools;
 pub use policy::Policy;
 use rand::Rng;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tiktoken_rs::CoreBPE;
 use tiktoken_rs::tokenizer::{Tokenizer, get_tokenizer};
 
@@ -27,6 +27,7 @@ pub mod anthropic;
 pub mod bedrock;
 pub mod gemini;
 pub mod messages;
+pub mod messages_streaming;
 pub mod openai;
 mod pii;
 pub mod policy;
@@ -156,6 +157,7 @@ pub struct LLMRequest {
 	pub request_model: Strng,
 	pub provider: Strng,
 	pub streaming: bool,
+	pub route_type: RouteType,
 	pub params: llm::LLMRequestParams,
 }
 
@@ -336,6 +338,7 @@ impl AIProvider {
 		policies: Option<&Policy>,
 		req: Request,
 		tokenize: bool,
+		route_type: RouteType,
 		log: &mut Option<&mut RequestLog>,
 	) -> Result<RequestResult, AIError> {
 		// Buffer the body, max 2mb
@@ -363,7 +366,7 @@ impl AIProvider {
 				return Ok(RequestResult::Rejected(dr));
 			}
 		}
-		let llm_info = self.to_llm_request(&req, tokenize).await?;
+		let llm_info = self.to_llm_request(&req, tokenize, route_type).await?;
 		if let Some(log) = log {
 			let needs_prompt = log.cel.cel_context.with_llm_request(&llm_info);
 			if needs_prompt {
@@ -560,6 +563,7 @@ impl AIProvider {
 		resp: Response,
 	) -> Result<Response, AIError> {
 		let model = req.request_model.clone();
+		let route_type = req.route_type;
 		// Store an empty response, as we stream in info we will parse into it
 		let llmresp = llm::LLMResponse {
 			request: req,
@@ -573,7 +577,16 @@ impl AIProvider {
 		log.store(Some(llmresp));
 		let resp = match self {
 			AIProvider::Anthropic(p) => p.process_streaming(log, resp).await,
-			AIProvider::Bedrock(p) => p.process_streaming(log, resp, model.as_str()).await,
+			AIProvider::Bedrock(p) => {
+				match route_type {
+					RouteType::Messages => {
+						p.process_streaming_messages(log, rate_limit, resp, model.as_str()).await
+					},
+					_ => {
+						p.process_streaming(log, resp, model.as_str()).await
+					},
+				}
+			},
 			_ => {
 				self
 					.default_process_streaming(log, include_completion_in_log, rate_limit, resp)
@@ -653,6 +666,7 @@ impl AIProvider {
 		&self,
 		req: &universal::Request,
 		tokenize: bool,
+		route_type: RouteType,
 	) -> Result<LLMRequest, AIError> {
 		let input_tokens = if tokenize {
 			// TODO: avoid clone, we need it for spawn_blocking though
@@ -673,6 +687,7 @@ impl AIProvider {
 			request_model: req.model.clone().unwrap_or_default().as_str().into(),
 			provider: self.provider(),
 			streaming: req.stream.unwrap_or_default(),
+			route_type,
 			params: LLMRequestParams {
 				temperature: req.temperature.map(Into::into),
 				top_p: req.top_p.map(Into::into),

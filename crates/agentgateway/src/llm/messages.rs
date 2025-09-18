@@ -1578,15 +1578,32 @@ pub mod egress {
                     if first_chunk && !chunk.choices.is_empty() {
                         first_chunk = false;
                         return Some(types::StreamEvent::MessageStart {
-                            message: types::StreamResponseMessage {
+                            message: types::MessagesResponse {
                                 id: chunk.id.clone(),
                                 r#type: "message".to_string(),
-                                role: types::MessageRole::Assistant,
+                                role: "assistant".to_string(),
                                 model: chunk.model.clone(),
                                 content: Vec::new(),
                                 stop_reason: None,
                                 stop_sequence: None,
-                                usage: None,
+                                usage: chunk.usage.map(|u| types::Usage {
+                                    input_tokens: u.prompt_tokens,
+                                    output_tokens: u.completion_tokens,
+                                    cache_creation_input_tokens: u.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens),
+                                    cache_read_input_tokens: u.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens),
+                                    cache_creation: None,
+                                    server_tool_use: None,
+                                    service_tier: None,
+                                }).unwrap_or(types::Usage {
+                                    input_tokens: 0,
+                                    output_tokens: 0,
+                                    cache_creation_input_tokens: None,
+                                    cache_read_input_tokens: None,
+                                    cache_creation: None,
+                                    server_tool_use: None,
+                                    service_tier: None,
+                                }),
+                                container: None,
                             },
                         });
                     }

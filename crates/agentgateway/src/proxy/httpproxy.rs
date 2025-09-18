@@ -23,7 +23,7 @@ use crate::http::{
 	Authority, HeaderName, HeaderValue, PolicyResponse, Request, Response, Scheme, StatusCode, Uri,
 	auth, filters, get_host, merge_in_headers, retry,
 };
-use crate::llm::{LLMRequest, RequestResult, RouteType};
+use crate::llm::{BackendAdapter, LLMRequest, RequestResult, RouteType};
 use crate::proxy::{ProxyError, ProxyResponse, resolve_simple_backend};
 use crate::store::{BackendPolicies, LLMRequestPolicies, LLMResponsePolicies};
 use crate::telemetry::log;
@@ -877,6 +877,7 @@ async fn make_backend_call(
 						route_policies.llm.as_deref(),
 						req,
 						llm.tokenize,
+						route_type,
 						&mut log,
 					)
 					.await
@@ -956,23 +957,60 @@ async fn make_backend_call(
 					}
 				};
 
-				// Phase 2C: Replace request body with Universal format JSON
-				let universal_body = match serde_json::to_vec(&universal_request) {
-					Ok(json_bytes) => json_bytes,
-					Err(e) => {
-						return Ok(Box::pin(async move {
-							Ok(::http::Response::builder()
-								.status(::http::StatusCode::INTERNAL_SERVER_ERROR)
-								.header(::http::header::CONTENT_TYPE, "application/json")
-								.body(http::Body::from(format!(
-									"{{\"error\":\"Failed to serialize Universal request: {}\"}}", e
-								)))
-								.expect("Failed to build response"))
-						}));
+				// Phase 2C: Convert Universal → Provider format (Bedrock)
+				let provider_request_body = match llm.provider {
+					llm::AIProvider::Bedrock(ref bedrock_provider) => {
+						// Convert to UniversalRequest format for BackendAdapter
+						let universal_req = crate::llm::universal::convert_to_universal_request(&universal_request);
+						// Use BackendAdapter to convert Universal → Bedrock format
+						match bedrock_provider.to_backend(&universal_req) {
+							Ok(bedrock_req) => match serde_json::to_vec(&bedrock_req) {
+								Ok(json_bytes) => json_bytes,
+								Err(e) => {
+									return Ok(Box::pin(async move {
+										Ok(::http::Response::builder()
+											.status(::http::StatusCode::INTERNAL_SERVER_ERROR)
+											.header(::http::header::CONTENT_TYPE, "application/json")
+											.body(http::Body::from(format!(
+												"{{\"error\":\"Failed to serialize Bedrock request: {}\"}}", e
+											)))
+											.expect("Failed to build response"))
+									}));
+								}
+							},
+							Err(e) => {
+								return Ok(Box::pin(async move {
+									Ok(::http::Response::builder()
+										.status(::http::StatusCode::BAD_REQUEST)
+										.header(::http::header::CONTENT_TYPE, "application/json")
+										.body(http::Body::from(format!(
+											"{{\"error\":\"Failed to convert to Bedrock format: {}\"}}", e
+										)))
+										.expect("Failed to build response"))
+								}));
+							}
+						}
+					},
+					_ => {
+						// For other providers, use Universal format as fallback
+						match serde_json::to_vec(&universal_request) {
+							Ok(json_bytes) => json_bytes,
+							Err(e) => {
+								return Ok(Box::pin(async move {
+									Ok(::http::Response::builder()
+										.status(::http::StatusCode::INTERNAL_SERVER_ERROR)
+										.header(::http::header::CONTENT_TYPE, "application/json")
+										.body(http::Body::from(format!(
+											"{{\"error\":\"Failed to serialize Universal request: {}\"}}", e
+										)))
+										.expect("Failed to build response"))
+								}));
+							}
+						}
 					}
 				};
 
-				*req.body_mut() = http::Body::from(universal_body);
+				*req.body_mut() = http::Body::from(provider_request_body);
 
 				// Phase 2D: Create LLMRequest for logging and policies  
 				let llm_request = LLMRequest {
@@ -980,6 +1018,7 @@ async fn make_backend_call(
 					request_model: messages_request.model.clone().into(),
 					provider: llm.provider.provider(),
 					streaming: messages_request.stream.unwrap_or(false),
+					route_type,
 					params: LLMRequestParams {
 						temperature: messages_request.temperature.map(|t| t as f64),
 						top_p: messages_request.top_p.map(|t| t as f64),
