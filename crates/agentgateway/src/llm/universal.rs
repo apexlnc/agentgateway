@@ -425,11 +425,12 @@ pub fn convert_to_universal_request(req: &Request) -> UniversalRequest {
 				let text = match &sys_msg.content {
 					RequestSystemMessageContent::Text(t) => t.clone(),
 					RequestSystemMessageContent::Array(blocks) => {
-						// Join text blocks for now
+						// Extract text from system message content blocks
 						blocks.iter()
 							.filter_map(|block| match block {
-								// Assuming there's a text variant - adjust based on actual type
-								_ => Some("".to_string()) // TODO: Implement proper text extraction
+								async_openai::types::ChatCompletionRequestSystemMessageContentPart::Text(text_part) => {
+									Some(text_part.text.as_str())
+								}
 							})
 							.collect::<Vec<_>>()
 							.join("\n")
@@ -462,7 +463,10 @@ pub fn convert_to_universal_request(req: &Request) -> UniversalRequest {
 									id: tool_call.id.clone(),
 									name: tool_call.function.name.clone(),
 									input: serde_json::from_str(&tool_call.function.arguments)
-										.unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+										.unwrap_or_else(|_| {
+											debug!("Failed to parse tool call arguments as JSON: {}", tool_call.function.arguments);
+											serde_json::Value::Object(serde_json::Map::new())
+										}),
 								});
 							}
 						}
@@ -471,10 +475,14 @@ pub fn convert_to_universal_request(req: &Request) -> UniversalRequest {
 						#[allow(deprecated)]
 						if let Some(function_call) = &assistant_msg.function_call {
 							blocks.push(ContentBlock::ToolUse {
-								id: format!("func-{}", chrono::Utc::now().timestamp_nanos()),
+								id: format!("legacy-func-{}", function_call.name), // More descriptive ID
 								name: function_call.name.clone(),
 								input: serde_json::from_str(&function_call.arguments)
-									.unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+									.unwrap_or_else(|_| {
+										// Log parsing errors for debugging
+										debug!("Failed to parse function_call arguments as JSON: {}", function_call.arguments);
+										serde_json::Value::Object(serde_json::Map::new())
+									}),
 							});
 						}
 					},
@@ -491,19 +499,36 @@ pub fn convert_to_universal_request(req: &Request) -> UniversalRequest {
 							}
 						};
 						
+						// Try to infer status from content
+						let status = if content_text.to_lowercase().contains("error") || 
+									 content_text.to_lowercase().contains("failed") ||
+									 content_text.to_lowercase().contains("exception") {
+							Some(ToolResultStatus::Error)
+						} else {
+							Some(ToolResultStatus::Success)
+						};
+						
 						blocks.push(ContentBlock::ToolResult {
 							tool_use_id: tool_msg.tool_call_id.clone(),
 							content: vec![ContentBlock::Text { text: content_text }],
-							status: Some(ToolResultStatus::Success), // Assume success unless we can parse error info
+							status,
 						});
 					},
 					RequestMessage::Function(function_msg) => {
+						let content_text = function_msg.content.clone().unwrap_or_default();
+						// Try to infer status from content
+						let status = if content_text.to_lowercase().contains("error") || 
+									 content_text.to_lowercase().contains("failed") ||
+									 content_text.to_lowercase().contains("exception") {
+							Some(ToolResultStatus::Error)
+						} else {
+							Some(ToolResultStatus::Success)
+						};
+						
 						blocks.push(ContentBlock::ToolResult {
-							tool_use_id: format!("func-{}", function_msg.name),
-							content: vec![ContentBlock::Text { 
-								text: function_msg.content.clone().unwrap_or_default() 
-							}],
-							status: Some(ToolResultStatus::Success),
+							tool_use_id: format!("legacy-func-{}", function_msg.name),
+							content: vec![ContentBlock::Text { text: content_text }],
+							status,
 						});
 					},
 					_ => {}

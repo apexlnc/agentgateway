@@ -921,16 +921,18 @@ async fn make_backend_call(
 				let universal_request = messages::ingress::to_universal(&messages_request, req.headers())
 					.map_err(|e| ProxyError::ProcessingString(format!("Request validation failed: {}", e)))?;
 
-				// Convert Universal to provider format using BackendAdapter
+				// Convert to provider format
 				let provider_request_body = match &llm.provider {
 					llm::AIProvider::Bedrock(bedrock_provider) => {
-						let universal_req = crate::llm::universal::convert_to_universal_request(&universal_request);
-						let bedrock_req = bedrock_provider.to_backend(&universal_req)
+						// Convert OpenAI-compat Universal to IR Universal for BackendAdapter
+						let universal_ir = crate::llm::universal::convert_to_universal_request(&universal_request);
+						let bedrock_req = bedrock_provider.to_backend(&universal_ir)
 							.map_err(|e| ProxyError::ProcessingString(format!("Failed to convert to Bedrock format: {}", e)))?;
 						serde_json::to_vec(&bedrock_req)
 							.map_err(|e| ProxyError::ProcessingString(format!("Failed to serialize Bedrock request: {}", e)))?
 					},
 					_ => {
+						// For other providers, use OpenAI-compat Universal format directly
 						serde_json::to_vec(&universal_request)
 							.map_err(|e| ProxyError::ProcessingString(format!("Failed to serialize Universal request: {}", e)))?
 					}
