@@ -302,7 +302,7 @@ impl TryFrom<&proto::agent::Backend> for Backend {
 							},
 							Some(proto::agent::ai_backend::provider::Provider::Bedrock(bedrock)) => {
 								AIProvider::Bedrock(llm::bedrock::Provider {
-									common: llm::bedrock::common::Common {
+									common: llm::bedrock::Common {
 										model: bedrock.model.as_deref().map(strng::new),
 										region: strng::new(&bedrock.region),
 										guardrail_identifier: bedrock.guardrail_identifier.as_deref().map(strng::new),

@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, ready};
 use std::time::Instant;
 use tracing::{debug, instrument, warn};
@@ -21,8 +22,15 @@ use tokio_util::codec::Decoder;
 /// Maximum size for accumulated tool JSON input (2MB - matches standard payload limits in codebase)
 const MAX_TOOL_JSON_SIZE: usize = 2_097_152;
 
+/// Global memory limit for all streaming buffers to prevent DoS attacks
+const GLOBAL_BUFFER_LIMIT: usize = 50_000_000; // 50MB total across all streams
+
+/// Global counter for memory usage across all streaming operations
+static GLOBAL_BUFFER_USAGE: AtomicUsize = AtomicUsize::new(0);
+
+
 use super::{
-	common,
+	Common,
 	types::{
 		self as bedrock, CachePointBlock, CachePointType, ContentBlock, ConverseErrorResponse,
 		ConverseRequest, ConverseResponse,
@@ -56,7 +64,7 @@ pub struct AnthropicHeaders {
 pub struct Provider {
 	/// Shared Bedrock configuration
 	#[serde(flatten)]
-	pub common: common::Common,
+	pub common: Common,
 }
 
 impl crate::llm::Provider for Provider {
@@ -105,8 +113,8 @@ impl Provider {
 				"Model resolution completed"
 		);
 
-		// Set model ID once after resolution
-		anthropic_request.model = bedrock_model_id.clone();
+		// Set model ID once after resolution  
+		anthropic_request.model = bedrock_model_id.clone(); // This stays as String clone (external API)
 
 		let bedrock_request = translate_request(&anthropic_request, &self.common, anthropic_headers)?;
 
@@ -344,8 +352,8 @@ impl BedrockStreamProcessor {
 	/// Create a new stream processor
 	fn new(message_id: String, model: String) -> Self {
 		Self {
-			message_id,
-			model,
+			message_id,  // Use String directly - no conversion overhead
+			model,       // Use String directly - no conversion overhead
 			tool_json_buffers: HashMap::new(),
 			content_block_metadata: HashMap::new(),
 			seen_first_token: false,
@@ -438,11 +446,11 @@ impl BedrockStreamProcessor {
 	) -> Result<StreamEvent, AIError> {
 		// Create initial message with empty content for message_start
 		let message = anthropic::MessagesResponse {
-			id: self.message_id.clone(),
+			id: self.message_id.clone(), // Direct String clone - no Arc overhead
 			r#type: "message".to_string(),
 			role: "assistant".to_string(),
 			content: Vec::new(),
-			model: self.model.clone(),
+			model: self.model.clone(),    // Direct String clone - no Arc overhead
 			stop_reason: None,
 			stop_sequence: None,
 			usage: anthropic::Usage {
@@ -470,16 +478,17 @@ impl BedrockStreamProcessor {
 
 		let (content_block, metadata) = match start_event.start {
 			bedrock::ContentBlockStart::ToolUse(tool_start) => {
+				// Avoid unnecessary clones by reordering operations
 				let metadata = ContentBlockMetadata {
 					block_type: ContentBlockType::ToolUse,
-					tool_use_id: Some(tool_start.tool_use_id.clone()),
-					tool_name: Some(tool_start.name.clone()),
+					tool_use_id: Some(tool_start.tool_use_id.clone()),  // This clone is needed for metadata
+					tool_name: Some(tool_start.name.clone()),          // This clone is needed for metadata
 				};
 
 				let content_block =
 					anthropic::ResponseContentBlock::ToolUse(anthropic::ResponseToolUseBlock {
-						id: tool_start.tool_use_id,
-						name: tool_start.name,
+						id: tool_start.tool_use_id,      // Move (no clone needed)
+						name: tool_start.name,           // Move (no clone needed) 
 						input: serde_json::Value::Object(serde_json::Map::new()), // Empty initially
 					});
 
@@ -554,11 +563,22 @@ impl BedrockStreamProcessor {
 				// Accumulate partial JSON for tool inputs with bounds checking
 				let json_buffer = self.tool_json_buffers.entry(index).or_default();
 
-				// Check size limit to prevent memory exhaustion
-				if json_buffer.len() + tool_delta.input.len() > MAX_TOOL_JSON_SIZE {
-					self.tool_json_buffers.remove(&index);
+				// Check both per-buffer and global memory limits to prevent DoS attacks
+				let new_size = json_buffer.len() + tool_delta.input.len();
+				let current_global_usage = GLOBAL_BUFFER_USAGE.load(Ordering::Relaxed);
+				
+				if new_size > MAX_TOOL_JSON_SIZE || 
+				   current_global_usage + tool_delta.input.len() > GLOBAL_BUFFER_LIMIT {
+					// Clean up buffer and return error
+					if let Some(removed_buffer) = self.tool_json_buffers.remove(&index) {
+						// Decrement global counter for removed buffer
+						GLOBAL_BUFFER_USAGE.fetch_sub(removed_buffer.len(), Ordering::Relaxed);
+					}
 					return Err(crate::llm::AIError::RequestTooLarge);
 				}
+				
+				// Update global counter for new data
+				GLOBAL_BUFFER_USAGE.fetch_add(tool_delta.input.len(), Ordering::Relaxed);
 
 				json_buffer.push_str(&tool_delta.input);
 
@@ -596,11 +616,14 @@ impl BedrockStreamProcessor {
 		// Clean up tool JSON buffer if present - don't validate, just pass through
 		if let Some(metadata) = self.content_block_metadata.get(&index)
 			&& metadata.block_type == ContentBlockType::ToolUse
-			&& let Some(_json_buffer) = self.tool_json_buffers.remove(&index)
+			&& let Some(json_buffer) = self.tool_json_buffers.remove(&index)
 		{
+			// Update global counter when removing buffer
+			GLOBAL_BUFFER_USAGE.fetch_sub(json_buffer.len(), Ordering::Relaxed);
+			
 			// Drop JSON re-parse attempt; it's client concern.
 			// If you want visibility, log the length at debug and move on.
-			debug!("assembled tool input JSON (len={})", _json_buffer.len());
+			debug!("assembled tool input JSON (len={})", json_buffer.len());
 		}
 
 		// Clean up metadata
@@ -677,9 +700,14 @@ impl BedrockStreamProcessor {
 	fn finalize(&mut self) -> Result<StreamEvent, AIError> {
 		// Clean up any remaining buffers - no validation needed
 		if !self.tool_json_buffers.is_empty() {
+			// Calculate total size and decrement global counter
+			let total_size: usize = self.tool_json_buffers.values().map(|s| s.len()).sum();
+			GLOBAL_BUFFER_USAGE.fetch_sub(total_size, Ordering::Relaxed);
+			
 			debug!(
-				"clearing {} tool JSON buffers at stream end",
-				self.tool_json_buffers.len()
+				"clearing {} tool JSON buffers at stream end (total size: {} bytes)",
+				self.tool_json_buffers.len(),
+				total_size
 			);
 			self.tool_json_buffers.clear();
 		}
@@ -895,7 +923,7 @@ pub fn extract_anthropic_headers(headers: &HeaderMap) -> Result<AnthropicHeaders
 #[tracing::instrument(skip_all, fields(model = %anthropic_request.model, max_tokens = anthropic_request.max_tokens))]
 pub fn translate_request(
 	anthropic_request: &MessagesRequest,
-	common: &common::Common,
+	common: &Common,
 	anthropic_headers: &AnthropicHeaders,
 ) -> Result<ConverseRequest, AIError> {
 	let model = &anthropic_request.model;
@@ -1671,7 +1699,7 @@ mod tests {
 	#[test]
 	fn test_header_building() {
 		let provider = Provider {
-			common: common::Common {
+			common: Common {
 				region: strng::new("us-east-1"),
 				model: None,
 				guardrail_identifier: None,

@@ -91,13 +91,13 @@ pub enum MessageRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RequestContentBlock {
-	Text(RequestTextBlock),
-	Image(RequestImageBlock),
-	Document(RequestDocumentBlock),
-	ToolUse(RequestToolUseBlock),
-	ToolResult(RequestToolResultBlock),
-	Thinking(RequestThinkingBlock),
-	SearchResult(RequestSearchResultBlock),
+	Text(RequestTextBlock),                        // Small - keep unboxed
+	Image(Box<RequestImageBlock>),                 // Large - box it (contains base64 data)
+	Document(Box<RequestDocumentBlock>),           // Large - box it (contains document data + multiple fields)
+	ToolUse(Box<RequestToolUseBlock>),             // Large - box it (contains serde_json::Value)
+	ToolResult(Box<RequestToolResultBlock>),       // Large - box it (can contain Vec<RequestContentBlock>)
+	Thinking(Box<RequestThinkingBlock>),           // Large - box it (contains potentially large text)
+	SearchResult(Box<RequestSearchResultBlock>),   // Large - box it (contains search results)
 }
 
 /// Content block type

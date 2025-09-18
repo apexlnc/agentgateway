@@ -550,7 +550,7 @@ pub enum ConverseStreamOutput {
 
 impl ConverseStreamOutput {
 	/// Deserialize from AWS event-stream message
-	pub fn deserialize(message: aws_event_stream_parser::Message) -> anyhow::Result<Self> {
+	pub fn deserialize(message: aws_event_stream_parser::Message) -> Result<Self, crate::llm::AIError> {
 		// Extract event type from headers
 		let event_type = message
 			.headers
@@ -561,47 +561,47 @@ impl ConverseStreamOutput {
 				aws_event_stream_parser::HeaderValue::String(s) => Some(s.as_str()),
 				_ => None,
 			})
-			.ok_or_else(|| anyhow::anyhow!("Missing :event-type header"))?;
+			.ok_or_else(|| crate::llm::AIError::MissingField(":event-type header".into()))?;
 
 		// Parse body based on event type
 		match event_type {
 			"messageStart" => Ok(ConverseStreamOutput::MessageStart(serde_json::from_slice(
 				&message.body,
-			)?)),
+			).map_err(crate::llm::AIError::ResponseParsing)?)),
 			"contentBlockStart" => Ok(ConverseStreamOutput::ContentBlockStart(
-				serde_json::from_slice(&message.body)?,
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
 			)),
 			"contentBlockDelta" => Ok(ConverseStreamOutput::ContentBlockDelta(
-				serde_json::from_slice(&message.body)?,
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
 			)),
 			"contentBlockStop" => Ok(ConverseStreamOutput::ContentBlockStop(
-				serde_json::from_slice(&message.body)?,
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
 			)),
 			"messageStop" => Ok(ConverseStreamOutput::MessageStop(serde_json::from_slice(
 				&message.body,
-			)?)),
+			).map_err(crate::llm::AIError::ResponseParsing)?)),
 			"metadata" => Ok(ConverseStreamOutput::Metadata(serde_json::from_slice(
 				&message.body,
-			)?)),
+			).map_err(crate::llm::AIError::ResponseParsing)?)),
 
 			// Error events
 			"internalServerException" => Ok(ConverseStreamOutput::InternalServerException(
-				serde_json::from_slice(&message.body)?,
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
 			)),
 			"modelStreamErrorException" => Ok(ConverseStreamOutput::ModelStreamErrorException(
-				serde_json::from_slice(&message.body)?,
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
 			)),
 			"serviceUnavailableException" => Ok(ConverseStreamOutput::ServiceUnavailableException(
-				serde_json::from_slice(&message.body)?,
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
 			)),
 			"throttlingException" => Ok(ConverseStreamOutput::ThrottlingException(
-				serde_json::from_slice(&message.body)?,
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
 			)),
 			"validationException" => Ok(ConverseStreamOutput::ValidationException(
-				serde_json::from_slice(&message.body)?,
+				serde_json::from_slice(&message.body).map_err(crate::llm::AIError::ResponseParsing)?,
 			)),
 
-			unknown => Err(anyhow::anyhow!("Unknown event type: {}", unknown)),
+			_unknown => Err(crate::llm::AIError::UnsupportedContent),
 		}
 	}
 }

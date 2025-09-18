@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 use tracing::{debug, trace, warn};
 
-use super::{common, types};
+use super::{types, Common};
 use crate::http::Response;
 use crate::llm::{AIError, LLMResponse, universal};
 use crate::telemetry::log::AsyncLog;
@@ -26,7 +26,7 @@ use schemars::JsonSchema;
 pub struct Provider {
 	/// Shared Bedrock configuration
 	#[serde(flatten)]
-	pub common: common::Common,
+	pub common: Common,
 }
 
 impl crate::llm::Provider for Provider {
