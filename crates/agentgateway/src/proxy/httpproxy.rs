@@ -33,6 +33,7 @@ use crate::telemetry::trc::TraceParent;
 use crate::transport::stream::{Extension, TCPConnectionInfo, TLSConnectionInfo};
 use crate::{ProxyInputs, store, *};
 use crate::llm::messages;
+use crate::llm::universal;
 use crate::llm::LLMRequestParams;
 
 fn select_backend(route: &Route, _req: &Request) -> Option<RouteBackendReference> {
@@ -1114,18 +1115,24 @@ async fn make_backend_call(
 			// Convert response format based on route type
 			if llm_request.route_type == RouteType::Messages {
 				// For Messages API, convert Universal format response to Anthropic Messages API format
-				if let Ok(body_bytes) = axum::body::to_bytes(processed_resp.body_mut(), 2_097_152).await {
+				let body = std::mem::replace(processed_resp.body_mut(), http::Body::empty());
+				if let Ok(body_bytes) = axum::body::to_bytes(body, 2_097_152).await {
 					if let Ok(universal_response) = serde_json::from_slice::<universal::Response>(&body_bytes) {
 						match messages::egress::from_universal_json(&universal_response) {
 							Ok(messages_response) => {
 								let messages_json = serde_json::to_vec(&messages_response)
-									.map_err(|e| ProxyError::Processing(format!("Failed to serialize Messages response: {}", e).into()))?;
+									.map_err(|e| ProxyError::Processing(anyhow!("Failed to serialize Messages response: {}", e)))?;
 								*processed_resp.body_mut() = http::Body::from(messages_json);
 							}
 							Err(e) => {
 								debug!("Failed to convert to Messages format, keeping Universal format: {:?}", e);
+								// Restore original body
+								*processed_resp.body_mut() = http::Body::from(body_bytes);
 							}
 						}
+					} else {
+						// Restore original body if JSON parsing failed
+						*processed_resp.body_mut() = http::Body::from(body_bytes);
 					}
 				}
 			}
