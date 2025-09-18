@@ -204,9 +204,9 @@ impl Provider {
 			},
 		};
 
-		let error_type = extract_bedrock_error_type(status_code.as_u16(), Some(&bedrock_error));
+		let error_type = super::translate::extract_error_type(status_code.as_u16(), Some(&bedrock_error));
 
-		let anthropic_error = translate_error_response(bedrock_error, error_type.as_deref())?;
+		let anthropic_error = super::translate::error_to_anthropic(bedrock_error, Some(&error_type))?;
 
 		Ok(anthropic_error)
 	}
@@ -637,17 +637,8 @@ impl BedrockStreamProcessor {
 		&mut self,
 		stop_event: super::types::MessageStopEvent,
 	) -> Result<StreamEvent, AIError> {
-		use super::types as bedrock;
-
 		// Convert stop reason
-		let stop_reason = match stop_event.stop_reason {
-			bedrock::StopReason::EndTurn => anthropic::StopReason::EndTurn,
-			bedrock::StopReason::ToolUse => anthropic::StopReason::ToolUse,
-			bedrock::StopReason::MaxTokens => anthropic::StopReason::MaxTokens,
-			bedrock::StopReason::StopSequence => anthropic::StopReason::StopSequence,
-			bedrock::StopReason::GuardrailIntervened => anthropic::StopReason::Refusal,
-			bedrock::StopReason::ContentFiltered => anthropic::StopReason::Refusal,
-		};
+		let stop_reason = super::translate::translate_stop_reason_to_anthropic(stop_event.stop_reason);
 
 		let delta = anthropic::MessageDelta {
 			stop_reason: Some(stop_reason),
@@ -938,11 +929,11 @@ pub fn translate_request(
 		bedrock_request = bedrock_request.with_system(system_blocks);
 	}
 	let inference_config = translate_inference_config(
-		anthropic_request.max_tokens as i32,
+		super::translate::options::normalize_max_tokens_anthropic(anthropic_request.max_tokens),
 		anthropic_request.temperature,
 		anthropic_request.top_p,
 		anthropic_request.top_k,
-		anthropic_request.stop_sequences.clone(),
+		super::translate::options::normalize_stop_sequences_anthropic(anthropic_request.stop_sequences.clone()),
 	)?;
 	bedrock_request = bedrock_request.with_inference_config(inference_config);
 
@@ -1409,6 +1400,7 @@ fn translate_system_prompt(
 	}
 }
 
+// Removed duplicate inference config translation - now using shared bedrock::translate::options::build_inference_config
 fn translate_inference_config(
 	max_tokens: i32,
 	temperature: Option<f32>,
@@ -1416,12 +1408,12 @@ fn translate_inference_config(
 	_top_k: Option<u32>, // Bedrock doesn't have top_k in inference config
 	stop_sequences: Option<Vec<String>>,
 ) -> Result<bedrock::InferenceConfiguration, AIError> {
-	Ok(bedrock::InferenceConfiguration {
-		max_tokens: Some(max_tokens),
+	Ok(super::translate::options::build_inference_config(
+		max_tokens,
 		temperature,
 		top_p,
 		stop_sequences,
-	})
+	))
 }
 
 fn translate_tools_and_choice(
@@ -1498,42 +1490,10 @@ fn translate_tool_choice(anthropic_choice: anthropic::ToolChoice) -> bedrock::To
 	}
 }
 
-/// Implement From trait for cleaner enum conversion
-impl From<bedrock::StopReason> for anthropic::StopReason {
-	fn from(bedrock_stop_reason: bedrock::StopReason) -> Self {
-		match bedrock_stop_reason {
-			bedrock::StopReason::EndTurn => anthropic::StopReason::EndTurn,
-			bedrock::StopReason::MaxTokens => anthropic::StopReason::MaxTokens,
-			bedrock::StopReason::StopSequence => anthropic::StopReason::StopSequence,
-			bedrock::StopReason::ToolUse => anthropic::StopReason::ToolUse,
-			bedrock::StopReason::ContentFiltered => anthropic::StopReason::Refusal, // Map content filter to refusal
-			bedrock::StopReason::GuardrailIntervened => anthropic::StopReason::Refusal, // Map guardrails to refusal
-		}
-	}
-}
+// Removed duplicate stop reason mapping - now using shared bedrock::translate::stop_reason_to_anthropic
+// From trait implementation moved to bedrock::common for consistency
 
-/// Legacy translation function for backward compatibility
-fn translate_stop_reason(bedrock_stop_reason: bedrock::StopReason) -> anthropic::StopReason {
-	bedrock_stop_reason.into()
-}
-
-/// Translate Bedrock usage to Anthropic usage
-fn translate_usage(
-	bedrock_usage: Option<bedrock::TokenUsage>,
-) -> Result<anthropic::Usage, AIError> {
-	match bedrock_usage {
-		Some(usage) => Ok(anthropic::Usage {
-			input_tokens: usage.input_tokens,
-			output_tokens: usage.output_tokens,
-			cache_creation_input_tokens: usage.cache_write_input_tokens,
-			cache_read_input_tokens: usage.cache_read_input_tokens,
-			cache_creation: None, // Bedrock doesn't provide detailed cache creation breakdown
-			server_tool_use: None, // Bedrock doesn't track server tool usage
-			service_tier: None,   // Bedrock doesn't expose service tier
-		}),
-		None => Err(AIError::MissingField("usage information".into())),
-	}
-}
+// Removed duplicate usage mapping - now using shared bedrock::translate::usage_to_anthropic
 
 /// Translate Bedrock response to Anthropic MessagesResponse
 pub fn translate_response(
@@ -1554,10 +1514,10 @@ pub fn translate_response(
 	let content = translate_response_content_blocks(output_message.content)?;
 
 	// Translate stop reason
-	let stop_reason = bedrock_response.stop_reason.map(translate_stop_reason);
+	let stop_reason = bedrock_response.stop_reason.map(super::translate::translate_stop_reason_to_anthropic);
 
 	// Translate usage information
-	let usage = translate_usage(bedrock_response.usage)?;
+	let usage = super::translate::usage_to_anthropic(bedrock_response.usage)?;
 
 	// Extract response ID from AWS Request ID header if available, otherwise use random ID
 	// Always prefix with msg_ for Anthropic client compatibility
@@ -1642,55 +1602,9 @@ fn translate_response_content_block(
 	Ok(anthropic_block)
 }
 
-/// Extract Bedrock error type from status code and error response
-pub fn extract_bedrock_error_type(
-	status_code: u16,
-	error_response: Option<&super::types::ConverseErrorResponse>,
-) -> Option<String> {
-	// Map common HTTP status codes to Anthropic error types
-	match status_code {
-		400 => Some("invalid_request_error".to_string()),
-		401 => Some("authentication_error".to_string()),
-		403 => Some("permission_error".to_string()),
-		404 => Some("not_found_error".to_string()),
-		429 => Some("rate_limit_error".to_string()),
-		500 => Some("api_error".to_string()),
-		502..=504 => Some("api_error".to_string()),
-		_ => {
-			// Try to extract error type from Bedrock error response
-			error_response.and_then(|e| e.error_type.as_ref()).map(|t| {
-				match t.as_str() {
-					"ValidationException" => "invalid_request_error",
-					"ThrottlingException" => "rate_limit_error",
-					"AccessDeniedException" => "permission_error",
-					"ResourceNotFoundException" => "not_found_error",
-					"InternalServerException" => "api_error",
-					"ServiceUnavailableException" => "overloaded_error",
-					_ => "api_error",
-				}
-				.to_string()
-			})
-		},
-	}
-}
+// Removed wrapper function - calling code now uses super::translate::extract_error_type directly
 
-/// Translate Bedrock error response to Anthropic error response
-pub fn translate_error_response(
-	bedrock_error: super::types::ConverseErrorResponse,
-	error_type: Option<&str>,
-) -> Result<anthropic::MessagesErrorResponse, AIError> {
-	let anthropic_error_type = error_type.unwrap_or("api_error").to_string();
-
-	let anthropic_error = anthropic::ApiError {
-		error_type: anthropic_error_type,
-		message: bedrock_error.message,
-	};
-
-	Ok(anthropic::MessagesErrorResponse {
-		response_type: "error".to_string(),
-		error: anthropic_error,
-	})
-}
+// Removed wrapper function - calling code now uses super::translate::error_to_anthropic directly
 
 #[cfg(test)]
 mod tests {

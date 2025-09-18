@@ -66,7 +66,7 @@ impl Provider {
 	) -> Result<universal::ChatCompletionErrorResponse, AIError> {
 		let resp = serde_json::from_slice::<types::ConverseErrorResponse>(bytes)
 			.map_err(AIError::ResponseParsing)?;
-		translate_error(resp)
+		super::translate::error_to_openai(resp)
 	}
 
 	pub async fn process_streaming(
@@ -192,13 +192,7 @@ impl Provider {
 
 							mk(
 								vec![],
-								Some(universal::Usage {
-									prompt_tokens: usage.input_tokens,
-									completion_tokens: usage.output_tokens,
-									total_tokens: usage.total_tokens,
-									prompt_tokens_details: None,
-									completion_tokens_details: None,
-								}),
+								Some(super::translate::usage_to_openai(Some(usage))),
 							)
 						} else {
 							None
@@ -228,20 +222,7 @@ impl Provider {
 	}
 }
 
-pub(super) fn translate_error(
-	resp: types::ConverseErrorResponse,
-) -> Result<universal::ChatCompletionErrorResponse, AIError> {
-	Ok(universal::ChatCompletionErrorResponse {
-		event_id: None,
-		error: universal::ChatCompletionError {
-			r#type: "invalid_request_error".to_string(),
-			message: resp.message,
-			param: None,
-			code: None,
-			event_id: None,
-		},
-	})
-}
+// Removed wrapper function - calling code now uses super::translate::error_to_openai directly
 
 pub fn translate_response(
 	resp: types::ConverseResponse,
@@ -403,10 +384,10 @@ pub fn translate_request(req: universal::Request, provider: &Provider) -> types:
 		.collect();
 
 	let inference_config = types::InferenceConfiguration {
-		max_tokens: Some(universal::max_tokens(&req) as i32),
+		max_tokens: Some(super::translate::options::normalize_max_tokens_openai(&req)),
 		temperature: req.temperature,
 		top_p: req.top_p,
-		stop_sequences: Some(universal::stop_sequence(&req)),
+		stop_sequences: Some(super::translate::options::normalize_stop_sequences_openai(&req)),
 	};
 
 	// Build guardrail configuration if specified
