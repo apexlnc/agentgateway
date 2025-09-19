@@ -25,6 +25,7 @@ use crate::{client, *};
 pub mod anthropic;
 pub mod bedrock;
 pub mod gemini;
+pub mod messages;
 pub mod openai;
 mod pii;
 pub mod policy;
@@ -134,6 +135,7 @@ pub struct LLMRequest {
 	pub request_model: Strng,
 	pub provider: Strng,
 	pub streaming: bool,
+	pub route_type: RouteType,
 	pub params: llm::LLMRequestParams,
 }
 
@@ -643,6 +645,7 @@ impl AIProvider {
 			request_model: req.model.clone().unwrap_or_default().as_str().into(),
 			provider: self.provider(),
 			streaming: req.stream.unwrap_or_default(),
+			route_type: RouteType::Completions, // Default to Completions for now
 			params: LLMRequestParams {
 				temperature: req.temperature.map(Into::into),
 				top_p: req.top_p.map(Into::into),
@@ -748,6 +751,20 @@ pub enum AIError {
 	Encoding(axum_core::Error),
 	#[error("error computing tokens")]
 	JoinError(#[from] tokio::task::JoinError),
+	#[error("messages array is empty")]
+	EmptyMessages,
+	#[error("invalid max_tokens value: {0}")]
+	InvalidMaxTokens(u32),
+	#[error("message content is empty")]
+	EmptyMessageContent,
+	#[error("duplicate tool name: {0}")]
+	DuplicateToolName(String),
+	#[error("invalid tool name: {0}")]
+	InvalidToolName(String),
+	#[error("invalid tool definition")]
+	InvalidToolDefinition,
+	#[error("tool use without corresponding tool definition")]
+	UnpairedToolUse,
 }
 
 fn amend_tokens(rate_limit: store::LLMResponsePolicies, llm_resp: &LLMResponse) {

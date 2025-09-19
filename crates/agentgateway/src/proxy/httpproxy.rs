@@ -24,6 +24,9 @@ use crate::http::{
 	auth, filters, get_host, merge_in_headers, retry,
 };
 use crate::llm::{LLMRequest, RequestResult, RouteType};
+use crate::llm::messages;
+use crate::llm::universal;
+use crate::llm::LLMRequestParams;
 use crate::proxy::{ProxyError, ProxyResponse, resolve_simple_backend};
 use crate::store::{BackendPolicies, LLMRequestPolicies, LLMResponsePolicies};
 use crate::telemetry::log;
@@ -910,7 +913,75 @@ async fn make_backend_call(
 				log.add(|l| l.llm_request = Some(llm_request.clone()));
 				(req, response_policies, Some(llm_request))
 			},
-			RouteType::Messages | RouteType::Models => {
+			RouteType::Messages => {
+				// Read and parse Messages API request body
+				let body = std::mem::replace(req.body_mut(), http::Body::empty());
+				let body_bytes = axum::body::to_bytes(body, 2_097_152).await
+					.map_err(|e| ProxyError::ProcessingString(format!("Failed to read request body: {}", e)))?;
+
+				let messages_request: messages::MessagesRequest = serde_json::from_slice(&body_bytes)
+					.map_err(|e| ProxyError::ProcessingString(format!("Invalid JSON in request body: {}", e)))?;
+
+				// Convert Messages API to OpenAI format (the IR)
+				let openai_request = messages::ingress::to_universal(&messages_request, req.headers())
+					.map_err(|e| ProxyError::ProcessingString(format!("Request validation failed: {}", e)))?;
+
+				// Convert OpenAI format to provider format
+				let provider_request_body = match &llm.provider {
+					llm::AIProvider::Bedrock(bedrock_provider) => {
+						// Use direct OpenAI → Bedrock conversion
+						let bedrock_req = bedrock_provider.process_request(openai_request).await
+							.map_err(|e| ProxyError::ProcessingString(format!("Failed to convert to Bedrock format: {}", e)))?;
+						serde_json::to_vec(&bedrock_req)
+							.map_err(|e| ProxyError::ProcessingString(format!("Failed to serialize Bedrock request: {}", e)))?
+					},
+					_ => {
+						// For other providers, use OpenAI format directly
+						serde_json::to_vec(&openai_request)
+							.map_err(|e| ProxyError::ProcessingString(format!("Failed to serialize OpenAI request: {}", e)))?
+					}
+				};
+
+				*req.body_mut() = http::Body::from(provider_request_body);
+
+				// Create LLMRequest for logging and policies
+				let llm_request = LLMRequest {
+					input_tokens: Some(messages::estimate_tokens(&messages_request) as u64),
+					request_model: messages_request.model.clone().into(),
+					provider: llm.provider.provider(),
+					streaming: messages_request.stream.unwrap_or(false),
+					route_type,
+					params: LLMRequestParams {
+						temperature: messages_request.temperature.map(|t| t as f64),
+						top_p: messages_request.top_p.map(|t| t as f64),
+						max_tokens: Some(messages_request.max_tokens as u64),
+						frequency_penalty: None,
+						presence_penalty: None,
+						seed: None,
+					},
+				};
+
+				// Apply standard LLM processing
+				if llm.use_default_policies() {
+					llm
+						.provider
+						.setup_request(&mut req, route_type, Some(&llm_request))
+						.map_err(ProxyError::Processing)?;
+				}
+
+				let response_policies = apply_llm_request_policies(
+					&route_policies,
+					policy_client,
+					&mut log,
+					&mut req,
+					&llm_request,
+					response_headers,
+				)
+				.await?;
+				log.add(|l| l.llm_request = Some(llm_request.clone()));
+				(req, response_policies, Some(llm_request))
+			},
+			RouteType::Models => {
 				return Ok(Box::pin(async move {
 					Ok(
 						::http::Response::builder()
@@ -956,7 +1027,10 @@ async fn make_backend_call(
 			.await
 			.map_err(ProxyError::Processing)?;
 		let mut resp = if let (Some(llm), Some(llm_request)) = (policies.llm_provider, llm_request) {
-			llm
+			// Extract route type before moving llm_request
+			let route_type = llm_request.route_type;
+
+			let mut processed_resp = llm
 				.provider
 				.process_response(
 					&client,
@@ -967,7 +1041,32 @@ async fn make_backend_call(
 					resp,
 				)
 				.await
-				.map_err(|e| ProxyError::Processing(e.into()))?
+				.map_err(|e| ProxyError::Processing(e.into()))?;
+
+			// Convert response format based on route type
+			if route_type == RouteType::Messages {
+				let body = std::mem::replace(processed_resp.body_mut(), http::Body::empty());
+				if let Ok(body_bytes) = axum::body::to_bytes(body, 2_097_152).await {
+					if let Ok(universal_response) = serde_json::from_slice::<universal::Response>(&body_bytes) {
+						match messages::egress::from_universal_json(&universal_response) {
+							Ok(messages_response) => {
+								let messages_json = serde_json::to_vec(&messages_response)
+									.map_err(|e| ProxyError::Processing(anyhow!("Failed to serialize Messages response: {}", e)))?;
+								*processed_resp.body_mut() = http::Body::from(messages_json);
+							}
+							Err(e) => {
+								debug!("Failed to convert to Messages format, keeping Universal format: {:?}", e);
+								// Restore original body
+								*processed_resp.body_mut() = http::Body::from(body_bytes);
+							}
+						}
+					} else {
+						// Restore original body if JSON parsing failed
+						*processed_resp.body_mut() = http::Body::from(body_bytes);
+					}
+				}
+			}
+			processed_resp
 		} else {
 			resp
 		};
