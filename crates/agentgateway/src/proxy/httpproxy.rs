@@ -917,30 +917,29 @@ async fn make_backend_call(
 				let messages_request: messages::MessagesRequest = serde_json::from_slice(&body_bytes)
 					.map_err(|e| ProxyError::ProcessingString(format!("Invalid JSON in request body: {}", e)))?;
 
-				// Convert Messages to Universal format
-				let universal_request = messages::ingress::to_universal(&messages_request, req.headers())
+				// Convert Messages API to OpenAI format (the IR)
+				let openai_request = messages::ingress::to_universal(&messages_request, req.headers())
 					.map_err(|e| ProxyError::ProcessingString(format!("Request validation failed: {}", e)))?;
 
-				// Convert to provider format
+				// Convert OpenAI format to provider format using BackendAdapter
 				let provider_request_body = match &llm.provider {
 					llm::AIProvider::Bedrock(bedrock_provider) => {
-						// Convert OpenAI-compat Universal to IR Universal for BackendAdapter
-						let universal_ir = crate::llm::universal::convert_to_universal_request(&universal_request);
-						let bedrock_req = bedrock_provider.to_backend(&universal_ir)
+						// Use new direct OpenAI → Bedrock conversion
+						let bedrock_req = bedrock_provider.to_backend(&openai_request)
 							.map_err(|e| ProxyError::ProcessingString(format!("Failed to convert to Bedrock format: {}", e)))?;
 						serde_json::to_vec(&bedrock_req)
 							.map_err(|e| ProxyError::ProcessingString(format!("Failed to serialize Bedrock request: {}", e)))?
 					},
 					_ => {
-						// For other providers, use OpenAI-compat Universal format directly
-						serde_json::to_vec(&universal_request)
-							.map_err(|e| ProxyError::ProcessingString(format!("Failed to serialize Universal request: {}", e)))?
+						// For other providers, use OpenAI format directly
+						serde_json::to_vec(&openai_request)
+							.map_err(|e| ProxyError::ProcessingString(format!("Failed to serialize OpenAI request: {}", e)))?
 					}
 				};
 
 				*req.body_mut() = http::Body::from(provider_request_body);
 
-				// Create LLMRequest for logging and policies  
+				// Create LLMRequest for logging and policies
 				let llm_request = LLMRequest {
 					input_tokens: Some(messages::estimate_tokens(&messages_request) as u64),
 					request_model: messages_request.model.clone().into(),

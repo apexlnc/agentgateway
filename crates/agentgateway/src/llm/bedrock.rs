@@ -40,246 +40,96 @@ impl super::Provider for Provider {
 // Implement BackendAdapter trait for Provider
 impl BackendAdapter for Provider {
 	type BReq = ConverseRequest;
-	type BResp = ConverseResponse; 
+	type BResp = ConverseResponse;
 	type BStream = ConverseStreamOutput;
 
-	/// Convert Universal request to Bedrock ConverseRequest format
-	fn to_backend(&self, ureq: &universal::UniversalRequest) -> Result<Self::BReq, AIError> {
+	/// Convert OpenAI request to Bedrock ConverseRequest format
+	fn to_backend(&self, req: &universal::Request) -> Result<Self::BReq, AIError> {
 		// Use provider's model if configured, otherwise use request model
 		let model = if let Some(provider_model) = &self.model {
 			provider_model.to_string()
+		} else if let Some(req_model) = &req.model {
+			req_model.clone()
 		} else {
-			ureq.caps.model.clone()
+			return Err(AIError::MissingField("model not specified".into()));
 		};
-		
-		Ok(translate_universal_request(ureq, self, &model))
-	}
-	
-	/// Convert Bedrock ConverseResponse to Universal message format
-	fn from_backend(&self, bresp: Self::BResp, model_id: &str) -> Result<universal::UniversalMessage, AIError> {
-		let model = self.model.as_deref().unwrap_or(model_id);
-		
-		// Get the output content from the response
-		let output = bresp.output.ok_or(AIError::IncompleteResponse)?;
-		
-		// Extract the message from the output
-		let message = match output {
-			types::ConverseOutput::Message { message: msg } => msg,
-		};
-		
-		// Convert Bedrock content blocks to Universal blocks
-		let mut blocks = Vec::new();
-		for block in &message.content {
-			match block {
-				ContentBlock::Text(text) => {
-					blocks.push(universal::ContentBlock::Text { text: text.clone() });
-				},
-				ContentBlock::Image(image_block) => {
-					// Convert Bedrock image to Universal with DataRef
-					let (data_ref, mime) = match &image_block.source {
-						types::ImageSource::Bytes { data } => {
-							let mime = match image_block.format {
-								types::ImageFormat::Png => "image/png".to_string(),
-								types::ImageFormat::Jpeg => "image/jpeg".to_string(),
-								types::ImageFormat::Gif => "image/gif".to_string(),
-								types::ImageFormat::Webp => "image/webp".to_string(),
-							};
-							(universal::DataRef::Base64(data.clone()), mime)
-						},
-						types::ImageSource::S3Location { s3_location } => {
-							// Use the S3 URI directly
-							let mime = match image_block.format {
-								types::ImageFormat::Png => "image/png".to_string(),
-								types::ImageFormat::Jpeg => "image/jpeg".to_string(),
-								types::ImageFormat::Gif => "image/gif".to_string(),
-								types::ImageFormat::Webp => "image/webp".to_string(),
-							};
-							(universal::DataRef::Uri(s3_location.uri.clone()), mime)
-						},
-					};
-					blocks.push(universal::ContentBlock::Image {
-						mime,
-						data: data_ref,
-					});
-				},
-				ContentBlock::ToolResult(tr) => {
-					// Convert Bedrock ToolResult to lossless Universal format
-					let content = tr.content
-						.iter()
-						.map(|content_block| match content_block {
-							ContentBlock::Text(text) => {
-								universal::ContentBlock::Text { text: text.clone() }
-							},
-							_ => {
-								// Handle other content block types as needed
-								universal::ContentBlock::Text { text: "Unsupported content type".to_string() }
-							}
-						})
-						.collect();
-					
-					let status = tr.status.as_ref().map(|s| match s {
-						types::ToolResultStatus::Success => universal::ToolResultStatus::Success,
-						types::ToolResultStatus::Error => universal::ToolResultStatus::Error,
-					});
 
-					blocks.push(universal::ContentBlock::ToolResult {
-						tool_use_id: tr.tool_use_id.clone(),
-						content,
-						status,
-					});
-				},
-				ContentBlock::ToolUse(tu) => {
-					blocks.push(universal::ContentBlock::ToolUse {
-						id: tu.tool_use_id.clone(),
-						name: tu.name.clone(),
-						input: tu.input.clone(),
-					});
-				},
-				ContentBlock::Document(_doc) => {
-					// TODO: Implement document support
-					// For now, skip document blocks
-					continue;
-				},
-				ContentBlock::CachePoint(_) => {
-					// Cache points are metadata, not content - skip them
-					continue;
-				},
-				ContentBlock::ReasoningContent(_reasoning) => {
-					// TODO: Implement reasoning content support
-					// For now, skip reasoning blocks
-					continue;
-				},
-			}
-		}
-		
-		// Map Bedrock stop reason to Universal stop reason
-		let stop_reason = match bresp.stop_reason {
-			Some(StopReason::EndTurn) => universal::StopReason::EndTurn,
-			Some(StopReason::MaxTokens) => universal::StopReason::MaxTokens,
-			Some(StopReason::StopSequence) => universal::StopReason::StopSequence,
-			Some(StopReason::ContentFiltered) => universal::StopReason::ContentFilter,
-			Some(StopReason::GuardrailIntervened) => universal::StopReason::ContentFilter,
-			Some(StopReason::ToolUse) => universal::StopReason::ToolUse,
-			None => universal::StopReason::EndTurn, // Default if no stop reason provided
-		};
-		
-		// Convert usage from Bedrock format to Universal format
-		let usage = bresp.usage.map(|token_usage| universal::Usage {
-			prompt_tokens: token_usage.input_tokens as u32,
-			completion_tokens: token_usage.output_tokens as u32,
-			total_tokens: token_usage.total_tokens as u32,
-			prompt_tokens_details: None,
-			completion_tokens_details: None,
-		});
-		
-		// Generate a unique ID since it's not provided in the response
-		let id = format!("bedrock-{}", chrono::Utc::now().timestamp_millis());
-		
-		Ok(universal::UniversalMessage {
-			id,
-			model: model.to_string(),
-			role: universal::MessageRole::Assistant,
-			blocks,
-			usage,
-			stop_reason: Some(stop_reason),
-			vendor: None, // TODO: Add vendor-specific data if needed
-		})
+		// Use new direct OpenAI → Bedrock conversion
+		Ok(translate_openai_request(req, self, &model))
 	}
-	
-	/// Convert Bedrock streaming events to Universal frames
-	fn stream_map(&mut self, ev: Self::BStream) -> Result<Vec<universal::UFrame>, AIError> {
-		let mut frames = Vec::new();
-		
+
+	/// Convert Bedrock ConverseResponse to OpenAI response format
+	fn from_backend(&self, bresp: Self::BResp, model_id: &str) -> Result<universal::Response, AIError> {
+		// Use existing translate_response method that already handles Bedrock → OpenAI conversion
+		translate_response(bresp, self.model.as_deref().unwrap_or(model_id))
+	}
+
+	/// Convert Bedrock streaming events to OpenAI streaming format
+	fn stream_map(&mut self, ev: Self::BStream) -> Result<Vec<universal::ChatChoiceStream>, AIError> {
+		// Convert Bedrock streaming events to OpenAI ChatChoiceStream format
+		let mut choices = Vec::new();
+
 		match ev {
 			ConverseStreamOutput::MessageStart(start) => {
-				let role = match start.role {
-					types::Role::Assistant => universal::MessageRole::Assistant,
-					types::Role::User => universal::MessageRole::User,
-				};
-				// Generate a temporary ID for streaming
-				let id = format!("bedrock-stream-{}", chrono::Utc::now().timestamp_millis());
-				frames.push(universal::UFrame::MessageStart {
-					id,
-					model: self.model.as_deref().unwrap_or("unknown").to_string(),
-					role,
-				});
-			},
-			ConverseStreamOutput::ContentBlockStart(start) => {
-				match &start.start {
-					types::ContentBlockStart::ToolUse(tool_start) => {
-						// Emit ToolUseStart frame for tool use
-						frames.push(universal::UFrame::ToolUseStart {
-							idx: start.content_block_index as usize,
-							id: tool_start.tool_use_id.clone(),
-							name: tool_start.name.clone(),
-						});
+				let choice = universal::ChatChoiceStream {
+					index: 0,
+					logprobs: None,
+					delta: universal::StreamResponseDelta {
+						role: Some(match start.role {
+							types::Role::Assistant => universal::Role::Assistant,
+							types::Role::User => universal::Role::User,
+						}),
+						content: None,
+						refusal: None,
+						#[allow(deprecated)]
+						function_call: None,
+						tool_calls: None,
 					},
-					_ => {
-						// Default to text block for Text or Reasoning blocks
-						frames.push(universal::UFrame::BlockStart {
-							idx: start.content_block_index as usize,
-							kind: universal::BlockKind::Text,
-						});
-					}
-				}
+					finish_reason: None,
+				};
+				choices.push(choice);
 			},
 			ConverseStreamOutput::ContentBlockDelta(delta) => {
 				if let ContentBlockDelta::Text { text } = &delta.delta {
-					frames.push(universal::UFrame::Delta {
-						idx: delta.content_block_index as usize,
-						text: text.clone(),
-					});
+					let choice = universal::ChatChoiceStream {
+						index: 0,
+						logprobs: None,
+						delta: universal::StreamResponseDelta {
+							role: None,
+							content: Some(text.clone()),
+							refusal: None,
+							#[allow(deprecated)]
+							function_call: None,
+							tool_calls: None,
+						},
+						finish_reason: None,
+					};
+					choices.push(choice);
 				}
-				// TODO: Handle ToolUse deltas when they're added to ContentBlockDelta
-			},
-			ConverseStreamOutput::ContentBlockStop(stop) => {
-				frames.push(universal::UFrame::BlockStop {
-					idx: stop.content_block_index as usize,
-				});
+				// TODO: Handle ToolUse deltas for tool_calls
 			},
 			ConverseStreamOutput::MessageStop(stop) => {
-				let stop_reason = match stop.stop_reason {
-					StopReason::EndTurn => universal::StopReason::EndTurn,
-					StopReason::MaxTokens => universal::StopReason::MaxTokens,
-					StopReason::StopSequence => universal::StopReason::StopSequence,
-					StopReason::ContentFiltered => universal::StopReason::ContentFilter,
-					StopReason::GuardrailIntervened => universal::StopReason::ContentFilter,
-					StopReason::ToolUse => universal::StopReason::ToolUse,
+				let finish_reason = Some(translate_stop_reason(&stop.stop_reason));
+				let choice = universal::ChatChoiceStream {
+					index: 0,
+					logprobs: None,
+					delta: universal::StreamResponseDelta {
+						role: None,
+						content: None,
+						refusal: None,
+						#[allow(deprecated)]
+						function_call: None,
+						tool_calls: None,
+					},
+					finish_reason,
 				};
-				frames.push(universal::UFrame::MessageStop { stop_reason });
+				choices.push(choice);
 			},
-			ConverseStreamOutput::Metadata(metadata) => {
-				if let Some(usage) = metadata.usage {
-					// Emit usage as MessageDelta before MessageStop (Anthropic requirement)
-					frames.push(universal::UFrame::MessageDelta {
-						usage: universal::Usage {
-							prompt_tokens: usage.input_tokens as u32,
-							completion_tokens: usage.output_tokens as u32,
-							total_tokens: usage.total_tokens as u32,
-							prompt_tokens_details: None,
-							completion_tokens_details: None,
-						},
-					});
-				}
-			},
-			ConverseStreamOutput::InternalServerException(_) => {
-				// Skip error events in UFrame conversion
-			},
-			ConverseStreamOutput::ModelStreamErrorException(_) => {
-				// Skip error events in UFrame conversion
-			},
-			ConverseStreamOutput::ServiceUnavailableException(_) => {
-				// Skip error events in UFrame conversion
-			},
-			ConverseStreamOutput::ThrottlingException(_) => {
-				// Skip error events in UFrame conversion
-			},
-			ConverseStreamOutput::ValidationException(_) => {
-				// Skip error events in UFrame conversion
-			},
+			// Skip other events for now - they don't map directly to OpenAI streaming format
+			_ => {},
 		}
-		
-		Ok(frames)
+
+		Ok(choices)
 	}
 }
 
@@ -294,10 +144,9 @@ impl Provider {
 		} else if req.model.is_none() {
 			return Err(AIError::MissingField("model not specified".into()));
 		}
-		let universal_req = universal::convert_to_universal_request(&req);
-		let bedrock_request = translate_universal_request(&universal_req, self, req.model.as_deref().unwrap_or_default());
 
-		Ok(bedrock_request)
+		// Use direct OpenAI → Bedrock conversion
+		Ok(translate_openai_request(&req, self, req.model.as_deref().unwrap_or_default()))
 	}
 
 	pub async fn process_response(
@@ -654,103 +503,65 @@ fn translate_stop_reason(resp: &StopReason) -> FinishReason {
 	}
 }
 
-pub(super) fn translate_universal_request(ureq: &universal::UniversalRequest, provider: &Provider, model: &str) -> ConverseRequest {
-	// Convert system blocks to Bedrock system content blocks
-	let system = if ureq.system.is_empty() {
+/// Convert OpenAI request directly to Bedrock ConverseRequest format
+pub(super) fn translate_openai_request(req: &universal::Request, provider: &Provider, model: &str) -> ConverseRequest {
+	// Extract system messages from OpenAI format
+	let mut system_text = Vec::new();
+	let mut messages = Vec::new();
+
+	for msg in &req.messages {
+		match msg {
+			universal::RequestMessage::System(sys_msg) => {
+				let text = match &sys_msg.content {
+					universal::RequestSystemMessageContent::Text(t) => t.clone(),
+					universal::RequestSystemMessageContent::Array(blocks) => {
+						blocks.iter()
+							.filter_map(|block| match block {
+								async_openai::types::ChatCompletionRequestSystemMessageContentPart::Text(text_part) => {
+									Some(text_part.text.as_str())
+								}
+							})
+							.collect::<Vec<_>>()
+							.join("\n")
+					}
+				};
+				system_text.push(text);
+			},
+			_ => {
+				// Convert OpenAI messages to Bedrock format
+				let role = match msg {
+					universal::RequestMessage::User(_) => types::Role::User,
+					universal::RequestMessage::Assistant(_) => types::Role::Assistant,
+					universal::RequestMessage::Tool(_) => types::Role::User, // Tool messages become user
+					universal::RequestMessage::System(_) => continue, // Already handled above
+					universal::RequestMessage::Function(_) => types::Role::User, // Map deprecated function to user
+					universal::RequestMessage::Developer(_) => types::Role::User, // Map developer to user
+				};
+
+				let content = convert_openai_message_to_bedrock_content(msg);
+				if !content.is_empty() {
+					messages.push(types::Message { role, content });
+				}
+			}
+		}
+	}
+
+	// Build system content blocks
+	let system = if system_text.is_empty() {
 		None
 	} else {
-		let system_text = ureq.system
-			.iter()
-			.filter_map(|block| match block {
-				universal::ContentBlock::Text { text } => Some(text.clone()),
-				_ => None, // Skip non-text system blocks for now
-			})
-			.collect::<Vec<String>>()
-			.join("\n");
-		
-		if system_text.is_empty() {
-			None
-		} else {
-			Some(vec![types::SystemContentBlock::Text(system_text)])
-		}
+		Some(vec![types::SystemContentBlock::Text(system_text.join("\n"))])
 	};
 
-	// Convert Universal messages to Bedrock format
-	let messages: Vec<types::Message> = ureq.messages
-		.iter()
-		.filter_map(|msg| {
-			let role = match msg.role {
-				universal::MessageRole::Assistant => types::Role::Assistant,
-				universal::MessageRole::User => types::Role::User,
-				universal::MessageRole::System => return None, // Skip system (handled above)
-				universal::MessageRole::Tool => types::Role::User, // Tool messages become user
-			};
-
-			let content: Vec<ContentBlock> = msg.blocks
-				.iter()
-				.filter_map(|block| match block {
-					universal::ContentBlock::Text { text } => {
-						Some(ContentBlock::Text(text.clone()))
-					},
-					universal::ContentBlock::ToolUse { id, name, input } => {
-						Some(ContentBlock::ToolUse(types::ToolUseBlock {
-							tool_use_id: id.clone(),
-							name: name.clone(),
-							input: input.clone(),
-						}))
-					},
-					universal::ContentBlock::ToolResult { tool_use_id, content, status } => {
-						// Convert array of ContentBlocks to ToolResultContentBlocks
-						let tool_content = content
-							.iter()
-							.filter_map(|block| match block {
-								universal::ContentBlock::Text { text } => {
-									Some(ContentBlock::Text(text.clone()))
-								},
-								_ => None, // Only text supported in tool results for now
-							})
-							.collect();
-						
-						let bedrock_status = status.as_ref().map(|s| match s {
-							universal::ToolResultStatus::Success => types::ToolResultStatus::Success,
-							universal::ToolResultStatus::Error => types::ToolResultStatus::Error,
-						});
-
-						Some(ContentBlock::ToolResult(types::ToolResultBlock {
-							tool_use_id: tool_use_id.clone(),
-							content: tool_content,
-							status: bedrock_status,
-						}))
-					},
-					universal::ContentBlock::Image { .. } => {
-						// TODO: Handle images when needed
-						None
-					},
-					universal::ContentBlock::Document { .. } => {
-						// TODO: Handle documents when needed  
-						None
-					},
-					universal::ContentBlock::Thinking { .. } => {
-						// Skip thinking blocks (Anthropic-specific)
-						None
-					},
-				})
-				.collect();
-
-			if !content.is_empty() {
-				Some(types::Message { role, content })
-			} else {
-				None
-			}
-		})
-		.collect();
-
-	// Build inference configuration from caps
+	// Build inference configuration from OpenAI request fields
 	let inference_config = types::InferenceConfiguration {
-		max_tokens: Some(ureq.caps.max_tokens as i32),
-		temperature: ureq.caps.temperature,
-		top_p: ureq.caps.top_p,
-		stop_sequences: Some(ureq.caps.stop_sequences.clone().unwrap_or_default()),
+		max_tokens: req.max_completion_tokens.or(req.max_tokens.map(|t| t as i32)),
+		temperature: req.temperature,
+		top_p: req.top_p,
+		stop_sequences: req.stop.as_ref().map(|stop| match stop {
+			async_openai::types::Stop::String(s) => vec![s.clone()],
+			async_openai::types::Stop::StringArray(arr) => arr.clone(),
+		}),
 	};
 
 	// Build guardrail configuration if specified
@@ -767,14 +578,14 @@ pub(super) fn translate_universal_request(ureq: &universal::UniversalRequest, pr
 	};
 
 	// Convert tools to Bedrock format
-	let tool_config = ureq.tools.as_ref().map(|tools| {
+	let tool_config = req.tools.as_ref().map(|tools| {
 		let bedrock_tools = tools
 			.iter()
 			.map(|tool| {
 				let tool_spec = types::ToolSpecification {
-					name: tool.name.clone(),
-					description: tool.description.clone(),
-					input_schema: Some(types::ToolInputSchema::Json(tool.input_schema.clone())),
+					name: tool.function.name.clone(),
+					description: tool.function.description.clone(),
+					input_schema: Some(types::ToolInputSchema::Json(tool.function.parameters.clone())),
 				};
 				types::Tool::ToolSpec(tool_spec)
 			})
@@ -782,7 +593,7 @@ pub(super) fn translate_universal_request(ureq: &universal::UniversalRequest, pr
 
 		types::ToolConfiguration {
 			tools: bedrock_tools,
-			tool_choice: None, // TODO: Add tool choice support
+			tool_choice: None, // TODO: Map OpenAI tool_choice to Bedrock format
 		}
 	});
 
@@ -795,10 +606,94 @@ pub(super) fn translate_universal_request(ureq: &universal::UniversalRequest, pr
 		guardrail_config,
 		additional_model_request_fields: None,
 		additional_model_response_field_paths: None,
-		request_metadata: None, // TODO: Extract from vendor data if needed
+		request_metadata: None,
 		performance_config: None,
 	}
 }
+
+/// Convert OpenAI message content to Bedrock ContentBlocks
+fn convert_openai_message_to_bedrock_content(msg: &universal::RequestMessage) -> Vec<ContentBlock> {
+	let mut content = Vec::new();
+
+	match msg {
+		universal::RequestMessage::User(user_msg) => {
+			match &user_msg.content {
+				universal::RequestUserMessageContent::Text(text) => {
+					content.push(ContentBlock::Text(text.clone()));
+				},
+				universal::RequestUserMessageContent::Array(parts) => {
+					for part in parts {
+						match part {
+							async_openai::types::ChatCompletionRequestUserMessageContentPart::Text(text_part) => {
+								content.push(ContentBlock::Text(text_part.text.clone()));
+							},
+							async_openai::types::ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
+								// TODO: Convert image URLs to Bedrock image format
+								// For now, skip images
+							},
+							async_openai::types::ChatCompletionRequestUserMessageContentPart::Audio(_) => {
+								// TODO: Handle audio content
+								// For now, skip audio
+							},
+						}
+					}
+				}
+			}
+		},
+		universal::RequestMessage::Assistant(assistant_msg) => {
+			if let Some(content_text) = &assistant_msg.content {
+				content.push(ContentBlock::Text(content_text.clone()));
+			}
+			if let Some(tool_calls) = &assistant_msg.tool_calls {
+				for tool_call in tool_calls {
+					content.push(ContentBlock::ToolUse(types::ToolUseBlock {
+						tool_use_id: tool_call.id.clone(),
+						name: tool_call.function.name.clone(),
+						input: serde_json::from_str(&tool_call.function.arguments)
+							.unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+					}));
+				}
+			}
+		},
+		universal::RequestMessage::Tool(tool_msg) => {
+			content.push(ContentBlock::ToolResult(types::ToolResultBlock {
+				tool_use_id: tool_msg.tool_call_id.clone(),
+				content: vec![ContentBlock::Text(tool_msg.content.clone())],
+				status: None, // OpenAI doesn't have explicit success/error status
+			}));
+		},
+		universal::RequestMessage::Function(func_msg) => {
+			// Legacy function message - treat as tool result
+			content.push(ContentBlock::ToolResult(types::ToolResultBlock {
+				tool_use_id: func_msg.name.clone(), // Use function name as tool_use_id
+				content: vec![ContentBlock::Text(func_msg.content.clone())],
+				status: None,
+			}));
+		},
+		universal::RequestMessage::Developer(dev_msg) => {
+			match &dev_msg.content {
+				universal::RequestDeveloperMessageContent::Text(text) => {
+					content.push(ContentBlock::Text(text.clone()));
+				},
+				universal::RequestDeveloperMessageContent::Array(parts) => {
+					for part in parts {
+						match part {
+							async_openai::types::ChatCompletionRequestDeveloperMessageContentPart::Text(text_part) => {
+								content.push(ContentBlock::Text(text_part.text.clone()));
+							},
+						}
+					}
+				}
+			}
+		},
+		universal::RequestMessage::System(_) => {
+			// System messages handled separately
+		}
+	}
+
+	content
+}
+
 
 
 pub(super) mod types {
