@@ -505,6 +505,18 @@ fn translate_stop_reason(resp: &StopReason) -> FinishReason {
 
 /// Convert OpenAI request directly to Bedrock ConverseRequest format
 pub(super) fn translate_openai_request(req: &universal::Request, provider: &Provider, model: &str) -> ConverseRequest {
+	// Extract tool_results_meta from vendor bag for proper ToolResult.status handling
+	let tool_results_meta = req.vendor
+		.as_ref()
+		.and_then(|vendor| vendor.get("anthropic"))
+		.and_then(|anthropic| anthropic.get("tool_results_meta"))
+		.and_then(|meta| meta.as_object())
+		.map(|obj| {
+			obj.iter()
+				.filter_map(|(k, v)| v.as_bool().map(|b| (k.clone(), b)))
+				.collect::<std::collections::HashMap<String, bool>>()
+		});
+
 	// Extract system messages from OpenAI format
 	let mut system_text = Vec::new();
 	let mut messages = Vec::new();
@@ -538,7 +550,7 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 					universal::RequestMessage::Developer(_) => types::Role::User, // Map developer to user
 				};
 
-				let content = convert_openai_message_to_bedrock_content(msg);
+				let content = convert_openai_message_to_bedrock_content(msg, tool_results_meta.as_ref());
 				if !content.is_empty() {
 					messages.push(types::Message { role, content });
 				}
@@ -555,7 +567,7 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 
 	// Build inference configuration from OpenAI request fields
 	let inference_config = types::InferenceConfiguration {
-		max_tokens: req.max_completion_tokens.or(req.max_tokens.map(|t| t as i32)),
+		max_tokens: req.max_completion_tokens.map(|t| t as i32).or(req.max_tokens.map(|t| t as i32)),
 		temperature: req.temperature,
 		top_p: req.top_p,
 		stop_sequences: req.stop.as_ref().map(|stop| match stop {
@@ -585,7 +597,7 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 				let tool_spec = types::ToolSpecification {
 					name: tool.function.name.clone(),
 					description: tool.function.description.clone(),
-					input_schema: Some(types::ToolInputSchema::Json(tool.function.parameters.clone())),
+					input_schema: Some(types::ToolInputSchema::Json(tool.function.parameters.clone().unwrap_or_default())),
 				};
 				types::Tool::ToolSpec(tool_spec)
 			})
@@ -593,7 +605,31 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 
 		types::ToolConfiguration {
 			tools: bedrock_tools,
-			tool_choice: None, // TODO: Map OpenAI tool_choice to Bedrock format
+			tool_choice: req.tool_choice.as_ref().and_then(|choice| {
+				match choice {
+					universal::ToolChoiceOption::None => {
+						// OpenAI "none" -> No tool choice (omit tool_choice field entirely)
+						None
+					},
+					universal::ToolChoiceOption::Auto => {
+						Some(types::ToolChoice::Auto(types::AutoToolChoice {
+							auto: serde_json::Value::Object(serde_json::Map::new()), // {}
+						}))
+					},
+					universal::ToolChoiceOption::Required => {
+						Some(types::ToolChoice::Any(types::AnyToolChoice {
+							any: serde_json::Value::Object(serde_json::Map::new()), // {}
+						}))
+					},
+					universal::ToolChoiceOption::Named(named) => {
+						Some(types::ToolChoice::Tool(types::ToolChoiceSpecific {
+							tool: types::ToolChoiceToolSpec {
+								name: named.function.name.clone(),
+							},
+						}))
+					},
+				}
+			}),
 		}
 	});
 
@@ -612,7 +648,10 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 }
 
 /// Convert OpenAI message content to Bedrock ContentBlocks
-fn convert_openai_message_to_bedrock_content(msg: &universal::RequestMessage) -> Vec<ContentBlock> {
+fn convert_openai_message_to_bedrock_content(
+	msg: &universal::RequestMessage, 
+	tool_results_meta: Option<&std::collections::HashMap<String, bool>>
+) -> Vec<ContentBlock> {
 	let mut content = Vec::new();
 
 	match msg {
@@ -627,11 +666,11 @@ fn convert_openai_message_to_bedrock_content(msg: &universal::RequestMessage) ->
 							async_openai::types::ChatCompletionRequestUserMessageContentPart::Text(text_part) => {
 								content.push(ContentBlock::Text(text_part.text.clone()));
 							},
-							async_openai::types::ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
+							async_openai::types::ChatCompletionRequestUserMessageContentPart::ImageUrl(_image_part) => {
 								// TODO: Convert image URLs to Bedrock image format
 								// For now, skip images
 							},
-							async_openai::types::ChatCompletionRequestUserMessageContentPart::Audio(_) => {
+							async_openai::types::ChatCompletionRequestUserMessageContentPart::InputAudio(_) => {
 								// TODO: Handle audio content
 								// For now, skip audio
 							},
@@ -642,7 +681,23 @@ fn convert_openai_message_to_bedrock_content(msg: &universal::RequestMessage) ->
 		},
 		universal::RequestMessage::Assistant(assistant_msg) => {
 			if let Some(content_text) = &assistant_msg.content {
-				content.push(ContentBlock::Text(content_text.clone()));
+				let text = match content_text {
+					universal::RequestAssistantMessageContent::Text(text) => text.clone(),
+					universal::RequestAssistantMessageContent::Array(parts) => {
+						// Convert array of content parts to text - for now, just extract text parts
+						parts.iter().filter_map(|part| {
+							match part {
+								async_openai::types::ChatCompletionRequestAssistantMessageContentPart::Text(text_part) => {
+									Some(text_part.text.as_str())
+								}
+								async_openai::types::ChatCompletionRequestAssistantMessageContentPart::Refusal(refusal_part) => {
+									Some(refusal_part.refusal.as_str())
+								}
+							}
+						}).collect::<Vec<_>>().join("\n")
+					}
+				};
+				content.push(ContentBlock::Text(text));
 			}
 			if let Some(tool_calls) = &assistant_msg.tool_calls {
 				for tool_call in tool_calls {
@@ -656,17 +711,40 @@ fn convert_openai_message_to_bedrock_content(msg: &universal::RequestMessage) ->
 			}
 		},
 		universal::RequestMessage::Tool(tool_msg) => {
+			let text = match &tool_msg.content {
+				universal::RequestToolMessageContent::Text(text) => text.clone(),
+				universal::RequestToolMessageContent::Array(parts) => {
+					parts.iter().filter_map(|part| {
+						match part {
+							async_openai::types::ChatCompletionRequestToolMessageContentPart::Text(text_part) => {
+								Some(text_part.text.as_str())
+							}
+						}
+					}).collect::<Vec<_>>().join("\n")
+				}
+			};
+			// Look up is_error from vendor bag to set appropriate Bedrock ToolResult.status
+			let status = tool_results_meta
+				.and_then(|meta| meta.get(&tool_msg.tool_call_id))
+				.map(|is_error| {
+					if *is_error {
+						types::ToolResultStatus::Error
+					} else {
+						types::ToolResultStatus::Success
+					}
+				});
+
 			content.push(ContentBlock::ToolResult(types::ToolResultBlock {
 				tool_use_id: tool_msg.tool_call_id.clone(),
-				content: vec![ContentBlock::Text(tool_msg.content.clone())],
-				status: None, // OpenAI doesn't have explicit success/error status
+				content: vec![ContentBlock::Text(text)],
+				status,
 			}));
 		},
 		universal::RequestMessage::Function(func_msg) => {
 			// Legacy function message - treat as tool result
 			content.push(ContentBlock::ToolResult(types::ToolResultBlock {
 				tool_use_id: func_msg.name.clone(), // Use function name as tool_use_id
-				content: vec![ContentBlock::Text(func_msg.content.clone())],
+				content: vec![ContentBlock::Text(func_msg.content.clone().unwrap_or_default())],
 				status: None,
 			}));
 		},
@@ -677,11 +755,7 @@ fn convert_openai_message_to_bedrock_content(msg: &universal::RequestMessage) ->
 				},
 				universal::RequestDeveloperMessageContent::Array(parts) => {
 					for part in parts {
-						match part {
-							async_openai::types::ChatCompletionRequestDeveloperMessageContentPart::Text(text_part) => {
-								content.push(ContentBlock::Text(text_part.text.clone()));
-							},
-						}
+						content.push(ContentBlock::Text(part.text.clone()));
 					}
 				}
 			}

@@ -801,6 +801,8 @@ pub enum AIError {
 	UnpairedToolUse(String),
 	#[error("unpaired tool result: tool_result for id '{0}' has no matching tool_use")]
 	UnpairedToolResult(String),
+	#[error("duplicate tool result: multiple tool_result blocks for id '{0}'")]
+	DuplicateToolResult(String),
 	#[error("invalid message sequence: {0}")]
 	InvalidMessageSequence(String),
 	#[error("empty message content")]

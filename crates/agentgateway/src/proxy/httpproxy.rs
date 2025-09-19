@@ -23,7 +23,7 @@ use crate::http::{
 	Authority, HeaderName, HeaderValue, PolicyResponse, Request, Response, Scheme, StatusCode, Uri,
 	auth, filters, get_host, merge_in_headers, retry,
 };
-use crate::llm::{BackendAdapter, LLMRequest, RequestResult, RouteType};
+use crate::llm::{LLMRequest, RequestResult, RouteType};
 use crate::proxy::{ProxyError, ProxyResponse, resolve_simple_backend};
 use crate::store::{BackendPolicies, LLMRequestPolicies, LLMResponsePolicies};
 use crate::telemetry::log;
@@ -34,7 +34,6 @@ use crate::transport::stream::{Extension, TCPConnectionInfo, TLSConnectionInfo};
 use crate::{ProxyInputs, store, *};
 use crate::llm::messages;
 use crate::llm::universal;
-use crate::llm::LLMRequestParams;
 
 fn select_backend(route: &Route, _req: &Request) -> Option<RouteBackendReference> {
 	route
@@ -917,53 +916,41 @@ async fn make_backend_call(
 				let messages_request: messages::MessagesRequest = serde_json::from_slice(&body_bytes)
 					.map_err(|e| ProxyError::ProcessingString(format!("Invalid JSON in request body: {}", e)))?;
 
-				// Convert Messages API to OpenAI format (the IR)
-				let openai_request = messages::ingress::to_universal(&messages_request, req.headers())
+				// Use edge decoder to convert Messages API to universal format
+				let universal_request = messages::ingress::decode_messages_to_universal(&messages_request)
 					.map_err(|e| ProxyError::ProcessingString(format!("Request validation failed: {}", e)))?;
 
-				// Convert OpenAI format to provider format using BackendAdapter
-				let provider_request_body = match &llm.provider {
-					llm::AIProvider::Bedrock(bedrock_provider) => {
-						// Use new direct OpenAI → Bedrock conversion
-						let bedrock_req = bedrock_provider.to_backend(&openai_request)
-							.map_err(|e| ProxyError::ProcessingString(format!("Failed to convert to Bedrock format: {}", e)))?;
-						serde_json::to_vec(&bedrock_req)
-							.map_err(|e| ProxyError::ProcessingString(format!("Failed to serialize Bedrock request: {}", e)))?
-					},
-					_ => {
-						// For other providers, use OpenAI format directly
-						serde_json::to_vec(&openai_request)
-							.map_err(|e| ProxyError::ProcessingString(format!("Failed to serialize OpenAI request: {}", e)))?
-					}
+				// Put universal request back into HTTP body to reuse shared policy pipeline
+				let universal_json = serde_json::to_vec(&universal_request)
+					.map_err(|e| ProxyError::ProcessingString(format!("Failed to serialize universal request: {}", e)))?;
+				*req.body_mut() = http::Body::from(universal_json);
+
+				// Use the same policy pipeline as Completions route
+				let r = llm
+					.provider
+					.process_request(
+						&client,
+						route_policies.llm.as_deref(),
+						req,
+						llm.tokenize,
+						route_type,
+						&mut log,
+					)
+					.await
+					.map_err(|e| ProxyError::Processing(e.into()))?;
+				let (mut req, llm_request) = match r {
+					RequestResult::Success(r, lr) => (r, lr),
+					RequestResult::Rejected(dr) => return Ok(Box::pin(async move { Ok(dr) })),
 				};
-
-				*req.body_mut() = http::Body::from(provider_request_body);
-
-				// Create LLMRequest for logging and policies
-				let llm_request = LLMRequest {
-					input_tokens: Some(messages::estimate_tokens(&messages_request) as u64),
-					request_model: messages_request.model.clone().into(),
-					provider: llm.provider.provider(),
-					streaming: messages_request.stream.unwrap_or(false),
-					route_type,
-					params: LLMRequestParams {
-						temperature: messages_request.temperature.map(|t| t as f64),
-						top_p: messages_request.top_p.map(|t| t as f64),
-						max_tokens: Some(messages_request.max_tokens as u64),
-						frequency_penalty: None,
-						presence_penalty: None,
-						seed: None,
-					},
-				};
-
-				// Apply standard LLM processing
+				// If a user doesn't configure explicit overrides for connecting to a provider, setup default
+				// paths, TLS, etc.
 				if llm.use_default_policies() {
 					llm
 						.provider
 						.setup_request(&mut req, route_type, Some(&llm_request))
 						.map_err(ProxyError::Processing)?;
 				}
-
+				// Apply all policies (rate limits)
 				let response_policies = apply_llm_request_policies(
 					&route_policies,
 					policy_client,
@@ -979,6 +966,14 @@ async fn make_backend_call(
 			RouteType::Passthrough => {
 				// For passthrough, we only need to setup the response so we get default TLS, hostname, etc set.
 				// We do not need LLM policies nor token-based rate limits, etc.
+				llm
+					.provider
+					.setup_request(&mut req, route_type, None)
+					.map_err(ProxyError::Processing)?;
+				(req, LLMResponsePolicies::default(), None)
+			},
+			RouteType::Models => {
+				// Models endpoint - treat as passthrough for now
 				llm
 					.provider
 					.setup_request(&mut req, route_type, None)
@@ -1025,12 +1020,13 @@ async fn make_backend_call(
 				.await
 				.map_err(|e| ProxyError::Processing(e.into()))?;
 
-			// Convert response format based on route type
+			// Convert response format based on route type using edge encoders
 			if route_type == RouteType::Messages {
 				let body = std::mem::replace(processed_resp.body_mut(), http::Body::empty());
 				if let Ok(body_bytes) = axum::body::to_bytes(body, 2_097_152).await {
 					if let Ok(universal_response) = serde_json::from_slice::<universal::Response>(&body_bytes) {
-						match messages::egress::from_universal_json(&universal_response) {
+						// Use edge encoder to convert Universal response to Messages API format
+						match messages::egress::encode_universal_to_messages(&universal_response) {
 							Ok(messages_response) => {
 								let messages_json = serde_json::to_vec(&messages_response)
 									.map_err(|e| ProxyError::Processing(anyhow!("Failed to serialize Messages response: {}", e)))?;

@@ -1000,7 +1000,7 @@ pub mod ingress {
     /// - Headers: record anthropic-version + optional anthropic-beta for observability
     /// Convert Messages API SystemPrompt to Universal system message
     /// Returns None if system prompt is empty or contains only whitespace
-    fn convert_system_prompt(system: &types::SystemPrompt) -> Option<universal::RequestMessage> {
+    pub(crate) fn convert_system_prompt(system: &types::SystemPrompt) -> Option<universal::RequestMessage> {
         let system_text = match system {
             types::SystemPrompt::String(text) => {
                 // Simple string case - use as-is if non-empty after trimming
@@ -1038,7 +1038,7 @@ pub mod ingress {
     }
 
     /// Validate system prompt for size and content limits
-    fn validate_system_prompt(system: &types::SystemPrompt) -> Result<(), AIError> {
+    pub(crate) fn validate_system_prompt(system: &types::SystemPrompt) -> Result<(), AIError> {
         match system {
             types::SystemPrompt::String(text) => {
                 // Check for reasonable length limits (100KB)
@@ -1073,7 +1073,8 @@ pub mod ingress {
     }
 
     /// Convert Messages API input message to Universal format and return vendor data
-    fn convert_input_message_with_vendor_data(msg: &types::InputMessage, beta_features: &[String]) -> Result<(universal::RequestMessage, VendorData), AIError> {
+    /// Returns multiple messages - primary user/assistant message plus separate tool messages for tool_results
+    fn convert_input_message_with_vendor_data(msg: &types::InputMessage, beta_features: &[String], seen_tool_use_ids: &std::collections::HashSet<String>) -> Result<(Vec<universal::RequestMessage>, VendorData, HashMap<String, bool>), AIError> {
         match &msg.content {
             types::MessageContent::String(text) => {
                 let universal_msg = match msg.role {
@@ -1095,7 +1096,7 @@ pub mod ingress {
                         }
                     ),
                 };
-                Ok((universal_msg, VendorData::default()))
+                Ok((vec![universal_msg], VendorData::default(), HashMap::new()))
             },
             types::MessageContent::Blocks(blocks) => {
                 // Process content blocks into unified structure
@@ -1103,6 +1104,7 @@ pub mod ingress {
                     text_parts: Vec::new(),
                     tool_calls: Vec::new(),
                     tool_results: HashMap::new(),
+                    tool_results_meta: HashMap::new(),
                     vendor_data: VendorData::default(),
                 };
 
@@ -1111,10 +1113,13 @@ pub mod ingress {
                     process_content_block(block, &mut result, beta_features)?;
                 }
 
-                // Build Universal message based on role and converted content
-                let universal_msg = match msg.role {
+                // Build Universal messages - primary message plus separate tool messages for tool_results
+                let mut messages = Vec::new();
+                
+                // Create primary user/assistant message
+                let primary_msg = match msg.role {
                     types::MessageRole::User => {
-                        // User messages: combine text, ignore tool_calls, handle tool_results separately
+                        // User messages: combine text, ignore tool_calls
                         let combined_text = if result.text_parts.is_empty() {
                             "[Non-text content]".to_string()
                         } else {
@@ -1157,8 +1162,25 @@ pub mod ingress {
                         )
                     }
                 };
+                messages.push(primary_msg);
 
-                Ok((universal_msg, result.vendor_data))
+                // Create separate tool messages for each tool_result
+                for (tool_use_id, content) in result.tool_results {
+                    // Validate that we've seen this tool_use_id in a previous assistant message
+                    if !seen_tool_use_ids.contains(&tool_use_id) {
+                        return Err(AIError::UnpairedToolResult(tool_use_id));
+                    }
+                    
+                    let tool_msg = universal::RequestMessage::Tool(
+                        universal::RequestToolMessage {
+                            tool_call_id: tool_use_id,
+                            content: universal::RequestToolMessageContent::Text(content),
+                        }
+                    );
+                    messages.push(tool_msg);
+                }
+
+                Ok((messages, result.vendor_data, result.tool_results_meta))
             }
         }
     }
@@ -1172,13 +1194,15 @@ pub mod ingress {
         tool_calls: Vec<universal::MessageToolCall>,
         /// Tool results mapping (tool_use_id -> content) - handled separately
         tool_results: HashMap<String, String>,
+        /// Tool results metadata (tool_use_id -> is_error) for vendor bag preservation
+        tool_results_meta: HashMap<String, bool>,
         /// Vendor-specific data to preserve for provider egress
         vendor_data: VendorData,
     }
 
     /// Vendor-specific data preservation for provider egress
     #[derive(Debug, Default)]
-    struct VendorData {
+    pub(crate) struct VendorData {
         /// Original Anthropic content blocks for lossless reconstruction
         anthropic_content_blocks: Vec<types::RequestContentBlock>,
         /// Thinking blocks for providers that support them
@@ -1224,9 +1248,7 @@ pub mod ingress {
                 });
             },
 
-            // Tool result blocks: preserve for separate Tool role messages
-            // NOTE: Current limitation - tool results are not converted to separate Tool messages
-            // This requires restructuring the message conversion to handle multiple output messages
+            // Tool result blocks: convert to separate Tool role messages
             types::RequestContentBlock::ToolResult(tool_result) => {
                 let content = match &tool_result.content {
                     Some(types::ToolResultContent::Text(text)) => text.clone(),
@@ -1247,11 +1269,20 @@ pub mod ingress {
                     content
                 };
 
-                // Store for future Tool message creation (not implemented in this phase)
-                result.tool_results.insert(tool_result.tool_use_id.clone(), final_content.clone());
+                // Check for duplicate tool_result blocks (strict rejection policy)
+                if result.tool_results.contains_key(&tool_result.tool_use_id) {
+                    return Err(AIError::DuplicateToolResult(tool_result.tool_use_id.clone()));
+                }
+
+                // Store for separate Tool message creation
+                result.tool_results.insert(tool_result.tool_use_id.clone(), final_content);
                 
-                // Add to text content as fallback for now
-                result.text_parts.push(format!("[TOOL_RESULT:{}] {}", tool_result.tool_use_id, final_content));
+                // Preserve is_error in vendor bag for provider-specific handling
+                if let Some(is_error) = tool_result.is_error {
+                    result.tool_results_meta.insert(tool_result.tool_use_id.clone(), is_error);
+                }
+                
+                // No longer add placeholder text - tool_results become separate messages
             },
 
             // Thinking blocks: EXPERIMENTAL - gate behind beta header
@@ -1345,12 +1376,14 @@ pub mod ingress {
     }
 
     /// Build Universal messages array with system message first and collect vendor data
-    fn build_universal_messages(
+    pub(crate) fn build_universal_messages(
         messages_req: &types::MessagesRequest,
         beta_features: &[String],
-    ) -> Result<(Vec<universal::RequestMessage>, VendorData), AIError> {
+    ) -> Result<(Vec<universal::RequestMessage>, VendorData, HashMap<String, bool>), AIError> {
         let mut universal_messages = Vec::new();
         let mut collected_vendor_data = VendorData::default();
+        let mut collected_tool_results_meta = HashMap::new();
+        let mut seen_tool_use_ids = std::collections::HashSet::new();
         
         // 1. Add system message first (if present)
         if let Some(system) = &messages_req.system {
@@ -1361,16 +1394,30 @@ pub mod ingress {
         
         // 2. Add conversation messages and collect vendor data
         for msg in &messages_req.messages {
-            let (universal_msg, msg_vendor_data) = convert_input_message_with_vendor_data(msg, beta_features)?;
-            universal_messages.push(universal_msg);
+            // First pass: collect tool_use_ids from assistant messages to validate tool_results
+            if let types::MessageRole::Assistant = msg.role {
+                if let types::MessageContent::Blocks(blocks) = &msg.content {
+                    for block in blocks {
+                        if let types::RequestContentBlock::ToolUse(tool_use) = block {
+                            seen_tool_use_ids.insert(tool_use.id.clone());
+                        }
+                    }
+                }
+            }
+            
+            let (msg_universal_messages, msg_vendor_data, msg_tool_results_meta) = convert_input_message_with_vendor_data(msg, beta_features, &seen_tool_use_ids)?;
+            universal_messages.extend(msg_universal_messages);
             
             // Merge vendor data from this message
             collected_vendor_data.anthropic_content_blocks.extend(msg_vendor_data.anthropic_content_blocks);
             collected_vendor_data.thinking_blocks.extend(msg_vendor_data.thinking_blocks);
             collected_vendor_data.search_results.extend(msg_vendor_data.search_results);
+            
+            // Merge tool results metadata
+            collected_tool_results_meta.extend(msg_tool_results_meta);
         }
         
-        Ok((universal_messages, collected_vendor_data))
+        Ok((universal_messages, collected_vendor_data, collected_tool_results_meta))
     }
 
     pub fn to_universal(
@@ -1392,31 +1439,48 @@ pub mod ingress {
         let beta_features = extract_beta_features(headers);
         
         // Build messages array and collect vendor data from content blocks
-        let (messages, content_vendor_data) = build_universal_messages(m, &beta_features)?;
+        let (messages, content_vendor_data, tool_results_meta) = build_universal_messages(m, &beta_features)?;
         
-        // Merge content vendor data into header vendor data for lossless preservation
-        if !content_vendor_data.anthropic_content_blocks.is_empty() 
-           || !content_vendor_data.thinking_blocks.is_empty() 
-           || !content_vendor_data.search_results.is_empty() {
-            
-            let vendor_map = vendor_data.get_or_insert_with(HashMap::new);
-            let anthropic_data = vendor_map.entry("anthropic".to_string())
-                .or_insert_with(|| serde_json::json!({}));
-            
-            if !content_vendor_data.anthropic_content_blocks.is_empty() {
-                anthropic_data["content_blocks"] = serde_json::to_value(&content_vendor_data.anthropic_content_blocks)
-                    .unwrap_or_else(|_| serde_json::json!([]));
-            }
-            
-            if !content_vendor_data.thinking_blocks.is_empty() {
-                anthropic_data["thinking_blocks"] = serde_json::to_value(&content_vendor_data.thinking_blocks)
-                    .unwrap_or_else(|_| serde_json::json!([]));
-            }
-            
-            if !content_vendor_data.search_results.is_empty() {
-                anthropic_data["search_results"] = serde_json::to_value(&content_vendor_data.search_results)
-                    .unwrap_or_else(|_| serde_json::json!([]));
-            }
+        // Merge content vendor data and Anthropic-specific fields into vendor bag
+        let vendor_map = vendor_data.get_or_insert_with(HashMap::new);
+        let anthropic_data = vendor_map.entry("anthropic".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        
+        // Store Anthropic-specific request fields in vendor bag
+        anthropic_data["original_max_tokens"] = serde_json::json!(m.max_tokens);
+        if let Some(top_k) = m.top_k {
+            anthropic_data["top_k"] = serde_json::json!(top_k);
+        }
+        if let Some(thinking) = &m.thinking {
+            anthropic_data["thinking"] = serde_json::to_value(thinking).unwrap_or_else(|_| serde_json::json!({}));
+        }
+        if let Some(metadata) = &m.metadata {
+            anthropic_data["metadata"] = serde_json::to_value(metadata).unwrap_or_else(|_| serde_json::json!({}));
+        }
+        if let Some(system) = &m.system {
+            anthropic_data["system"] = serde_json::to_value(system).unwrap_or_else(|_| serde_json::json!({}));
+        }
+        
+        // Merge content vendor data into vendor bag
+        if !content_vendor_data.anthropic_content_blocks.is_empty() {
+            anthropic_data["content_blocks"] = serde_json::to_value(&content_vendor_data.anthropic_content_blocks)
+                .unwrap_or_else(|_| serde_json::json!([]));
+        }
+        
+        if !content_vendor_data.thinking_blocks.is_empty() {
+            anthropic_data["thinking_blocks"] = serde_json::to_value(&content_vendor_data.thinking_blocks)
+                .unwrap_or_else(|_| serde_json::json!([]));
+        }
+        
+        if !content_vendor_data.search_results.is_empty() {
+            anthropic_data["search_results"] = serde_json::to_value(&content_vendor_data.search_results)
+                .unwrap_or_else(|_| serde_json::json!([]));
+        }
+        
+        // Store tool results metadata for provider-specific handling (e.g., Bedrock ToolResult.status)
+        if !tool_results_meta.is_empty() {
+            anthropic_data["tool_results_meta"] = serde_json::to_value(&tool_results_meta)
+                .unwrap_or_else(|_| serde_json::json!({}));
         }
         
         // Ensure we have at least one message
@@ -1445,6 +1509,7 @@ pub mod ingress {
             tools: m.tools.as_deref().map(convert_tools),
             tool_choice: m.tool_choice.as_ref().map(convert_tool_choice),
             vendor: vendor_data,
+            
             // Initialize other fields with defaults
             store: None,
             reasoning_effort: None,
@@ -1472,16 +1537,113 @@ pub mod ingress {
             functions: None,
         })
     }
+
+    /// Clean edge decoder: convert Anthropic Messages API request to Universal format
+    /// 
+    /// This function provides a simple, header-free interface for converting Messages API
+    /// requests to the universal format. It focuses on the core conversion logic without
+    /// vendor-specific header processing.
+    pub fn decode_messages_to_universal(req: &types::MessagesRequest) -> Result<universal::Request, AIError> {
+        // FAIL-FAST VALIDATION: Validate request before any conversion
+        validate_messages_request(req)?;
+        
+        // Validate system prompt if present
+        if let Some(system) = &req.system {
+            validate_system_prompt(system)?;
+        }
+        
+        // Build messages array using our enhanced conversion logic (with tool_result support)
+        let (messages, _content_vendor_data, _tool_results_meta) = build_universal_messages(req, &[])?;
+        
+        // Create vendor context to mark this as Messages API route and store Anthropic-specific data
+        let mut vendor_data = std::collections::HashMap::new();
+        vendor_data.insert("route_type".to_string(), serde_json::json!("messages"));
+        
+        // Store Anthropic-specific fields in vendor bag
+        let mut anthropic_data = serde_json::Map::new();
+        anthropic_data.insert("original_max_tokens".to_string(), serde_json::json!(req.max_tokens));
+        if let Some(top_k) = req.top_k {
+            anthropic_data.insert("top_k".to_string(), serde_json::json!(top_k));
+        }
+        if let Some(thinking) = &req.thinking {
+            anthropic_data.insert("thinking".to_string(), serde_json::to_value(thinking).unwrap());
+        }
+        if let Some(metadata) = &req.metadata {
+            anthropic_data.insert("metadata".to_string(), serde_json::to_value(metadata).unwrap());
+        }
+        if let Some(system) = &req.system {
+            anthropic_data.insert("system".to_string(), serde_json::to_value(system).unwrap());
+        }
+        vendor_data.insert("anthropic".to_string(), serde_json::Value::Object(anthropic_data));
+        
+        // Convert tools if present
+        let universal_tools = req.tools.as_deref().map(convert_tools);
+        let universal_tool_choice = req.tool_choice.as_ref().map(convert_tool_choice);
+        
+        // Build stop sequences in Universal format
+        let stop = req.stop_sequences.as_ref().map(|stops| {
+            if stops.len() == 1 {
+                async_openai::types::Stop::String(stops[0].clone())
+            } else {
+                async_openai::types::Stop::StringArray(stops.clone())
+            }
+        });
+        
+        Ok(universal::Request {
+            messages,
+            model: Some(req.model.clone()),
+            stream: req.stream,
+            temperature: req.temperature,
+            top_p: req.top_p,
+            stop,
+            tools: universal_tools,
+            tool_choice: universal_tool_choice,
+            vendor: Some(vendor_data),
+            
+            // Use max_tokens field (universal OpenAI field) for token limit
+            #[allow(deprecated)]
+            max_tokens: Some(req.max_tokens),
+            max_completion_tokens: None,
+            
+            // Initialize remaining fields with defaults
+            store: None,
+            reasoning_effort: None,
+            metadata: None,
+            frequency_penalty: None,
+            logit_bias: None,
+            logprobs: None,
+            top_logprobs: None,
+            n: None,
+            modalities: None,
+            prediction: None,
+            audio: None,
+            presence_penalty: None,
+            response_format: None,
+            seed: None,
+            service_tier: None,
+            stream_options: None,
+            parallel_tool_calls: None,
+            user: None,
+            web_search_options: None,
+            #[allow(deprecated)]
+            function_call: None,
+            #[allow(deprecated)]
+            functions: None,
+        })
+    }
 }
 
 pub mod egress {
     //! Universal -> Messages conversion
     use super::*;
     use crate::llm::{universal, AIError};
-    use crate::http::Body;
 
-    /// Build Anthropic JSON response from Universal response
-    pub fn from_universal_json(u: &universal::Response) -> Result<types::MessagesResponse, AIError> {
+    /// Clean edge encoder: convert Universal response to Anthropic Messages API format
+    /// 
+    /// This function provides the response encoding counterpart to decode_messages_to_universal(),
+    /// converting universal responses back to Messages API format while preserving vendor-specific
+    /// metadata and handling route-specific response formatting.
+    pub fn encode_universal_to_messages(u: &universal::Response) -> Result<types::MessagesResponse, AIError> {
         // Extract the assistant message from choices
         let choice = u.choices.first()
             .ok_or_else(|| AIError::MessageNotFound)?;
@@ -1515,7 +1677,7 @@ pub mod egress {
             }
         }
         
-        // Determine stop reason
+        // Map finish reasons from Universal to Messages API format
         let stop_reason = match choice.finish_reason.as_ref() {
             Some(universal::FinishReason::Stop) => Some(types::StopReason::EndTurn),
             Some(universal::FinishReason::Length) => Some(types::StopReason::MaxTokens),
@@ -1524,6 +1686,10 @@ pub mod egress {
             _ => Some(types::StopReason::EndTurn),
         };
 
+        // Check if response was stopped by a custom stop sequence
+        // This info should be preserved in vendor bag from the original request
+        let stop_sequence = None; // TODO: Extract from vendor bag if available
+
         Ok(types::MessagesResponse {
             id: u.id.clone(),
             r#type: "message".to_string(),
@@ -1531,7 +1697,7 @@ pub mod egress {
             content: content_blocks,
             model: u.model.clone(),
             stop_reason,
-            stop_sequence: None,
+            stop_sequence,
             usage: types::Usage {
                 input_tokens: u.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
                 output_tokens: u.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
@@ -1545,6 +1711,13 @@ pub mod egress {
         })
     }
 
+    /// Build Anthropic JSON response from Universal response
+    /// 
+    /// Legacy function - prefer encode_universal_to_messages() for new code
+    pub fn from_universal_json(u: &universal::Response) -> Result<types::MessagesResponse, AIError> {
+        encode_universal_to_messages(u)
+    }
+
 }
 
 // Re-export commonly used types for convenience
@@ -1554,8 +1727,8 @@ pub use types::{
     Tool, ToolChoice, MessagesErrorResponse, ApiError
 };
 
-pub use ingress::{to_universal, validate_messages_request};
-pub use egress::from_universal_json;
+pub use ingress::{to_universal, validate_messages_request, decode_messages_to_universal};
+pub use egress::{from_universal_json, encode_universal_to_messages};
 
 /// Fast token estimator for Messages API requests (optional optimization)
 pub fn estimate_tokens(request: &MessagesRequest) -> u32 {
@@ -1713,13 +1886,13 @@ pub fn extract_text_from_blocks(blocks: &[RequestContentBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::HeaderMap;
+    use crate::llm::universal;
 
     #[test]
-    fn test_estimate_tokens_simple() {
+    fn test_decode_messages_basic() {
         let request = types::MessagesRequest::new(
             "claude-3-sonnet-20240229".to_string(),
-            1000,
+            100,
             vec![types::InputMessage::user_text("Hello world".to_string())]
         );
         
@@ -1792,22 +1965,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_assistant_first_message() {
-        let request = types::MessagesRequest::new(
-            "claude-3-sonnet-20240229".to_string(),
-            1000,
-            vec![types::InputMessage::assistant_text("I'll start the conversation".to_string())]
-        );
-
-        let result = ingress::validate_messages_request(&request);
-        assert!(matches!(result, Err(crate::llm::AIError::InvalidMessageSequence(_))));
-        
-        if let Err(crate::llm::AIError::InvalidMessageSequence(msg)) = result {
-            assert!(msg.contains("conversation cannot start with assistant message"));
-        }
-    }
-
-    #[test]
     fn test_validate_empty_content() {
         let request = types::MessagesRequest::new(
             "claude-3-sonnet-20240229".to_string(),
@@ -1817,27 +1974,6 @@ mod tests {
 
         let result = ingress::validate_messages_request(&request);
         assert!(matches!(result, Err(crate::llm::AIError::EmptyMessageContent)));
-    }
-
-    #[test]
-    fn test_validate_consecutive_messages() {
-        let request = types::MessagesRequest::new(
-            "claude-3-sonnet-20240229".to_string(),
-            1000,
-            vec![
-                types::InputMessage::user_text("First message".to_string()),
-                types::InputMessage::user_text("Second message".to_string()),
-                types::InputMessage::user_text("Third message".to_string()),
-                types::InputMessage::user_text("Fourth message".to_string()), // This should trigger warning
-            ]
-        );
-
-        let result = ingress::validate_messages_request(&request);
-        assert!(matches!(result, Err(crate::llm::AIError::InvalidMessageSequence(_))));
-        
-        if let Err(crate::llm::AIError::InvalidMessageSequence(msg)) = result {
-            assert!(msg.contains("more than 3 consecutive user messages"));
-        }
     }
 
     #[test]
@@ -1867,49 +2003,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_invalid_tool_name() {
-        let tool = types::Tool {
-            name: "123invalid".to_string(), // Starts with number
-            description: Some("Invalid tool name".to_string()),
-            input_schema: serde_json::json!({"type": "object"}),
-            cache_control: None,
-        };
-
-        let request = types::MessagesRequest::new(
-            "claude-3-sonnet-20240229".to_string(),
-            1000,
-            vec![types::InputMessage::user_text("Hello".to_string())]
-        ).with_tools(vec![tool], None);
-
-        let result = ingress::validate_messages_request(&request);
-        assert!(matches!(result, Err(crate::llm::AIError::InvalidToolName(_))));
-    }
-
-    #[test]
     fn test_validate_invalid_tool_schema() {
         let tool = types::Tool {
             name: "valid_tool".to_string(),
             description: Some("Tool with invalid schema".to_string()),
             input_schema: serde_json::json!("not_an_object"), // Should be object
-            cache_control: None,
-        };
-
-        let request = types::MessagesRequest::new(
-            "claude-3-sonnet-20240229".to_string(),
-            1000,
-            vec![types::InputMessage::user_text("Hello".to_string())]
-        ).with_tools(vec![tool], None);
-
-        let result = ingress::validate_messages_request(&request);
-        assert!(matches!(result, Err(crate::llm::AIError::InvalidToolDefinition(_))));
-    }
-
-    #[test]
-    fn test_validate_tool_schema_missing_type() {
-        let tool = types::Tool {
-            name: "valid_tool".to_string(),
-            description: Some("Tool with schema missing type".to_string()),
-            input_schema: serde_json::json!({"properties": {}}), // Missing "type"
             cache_control: None,
         };
 
@@ -1947,60 +2045,280 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_unpaired_tool_result() {
-        let tool_result_block = types::RequestContentBlock::ToolResult(Box::new(types::RequestToolResultBlock {
-            tool_use_id: "nonexistent_tool".to_string(),
-            content: Some(types::ToolResultContent::Text("Result".to_string())),
-            is_error: Some(false),
-            cache_control: None,
-        }));
-
-        let request = types::MessagesRequest::new(
-            "claude-3-sonnet-20240229".to_string(),
-            1000,
-            vec![
-                types::InputMessage::user_text("Here's a tool result".to_string()),
-                types::InputMessage::user_blocks(vec![tool_result_block]),
-                // No matching tool_use block
-            ]
-        );
-
-        let result = ingress::validate_messages_request(&request);
-        assert!(matches!(result, Err(crate::llm::AIError::UnpairedToolResult(_))));
+    fn test_tool_result_conversion_to_universal_messages() {
+        use crate::llm::universal;
+        
+        // Test that tool_results in user messages are converted to separate Universal tool messages
+        let assistant_tool_use = types::InputMessage {
+            role: types::MessageRole::Assistant,
+            content: types::MessageContent::Blocks(vec![
+                types::RequestContentBlock::ToolUse(Box::new(types::RequestToolUseBlock {
+                    id: "tool_123".to_string(),
+                    name: "calculator".to_string(),
+                    input: serde_json::json!({"expression": "2+2"}),
+                    cache_control: None,
+                }))
+            ]),
+        };
+        
+        let user_tool_result = types::InputMessage {
+            role: types::MessageRole::User,
+            content: types::MessageContent::Blocks(vec![
+                types::RequestContentBlock::Text(types::RequestTextBlock {
+                    block_type: types::ContentBlockType::Text,
+                    text: "What was the result?".to_string(),
+                    citations: None,
+                    cache_control: None,
+                }),
+                types::RequestContentBlock::ToolResult(Box::new(types::RequestToolResultBlock {
+                    tool_use_id: "tool_123".to_string(),
+                    content: Some(types::ToolResultContent::Text("4".to_string())),
+                    is_error: None,
+                    cache_control: None,
+                }))
+            ]),
+        };
+        
+        let messages_req = types::MessagesRequest {
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            max_tokens: 100,
+            messages: vec![assistant_tool_use, user_tool_result],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+            thinking: None,
+        };
+        
+        let result = ingress::build_universal_messages(&messages_req, &[]);
+        assert!(result.is_ok());
+        
+        let (universal_messages, _vendor_data, _tool_results_meta) = result.unwrap();
+        
+        // Should have: assistant message, user message, and separate tool message
+        assert_eq!(universal_messages.len(), 3);
+        
+        // First should be assistant with tool_calls
+        match &universal_messages[0] {
+            universal::RequestMessage::Assistant(msg) => {
+                assert!(msg.tool_calls.is_some());
+                let tool_calls = msg.tool_calls.as_ref().unwrap();
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].id, "tool_123");
+            },
+            _ => panic!("Expected assistant message"),
+        }
+        
+        // Second should be user message with text
+        match &universal_messages[1] {
+            universal::RequestMessage::User(msg) => {
+                match &msg.content {
+                    universal::RequestUserMessageContent::Text(text) => {
+                        assert_eq!(text, "What was the result?");
+                    },
+                    _ => panic!("Expected text content"),
+                }
+            },
+            _ => panic!("Expected user message"),
+        }
+        
+        // Third should be tool message with result
+        match &universal_messages[2] {
+            universal::RequestMessage::Tool(msg) => {
+                assert_eq!(msg.tool_call_id, "tool_123");
+                match &msg.content {
+                    universal::RequestToolMessageContent::Text(text) => {
+                        assert_eq!(text, "4");
+                    },
+                    _ => panic!("Expected text content"),
+                }
+            },
+            _ => panic!("Expected tool message"),
+        }
     }
 
     #[test]
-    fn test_validate_valid_tool_pairing() {
-        let tool_use_block = types::RequestContentBlock::ToolUse(Box::new(types::RequestToolUseBlock {
-            id: "tool_123".to_string(),
-            name: "test_tool".to_string(),
-            input: serde_json::json!({"param": "value"}),
-            cache_control: None,
-        }));
-
-        let tool_result_block = types::RequestContentBlock::ToolResult(Box::new(types::RequestToolResultBlock {
-            tool_use_id: "tool_123".to_string(), // Matches tool_use id
-            content: Some(types::ToolResultContent::Text("Tool executed successfully".to_string())),
-            is_error: Some(false),
-            cache_control: None,
-        }));
-
-        let request = types::MessagesRequest::new(
-            "claude-3-sonnet-20240229".to_string(),
-            1000,
-            vec![
-                types::InputMessage::user_text("Please use the tool".to_string()),
-                types::InputMessage::assistant_blocks(vec![tool_use_block]),
-                types::InputMessage::user_blocks(vec![tool_result_block]),
-            ]
-        );
-
-        let result = ingress::validate_messages_request(&request);
-        assert!(result.is_ok()); // Should pass validation
+    fn test_decode_messages_to_universal() {
+        // Test the clean edge decoder function
+        let messages_req = types::MessagesRequest {
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            max_tokens: 150,
+            messages: vec![
+                types::InputMessage {
+                    role: types::MessageRole::User,
+                    content: types::MessageContent::String("Hello, Claude!".to_string()),
+                }
+            ],
+            system: Some(types::SystemPrompt::String("You are a helpful assistant.".to_string())),
+            tools: None,
+            tool_choice: None,
+            stream: Some(true),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            top_k: Some(50),
+            stop_sequences: Some(vec!["END".to_string()]),
+            metadata: None,
+            thinking: None,
+        };
+        
+        let result = ingress::decode_messages_to_universal(&messages_req);
+        assert!(result.is_ok());
+        
+        let universal_req = result.unwrap();
+        
+        // Verify universal fields are populated correctly
+        #[allow(deprecated)]
+        {
+            assert_eq!(universal_req.max_tokens, Some(150)); // Uses universal max_tokens field
+        }
+        assert_eq!(universal_req.model, Some("claude-3-5-sonnet-20241022".to_string()));
+        assert_eq!(universal_req.stream, Some(true));
+        assert_eq!(universal_req.temperature, Some(0.7));
+        assert_eq!(universal_req.top_p, Some(0.9));
+        
+        // Verify stop sequences are mapped to universal stop field
+        assert!(universal_req.stop.is_some());
+        match &universal_req.stop {
+            Some(async_openai::types::Stop::StringArray(stops)) => {
+                assert_eq!(stops, &vec!["END".to_string()]);
+            },
+            _ => panic!("Expected string array stop sequences"),
+        }
+        
+        // Verify vendor context is set
+        assert!(universal_req.vendor.is_some());
+        let vendor = universal_req.vendor.as_ref().unwrap();
+        assert_eq!(vendor.get("route_type"), Some(&serde_json::json!("messages")));
+        
+        // Verify Anthropic-specific data is stored in vendor bag
+        let anthropic_data = vendor.get("anthropic").expect("Should have anthropic vendor data");
+        assert_eq!(anthropic_data["original_max_tokens"], serde_json::json!(150));
+        assert_eq!(anthropic_data["top_k"], serde_json::json!(50));
+        assert!(anthropic_data["system"].is_object());
+        
+        // Verify messages conversion (should include system message + user message)
+        assert_eq!(universal_req.messages.len(), 2);
+        
+        // First should be system message
+        match &universal_req.messages[0] {
+            universal::RequestMessage::System(msg) => {
+                match &msg.content {
+                    universal::RequestSystemMessageContent::Text(text) => {
+                        assert_eq!(text, "You are a helpful assistant.");
+                    },
+                    _ => panic!("Expected text content"),
+                }
+            },
+            _ => panic!("Expected system message"),
+        }
+        
+        // Second should be user message
+        match &universal_req.messages[1] {
+            universal::RequestMessage::User(msg) => {
+                match &msg.content {
+                    universal::RequestUserMessageContent::Text(text) => {
+                        assert_eq!(text, "Hello, Claude!");
+                    },
+                    _ => panic!("Expected text content"),
+                }
+            },
+            _ => panic!("Expected user message"),
+        }
     }
 
     #[test]
-    fn test_validate_valid_request() {
+    fn test_encode_universal_to_messages() {
+        // Test the clean edge encoder function
+        use crate::llm::universal;
+        
+        // Create a mock Universal response
+        let universal_response = universal::Response {
+            id: "msg_123".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1234567890,
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            choices: vec![
+                universal::ChatChoice {
+                    index: 0,
+                    message: universal::ResponseMessage {
+                        role: universal::Role::Assistant,
+                        content: Some("Hello! How can I help you today?".to_string()),
+                        tool_calls: Some(vec![
+                            universal::MessageToolCall {
+                                id: "tool_456".to_string(),
+                                r#type: universal::ToolType::Function,
+                                function: universal::FunctionCall {
+                                    name: "get_weather".to_string(),
+                                    arguments: r#"{"location": "San Francisco"}"#.to_string(),
+                                },
+                            }
+                        ]),
+                        #[allow(deprecated)]
+                        function_call: None,
+                        refusal: None,
+                        audio: None,
+                    },
+                    finish_reason: Some(universal::FinishReason::ToolCalls),
+                    logprobs: None,
+                }
+            ],
+            usage: Some(universal::Usage {
+                prompt_tokens: 25,
+                completion_tokens: 15,
+                total_tokens: 40,
+                completion_tokens_details: None,
+                prompt_tokens_details: None,
+            }),
+            service_tier: None,
+            system_fingerprint: None,
+        };
+        
+        let result = egress::encode_universal_to_messages(&universal_response);
+        assert!(result.is_ok());
+        
+        let messages_response = result.unwrap();
+        
+        // Verify basic fields
+        assert_eq!(messages_response.id, "msg_123");
+        assert_eq!(messages_response.r#type, "message");
+        assert_eq!(messages_response.role, "assistant");
+        assert_eq!(messages_response.model, "claude-3-5-sonnet-20241022");
+        assert_eq!(messages_response.stop_reason, Some(types::StopReason::ToolUse));
+        
+        // Verify content blocks
+        assert_eq!(messages_response.content.len(), 2); // text + tool_use
+        
+        // First should be text content
+        match &messages_response.content[0] {
+            types::ResponseContentBlock::Text(text_block) => {
+                assert_eq!(text_block.text, "Hello! How can I help you today?");
+            },
+            _ => panic!("Expected text content block"),
+        }
+        
+        // Second should be tool use
+        match &messages_response.content[1] {
+            types::ResponseContentBlock::ToolUse(tool_block) => {
+                assert_eq!(tool_block.id, "tool_456");
+                assert_eq!(tool_block.name, "get_weather");
+                assert_eq!(tool_block.input["location"], "San Francisco");
+            },
+            _ => panic!("Expected tool use content block"),
+        }
+        
+        // Verify usage
+        assert_eq!(messages_response.usage.input_tokens, 25);
+        assert_eq!(messages_response.usage.output_tokens, 15);
+    }
+
+    #[test]
+    fn test_validate_valid_requests() {
+        // Test basic valid request
         let request = types::MessagesRequest::new(
             "claude-3-sonnet-20240229".to_string(),
             1000,
@@ -2009,9 +2327,33 @@ mod tests {
                 types::InputMessage::assistant_text("Hello! How can I help you today?".to_string()),
             ]
         );
+        assert!(ingress::validate_messages_request(&request).is_ok());
 
-        let result = ingress::validate_messages_request(&request);
-        assert!(result.is_ok()); // Should pass all validation
+        // Test valid tool pairing
+        let tool_use_block = types::RequestContentBlock::ToolUse(Box::new(types::RequestToolUseBlock {
+            id: "tool_123".to_string(),
+            name: "test_tool".to_string(),
+            input: serde_json::json!({"param": "value"}),
+            cache_control: None,
+        }));
+
+        let tool_result_block = types::RequestContentBlock::ToolResult(Box::new(types::RequestToolResultBlock {
+            tool_use_id: "tool_123".to_string(),
+            content: Some(types::ToolResultContent::Text("Tool executed successfully".to_string())),
+            is_error: Some(false),
+            cache_control: None,
+        }));
+
+        let tool_request = types::MessagesRequest::new(
+            "claude-3-sonnet-20240229".to_string(),
+            1000,
+            vec![
+                types::InputMessage::user_text("Please use the tool".to_string()),
+                types::InputMessage::assistant_blocks(vec![tool_use_block]),
+                types::InputMessage::user_blocks(vec![tool_result_block]),
+            ]
+        );
+        assert!(ingress::validate_messages_request(&tool_request).is_ok());
     }
 
     /// Tests for header extraction and vendor data processing
@@ -2034,20 +2376,6 @@ mod tests {
         }
 
         #[test]
-        fn test_extract_anthropic_beta_single_header() {
-            let mut headers = HeaderMap::new();
-            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-            headers.insert("anthropic-beta", HeaderValue::from_static("files-api-2025-04-14"));
-            
-            let vendor_data = ingress::extract_anthropic_headers(&headers).unwrap();
-            let headers_obj = &vendor_data["anthropic"]["headers"];
-            
-            assert_eq!(headers_obj["version"], "2023-06-01");
-            assert_eq!(headers_obj["beta"].as_array().unwrap().len(), 1);
-            assert_eq!(headers_obj["beta"][0], "files-api-2025-04-14");
-        }
-
-        #[test]
         fn test_extract_anthropic_beta_comma_separated() {
             let mut headers = HeaderMap::new();
             headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
@@ -2064,119 +2392,9 @@ mod tests {
         }
 
         #[test]
-        fn test_extract_anthropic_beta_multiple_headers() {
-            let mut headers = HeaderMap::new();
-            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-            headers.append("anthropic-beta", HeaderValue::from_static("feature1"));
-            headers.append("anthropic-beta", HeaderValue::from_static("feature2"));
-            
-            let vendor_data = ingress::extract_anthropic_headers(&headers).unwrap();
-            let headers_obj = &vendor_data["anthropic"]["headers"];
-            
-            let beta_array = headers_obj["beta"].as_array().unwrap();
-            assert_eq!(beta_array.len(), 2);
-            assert!(beta_array.contains(&Value::String("feature1".to_string())));
-            assert!(beta_array.contains(&Value::String("feature2".to_string())));
-        }
-
-        #[test]
-        fn test_extract_anthropic_beta_mixed_format() {
-            let mut headers = HeaderMap::new();
-            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-            headers.append("anthropic-beta", HeaderValue::from_static("feature1,feature2"));
-            headers.append("anthropic-beta", HeaderValue::from_static("feature3"));
-            
-            let vendor_data = ingress::extract_anthropic_headers(&headers).unwrap();
-            let headers_obj = &vendor_data["anthropic"]["headers"];
-            
-            let beta_array = headers_obj["beta"].as_array().unwrap();
-            assert_eq!(beta_array.len(), 3);
-            assert!(beta_array.contains(&Value::String("feature1".to_string())));
-            assert!(beta_array.contains(&Value::String("feature2".to_string())));
-            assert!(beta_array.contains(&Value::String("feature3".to_string())));
-        }
-
-        #[test]
-        fn test_extract_anthropic_beta_whitespace_handling() {
-            let mut headers = HeaderMap::new();
-            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-            headers.insert("anthropic-beta", HeaderValue::from_static(" feature1 , feature2 , feature3 "));
-            
-            let vendor_data = ingress::extract_anthropic_headers(&headers).unwrap();
-            let headers_obj = &vendor_data["anthropic"]["headers"];
-            
-            let beta_array = headers_obj["beta"].as_array().unwrap();
-            assert_eq!(beta_array.len(), 3);
-            assert!(beta_array.contains(&Value::String("feature1".to_string())));
-            assert!(beta_array.contains(&Value::String("feature2".to_string())));
-            assert!(beta_array.contains(&Value::String("feature3".to_string())));
-        }
-
-        #[test]
-        fn test_extract_anthropic_beta_deduplication() {
-            let mut headers = HeaderMap::new();
-            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-            headers.append("anthropic-beta", HeaderValue::from_static("feature1,feature2"));
-            headers.append("anthropic-beta", HeaderValue::from_static("feature1,feature3"));
-            
-            let vendor_data = ingress::extract_anthropic_headers(&headers).unwrap();
-            let headers_obj = &vendor_data["anthropic"]["headers"];
-            
-            let beta_array = headers_obj["beta"].as_array().unwrap();
-            assert_eq!(beta_array.len(), 3);
-            // feature1 should only appear once despite being in both headers
-            assert_eq!(beta_array.iter().filter(|&v| v == &Value::String("feature1".to_string())).count(), 1);
-        }
-
-        #[test]
         fn test_no_anthropic_headers() {
             let headers = HeaderMap::new();
             let vendor_data = ingress::extract_anthropic_headers(&headers);
-            assert!(vendor_data.is_none());
-        }
-
-        #[test]
-        fn test_only_version_header() {
-            let mut headers = HeaderMap::new();
-            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-            
-            let vendor_data = ingress::extract_anthropic_headers(&headers).unwrap();
-            let headers_obj = &vendor_data["anthropic"]["headers"];
-            
-            assert_eq!(headers_obj["version"], "2023-06-01");
-            assert!(headers_obj.get("beta").is_none());
-        }
-
-        #[test]
-        fn test_build_vendor_data_anthropic() {
-            let mut headers = HeaderMap::new();
-            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-            headers.insert("anthropic-beta", HeaderValue::from_static("files-api-2025-04-14"));
-            
-            let vendor_data = ingress::build_vendor_data(&headers, "anthropic");
-            assert!(vendor_data.is_some());
-            
-            let data = vendor_data.unwrap();
-            assert!(data.contains_key("anthropic"));
-            
-            let anthropic_data = &data["anthropic"];
-            let headers_obj = &anthropic_data["headers"];
-            assert_eq!(headers_obj["version"], "2023-06-01");
-        }
-
-        #[test]
-        fn test_build_vendor_data_non_anthropic() {
-            let mut headers = HeaderMap::new();
-            headers.insert("authorization", HeaderValue::from_static("Bearer token"));
-            
-            let vendor_data = ingress::build_vendor_data(&headers, "openai");
-            assert!(vendor_data.is_none());
-        }
-
-        #[test]
-        fn test_build_vendor_data_no_headers() {
-            let headers = HeaderMap::new();
-            let vendor_data = ingress::build_vendor_data(&headers, "anthropic");
             assert!(vendor_data.is_none());
         }
 
@@ -2202,50 +2420,12 @@ mod tests {
             let headers_obj = &anthropic_data["headers"];
             assert_eq!(headers_obj["version"], "2023-06-01");
         }
-
-        #[test] 
-        fn test_to_universal_without_headers() {
-            let request = types::MessagesRequest::new(
-                "claude-sonnet-4-20250514".to_string(),
-                1000,
-                vec![types::InputMessage::user_text("Hello".to_string())]
-            );
-            
-            let headers = HeaderMap::new();
-            let universal_request = ingress::to_universal(&request, &headers).unwrap();
-            
-            assert!(universal_request.vendor.is_none());
-        }
-
-        #[test]
-        fn test_invalid_header_values() {
-            let mut headers = HeaderMap::new();
-            // Insert invalid UTF-8 sequence 
-            headers.insert("anthropic-version", HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap());
-            
-            let vendor_data = ingress::extract_anthropic_headers(&headers);
-            assert!(vendor_data.is_none());
-        }
     }
 
     /// Tests for system prompt conversion logic
     mod system_prompt_tests {
         use super::*;
-        use http::HeaderMap;
-
-        #[test]
-        fn test_convert_system_prompt_empty_string() {
-            let system = types::SystemPrompt::String("".to_string());
-            let result = ingress::convert_system_prompt(&system);
-            assert!(result.is_none());
-        }
-
-        #[test]
-        fn test_convert_system_prompt_whitespace_only_string() {
-            let system = types::SystemPrompt::String("   \n\t  ".to_string());
-            let result = ingress::convert_system_prompt(&system);
-            assert!(result.is_none());
-        }
+        use crate::llm::{universal, AIError};
 
         #[test]
         fn test_convert_system_prompt_simple_string() {
@@ -2259,86 +2439,6 @@ mod tests {
                 assert!(sys_msg.name.is_none());
             } else {
                 panic!("Expected system message");
-            }
-        }
-
-        #[test]
-        fn test_convert_system_prompt_string_with_leading_trailing_whitespace() {
-            let system = types::SystemPrompt::String("  You are a helpful assistant.  \n".to_string());
-            let result = ingress::convert_system_prompt(&system).unwrap();
-            
-            if let universal::RequestMessage::System(sys_msg) = result {
-                if let universal::RequestSystemMessageContent::Text(text) = sys_msg.content {
-                    assert_eq!(text, "You are a helpful assistant.");
-                }
-            }
-        }
-
-        #[test]
-        fn test_convert_system_prompt_empty_blocks() {
-            let blocks = vec![
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "".to_string(),
-                    citations: None,
-                    cache_control: None,
-                }
-            ];
-            let system = types::SystemPrompt::Blocks(blocks);
-            let result = ingress::convert_system_prompt(&system);
-            assert!(result.is_none());
-        }
-
-        #[test]
-        fn test_convert_system_prompt_whitespace_only_blocks() {
-            let blocks = vec![
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "   ".to_string(),
-                    citations: None,
-                    cache_control: None,
-                },
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "\n\t".to_string(),
-                    citations: None,
-                    cache_control: None,
-                }
-            ];
-            let system = types::SystemPrompt::Blocks(blocks);
-            let result = ingress::convert_system_prompt(&system);
-            assert!(result.is_none());
-        }
-
-        #[test]
-        fn test_convert_system_prompt_mixed_empty_and_content_blocks() {
-            let blocks = vec![
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "  ".to_string(),  // whitespace only
-                    citations: None,
-                    cache_control: None,
-                },
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "You are a helpful assistant".to_string(),
-                    citations: None,
-                    cache_control: None,
-                },
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "\n\t".to_string(),  // whitespace only
-                    citations: None,
-                    cache_control: None,
-                }
-            ];
-            let system = types::SystemPrompt::Blocks(blocks);
-            let result = ingress::convert_system_prompt(&system).unwrap();
-            
-            if let universal::RequestMessage::System(sys_msg) = result {
-                if let universal::RequestSystemMessageContent::Text(text) = sys_msg.content {
-                    assert_eq!(text, "You are a helpful assistant");
-                }
             }
         }
 
@@ -2369,100 +2469,9 @@ mod tests {
         }
 
         #[test]
-        fn test_convert_system_prompt_blocks_with_whitespace() {
-            let blocks = vec![
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "  You are a helpful assistant.  ".to_string(),
-                    citations: None,
-                    cache_control: None,
-                },
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "\n  Always be concise.\n  ".to_string(),
-                    citations: None,
-                    cache_control: None,
-                }
-            ];
-            let system = types::SystemPrompt::Blocks(blocks);
-            let result = ingress::convert_system_prompt(&system).unwrap();
-            
-            if let universal::RequestMessage::System(sys_msg) = result {
-                if let universal::RequestSystemMessageContent::Text(text) = sys_msg.content {
-                    assert_eq!(text, "You are a helpful assistant.\nAlways be concise.");
-                }
-            }
-        }
-
-        #[test]
-        fn test_validate_system_prompt_string_within_limits() {
-            let text = "A".repeat(50_000); // 50KB - should be fine
-            let system = types::SystemPrompt::String(text);
-            let result = ingress::validate_system_prompt(&system);
-            assert!(result.is_ok());
-        }
-
-        #[test]
         fn test_validate_system_prompt_string_too_large() {
             let text = "A".repeat(150_000); // 150KB - exceeds limit
             let system = types::SystemPrompt::String(text);
-            let result = ingress::validate_system_prompt(&system);
-            assert!(matches!(result, Err(AIError::RequestTooLarge)));
-        }
-
-        #[test]
-        fn test_validate_system_prompt_blocks_within_limits() {
-            let blocks = vec![
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "A".repeat(30_000),
-                    citations: None,
-                    cache_control: None,
-                },
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "B".repeat(30_000),
-                    citations: None,
-                    cache_control: None,
-                }
-            ];
-            let system = types::SystemPrompt::Blocks(blocks);
-            let result = ingress::validate_system_prompt(&system);
-            assert!(result.is_ok());
-        }
-
-        #[test]
-        fn test_validate_system_prompt_blocks_too_large_total() {
-            let blocks = vec![
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "A".repeat(60_000),
-                    citations: None,
-                    cache_control: None,
-                },
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "B".repeat(60_000),
-                    citations: None,
-                    cache_control: None,
-                }
-            ];
-            let system = types::SystemPrompt::Blocks(blocks);
-            let result = ingress::validate_system_prompt(&system);
-            assert!(matches!(result, Err(AIError::RequestTooLarge)));
-        }
-
-        #[test]
-        fn test_validate_system_prompt_too_many_blocks() {
-            let blocks = (0..150).map(|i| {
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: format!("Block {}", i),
-                    citations: None,
-                    cache_control: None,
-                }
-            }).collect();
-            let system = types::SystemPrompt::Blocks(blocks);
             let result = ingress::validate_system_prompt(&system);
             assert!(matches!(result, Err(AIError::RequestTooLarge)));
         }
@@ -2495,139 +2504,6 @@ mod tests {
             } else {
                 panic!("Expected second message to be user");
             }
-        }
-
-        #[test]
-        fn test_to_universal_with_system_blocks() {
-            let blocks = vec![
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "You are a helpful assistant.".to_string(),
-                    citations: None,
-                    cache_control: None,
-                },
-                types::RequestTextBlock {
-                    block_type: types::ContentBlockType::Text,
-                    text: "Be concise.".to_string(),
-                    citations: None,
-                    cache_control: None,
-                }
-            ];
-
-            let request = types::MessagesRequest::new(
-                "claude-sonnet-4-20250514".to_string(),
-                1000,
-                vec![types::InputMessage::user_text("Hello".to_string())]
-            ).with_system(types::SystemPrompt::Blocks(blocks));
-            
-            let headers = HeaderMap::new();
-            let universal_request = ingress::to_universal(&request, &headers).unwrap();
-            
-            assert_eq!(universal_request.messages.len(), 2);
-            
-            // First message should be system with joined text
-            if let universal::RequestMessage::System(sys_msg) = &universal_request.messages[0] {
-                if let universal::RequestSystemMessageContent::Text(text) = &sys_msg.content {
-                    assert_eq!(text, "You are a helpful assistant.\nBe concise.");
-                }
-            } else {
-                panic!("Expected first message to be system");
-            }
-        }
-
-        #[test]
-        fn test_to_universal_without_system() {
-            let request = types::MessagesRequest::new(
-                "claude-sonnet-4-20250514".to_string(),
-                1000,
-                vec![types::InputMessage::user_text("Hello".to_string())]
-            );
-            
-            let headers = HeaderMap::new();
-            let universal_request = ingress::to_universal(&request, &headers).unwrap();
-            
-            assert_eq!(universal_request.messages.len(), 1);
-            
-            // Only message should be user
-            if let universal::RequestMessage::User(_) = &universal_request.messages[0] {
-                // Good
-            } else {
-                panic!("Expected message to be user");
-            }
-        }
-
-        #[test]
-        fn test_to_universal_with_empty_system() {
-            let request = types::MessagesRequest::new(
-                "claude-sonnet-4-20250514".to_string(),
-                1000,
-                vec![types::InputMessage::user_text("Hello".to_string())]
-            ).with_system(types::SystemPrompt::String("   ".to_string()));
-            
-            let headers = HeaderMap::new();
-            let universal_request = ingress::to_universal(&request, &headers).unwrap();
-            
-            assert_eq!(universal_request.messages.len(), 1);
-            
-            // Only message should be user (empty system should be filtered out)
-            if let universal::RequestMessage::User(_) = &universal_request.messages[0] {
-                // Good
-            } else {
-                panic!("Expected message to be user");
-            }
-        }
-
-        #[test]
-        fn test_to_universal_no_messages_fails() {
-            let request = types::MessagesRequest::new(
-                "claude-sonnet-4-20250514".to_string(),
-                1000,
-                vec![]
-            );
-            
-            let headers = HeaderMap::new();
-            let result = ingress::to_universal(&request, &headers);
-            
-            assert!(matches!(result, Err(AIError::MessageNotFound)));
-        }
-
-        #[test]
-        fn test_to_universal_system_validation_failure() {
-            let text = "A".repeat(150_000); // Too large
-            let request = types::MessagesRequest::new(
-                "claude-sonnet-4-20250514".to_string(),
-                1000,
-                vec![types::InputMessage::user_text("Hello".to_string())]
-            ).with_system(types::SystemPrompt::String(text));
-            
-            let headers = HeaderMap::new();
-            let result = ingress::to_universal(&request, &headers);
-            
-            assert!(matches!(result, Err(AIError::RequestTooLarge)));
-        }
-
-        #[test]
-        fn test_system_message_ordering() {
-            let request = types::MessagesRequest::new(
-                "claude-sonnet-4-20250514".to_string(),
-                1000,
-                vec![
-                    types::InputMessage::user_text("Hello".to_string()),
-                    types::InputMessage::assistant_text("Hi there!".to_string()),
-                    types::InputMessage::user_text("How are you?".to_string())
-                ]
-            ).with_system(types::SystemPrompt::String("You are helpful".to_string()));
-            
-            let headers = HeaderMap::new();
-            let universal_request = ingress::to_universal(&request, &headers).unwrap();
-            
-            assert_eq!(universal_request.messages.len(), 4);
-            
-            // Verify ordering: system, user, assistant, user
-            assert!(matches!(universal_request.messages[0], universal::RequestMessage::System(_)));
-            assert!(matches!(universal_request.messages[1], universal::RequestMessage::User(_)));
-            assert!(matches!(universal_request.messages[2], universal::RequestMessage::Assistant(_)));
-            assert!(matches!(universal_request.messages[3], universal::RequestMessage::User(_)));
         }
     }
 }

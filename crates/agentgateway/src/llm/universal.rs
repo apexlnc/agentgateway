@@ -2,7 +2,6 @@
 #![allow(deprecated_in_future)]
 
 use std::collections::HashMap;
-use chrono;
 
 #[allow(deprecated)]
 #[allow(deprecated_in_future)]
@@ -33,6 +32,7 @@ pub use async_openai::types::{
 	ServiceTier, WebSearchOptions,
 };
 use serde::{Deserialize, Serialize};
+
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -179,7 +179,7 @@ pub struct Request {
 	pub tools: Option<Vec<ChatCompletionTool>>,
 
 	#[serde(skip_serializing_if = "Option::is_none")]
-	pub tool_choice: Option<ChatCompletionToolChoiceOption>,
+	pub tool_choice: Option<ToolChoiceOption>,
 
 	/// Whether to enable [parallel function calling](https://platform.openai.com/docs/guides/function-calling/parallel-function-calling) during tool use.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -219,6 +219,7 @@ pub struct Request {
 	#[allow(deprecated_in_future)]
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub functions: Option<Vec<ChatCompletionFunctions>>,
+
 }
 
 impl From<Request> for CreateChatCompletionRequest {
@@ -333,12 +334,16 @@ pub fn message_text(msg: &RequestMessage) -> Option<&str> {
 
 pub fn max_tokens(req: &Request) -> usize {
 	#![allow(deprecated)]
-	req.max_completion_tokens.or(req.max_tokens).unwrap_or(4096) as usize
+	req.max_completion_tokens
+		.or(req.max_tokens)
+		.unwrap_or(4096) as usize
 }
 
 pub fn max_tokens_option(req: &Request) -> Option<u64> {
 	#![allow(deprecated)]
-	req.max_completion_tokens.or(req.max_tokens).map(Into::into)
+	req.max_completion_tokens
+		.or(req.max_tokens)
+		.map(Into::into)
 }
 
 pub fn stop_sequence(req: &Request) -> Vec<String> {
@@ -347,6 +352,33 @@ pub fn stop_sequence(req: &Request) -> Vec<String> {
 		Some(Stop::StringArray(s)) => s.clone(),
 		_ => vec![],
 	}
+}
+
+/// Clean edge decoder: convert OpenAI Chat Completions request to Universal format
+/// 
+/// Since Chat Completions requests are already in universal format, this function
+/// primarily adds vendor context to mark the route type and ensure consistent processing.
+pub fn decode_completions_to_universal(mut req: Request) -> Result<Request, crate::llm::AIError> {
+	// OpenAI Chat Completions requests are already in universal format
+	// We just need to mark the vendor context to indicate this is a Completions route
+	
+	let mut vendor_data = req.vendor.unwrap_or_default();
+	vendor_data.insert("route_type".to_string(), serde_json::json!("completions"));
+	vendor_data.insert("openai".to_string(), serde_json::json!({}));
+	
+	req.vendor = Some(vendor_data);
+	
+	Ok(req)
+}
+
+/// Clean edge encoder: convert Universal response to OpenAI Chat Completions format
+/// 
+/// Since Universal responses are already in OpenAI format, this function is essentially
+/// a passthrough but provides a consistent interface with the Messages API encoder.
+pub fn encode_universal_to_completions(response: Response) -> Result<Response, crate::llm::AIError> {
+	// Universal responses are already in OpenAI Chat Completions format
+	// No conversion needed - this is mainly for API consistency with Messages encoder
+	Ok(response)
 }
 
 
