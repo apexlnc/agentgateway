@@ -342,3 +342,31 @@ pub fn stop_sequence(req: &Request) -> Vec<String> {
 		_ => vec![],
 	}
 }
+
+/// Model information for the /v1/models API endpoint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ModelInfo {
+	/// Unique model identifier
+	pub id: String,
+	/// Human-readable name for the model
+	pub display_name: String,
+	/// Object type - always "model" for models
+	pub r#type: String,
+	/// RFC 3339 datetime string representing when the model was released
+	pub created_at: String,
+}
+
+/// Response structure for the /v1/models API endpoint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ModelsResponse {
+	/// List of available models
+	pub data: Vec<ModelInfo>,
+	/// First ID in the data list (for pagination)
+	pub first_id: Option<String>,
+	/// Last ID in the data list (for pagination)
+	pub last_id: Option<String>,
+	/// Whether there are more results available
+	pub has_more: bool,
+}

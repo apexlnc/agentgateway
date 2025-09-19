@@ -25,6 +25,7 @@ use crate::{client, *};
 pub mod anthropic;
 pub mod bedrock;
 pub mod gemini;
+pub mod messages;
 pub mod openai;
 mod pii;
 pub mod policy;
@@ -300,7 +301,7 @@ impl AIProvider {
 					})?;
 					// Store the region in request extensions so AWS signing can use it
 					req.extensions.insert(bedrock::AwsRegion {
-						region: provider.region.as_str().to_string(),
+						region: provider.common.region.as_str().to_string(),
 					});
 					Ok(())
 				})
@@ -315,12 +316,96 @@ impl AIProvider {
 		req: Request,
 		tokenize: bool,
 		log: &mut Option<&mut RequestLog>,
+		route_type: RouteType,
 	) -> Result<RequestResult, AIError> {
+		// Handle Models route early - no body parsing needed
+		if let RouteType::Models = route_type {
+			return Err(AIError::UnsupportedContent); // Models should be handled in httpproxy, not here
+		}
+
 		// Buffer the body, max 2mb
 		let (mut parts, body) = req.into_parts();
 		let Ok(bytes) = axum::body::to_bytes(body, 2_097_152).await else {
 			return Err(AIError::RequestTooLarge);
 		};
+
+		// Messages front-door (Bedrock first)
+		if let RouteType::Messages = route_type {
+			match self {
+				AIProvider::Bedrock(u) => {
+					// Extract Anthropic-specific headers
+					let anthropic_headers = bedrock::anthropic::extract_anthropic_headers(&parts.headers)?;
+
+					// Parse Messages request directly
+					let messages_request: messages::MessagesRequest =
+						serde_json::from_slice(&bytes).map_err(AIError::RequestParsing)?;
+
+
+					// Create LLMRequest from Messages format
+					let llm_request = self.to_llm_request_from_messages(&messages_request, tokenize);
+
+					// Use existing Bedrock Messages translator
+					let anthropic_provider = bedrock::anthropic::Provider {
+						common: u.common.clone(),
+					};
+					let bedrock_request = anthropic_provider
+						.process_request(messages_request, None, &anthropic_headers)
+						.await?;
+
+					// Serialize to request body
+					let body_bytes = serde_json::to_vec(&bedrock_request).map_err(AIError::RequestMarshal)?;
+					parts.headers.remove(header::CONTENT_LENGTH);
+					let req = Request::from_parts(parts, Body::from(body_bytes));
+					return Ok(RequestResult::Success(req, llm_request));
+				},
+				AIProvider::Anthropic(_) => {
+					// Extract Anthropic-specific headers
+					let anthropic_headers = bedrock::anthropic::extract_anthropic_headers(&parts.headers)?;
+
+					// Parse Messages request directly
+					let messages_request: messages::MessagesRequest =
+						serde_json::from_slice(&bytes).map_err(AIError::RequestParsing)?;
+
+
+					// Create LLMRequest from Messages format
+					let llm_request = self.to_llm_request_from_messages(&messages_request, tokenize);
+
+					// For direct Anthropic, translate Authorization to x-api-key
+					if let Some(auth_header) = parts.headers.remove(header::AUTHORIZATION) {
+						if let Ok(auth_str) = auth_header.to_str() {
+							if let Some(token) = auth_str.strip_prefix("Bearer ") {
+								let mut api_key_header =
+									HeaderValue::from_str(token).map_err(|_| AIError::UnsupportedContent)?;
+								api_key_header.set_sensitive(true);
+								parts.headers.insert("x-api-key", api_key_header);
+							}
+						}
+					}
+
+					// Add required Anthropic version header
+					parts
+						.headers
+						.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+
+					// Add anthropic-beta header if present
+					if let Some(beta_features) = &anthropic_headers.anthropic_beta {
+						if !beta_features.is_empty() {
+							let beta_value = beta_features.join(",");
+							parts.headers.insert(
+								"anthropic-beta",
+								HeaderValue::from_str(&beta_value).map_err(|_| AIError::UnsupportedContent)?,
+							);
+						}
+					}
+
+					let req = Request::from_parts(parts, Body::from(bytes));
+					return Ok(RequestResult::Success(req, llm_request));
+				},
+				AIProvider::OpenAI(_) => return Err(AIError::MessagesUnsupportedForProvider(strng::literal!("OpenAI"))),
+				AIProvider::Gemini(_) => return Err(AIError::MessagesUnsupportedForProvider(strng::literal!("Gemini"))),
+				AIProvider::Vertex(_) => return Err(AIError::MessagesUnsupportedForProvider(strng::literal!("Vertex AI"))),
+			}
+		}
 		let mut req: universal::Request = if let Some(p) = policies {
 			p.unmarshal_request(&bytes)?
 		} else {
@@ -385,10 +470,11 @@ impl AIProvider {
 		log: AsyncLog<llm::LLMResponse>,
 		include_completion_in_log: bool,
 		resp: Response,
+		route_type: RouteType,
 	) -> Result<Response, AIError> {
 		if req.streaming {
 			return self
-				.process_streaming(req, rate_limit, log, include_completion_in_log, resp)
+				.process_streaming(req, rate_limit, log, include_completion_in_log, resp, route_type)
 				.await;
 		}
 		// Buffer the body, max 2mb
@@ -399,9 +485,195 @@ impl AIProvider {
 		else {
 			return Err(AIError::RequestTooLarge);
 		};
+		// Handle Messages route with native format processing
+		if let RouteType::Messages = route_type {
+			if let AIProvider::Bedrock(p) = self {
+				// Use native Messages API response processing
+				let anthropic_provider = bedrock::anthropic::Provider {
+					common: p.common.clone(),
+				};
+				
+				if parts.status.is_success() {
+					match anthropic_provider.process_response_direct(&req.request_model, &bytes, &parts.headers).await {
+						Ok(messages_response) => {
+							// Build LLMResponse for logging from Messages format
+							let llm_resp = LLMResponse {
+								request: req,
+								input_tokens_from_response: Some(messages_response.usage.input_tokens as u64),
+								output_tokens: Some(messages_response.usage.output_tokens as u64),
+								total_tokens: Some((messages_response.usage.input_tokens + messages_response.usage.output_tokens) as u64),
+								provider_model: Some(strng::new(&messages_response.model)),
+								completion: if include_completion_in_log {
+									Some(
+										messages_response
+											.content
+											.iter()
+											.filter_map(|block| match block {
+												messages::ResponseContentBlock::Text(text_block) => Some(text_block.text.clone()),
+												_ => None,
+											})
+											.collect(),
+									)
+								} else {
+									None
+								},
+								first_token: Default::default(),
+							};
+
+							// For now, skip response guard as it expects Universal format
+							
+							let body = serde_json::to_vec(&messages_response).map_err(AIError::ResponseMarshal)?;
+							
+							amend_tokens(rate_limit, &llm_resp);
+							log.store(Some(llm_resp));
+							
+							parts.headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+							parts.headers.remove(header::CONTENT_LENGTH);
+							let resp = Response::from_parts(parts, Body::from(body));
+							return Ok(resp);
+						},
+						Err(err) => {
+							let llm_resp = LLMResponse {
+								request: req,
+								input_tokens_from_response: None,
+								output_tokens: None,
+								total_tokens: None,
+								provider_model: None,
+								completion: None,
+								first_token: None,
+							};
+							
+							// Create Messages-formatted error response
+							let messages_error = messages::MessagesErrorResponse {
+								response_type: "error".to_string(),
+								error: messages::ApiError {
+									error_type: "api_error".to_string(),
+									message: format!("Failed to process response: {}", err),
+								},
+							};
+							
+							let body = serde_json::to_vec(&messages_error).map_err(AIError::ResponseMarshal)?;
+							log.store(Some(llm_resp));
+							
+							parts.headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+							parts.headers.remove(header::CONTENT_LENGTH);
+							let resp = Response::from_parts(parts, Body::from(body));
+							return Ok(resp);
+						}
+					}
+				} else {
+					// Handle error response for Messages format
+					match anthropic_provider.process_error_direct(parts.status, &bytes).await {
+						Ok(messages_error) => {
+							let llm_resp = LLMResponse {
+								request: req,
+								input_tokens_from_response: None,
+								output_tokens: None,
+								total_tokens: None,
+								provider_model: None,
+								completion: None,
+								first_token: None,
+							};
+							
+							let body = serde_json::to_vec(&messages_error).map_err(AIError::ResponseMarshal)?;
+							log.store(Some(llm_resp));
+							
+							let resp = Response::from_parts(parts, Body::from(body));
+							return Ok(resp);
+						},
+						Err(_) => {
+							// Fallback to generic error
+							let llm_resp = LLMResponse {
+								request: req,
+								input_tokens_from_response: None,
+								output_tokens: None,
+								total_tokens: None,
+								provider_model: None,
+								completion: None,
+								first_token: None,
+							};
+							
+							let messages_error = messages::MessagesErrorResponse {
+								response_type: "error".to_string(),
+								error: messages::ApiError {
+									error_type: "api_error".to_string(),
+									message: "Internal server error".to_string(),
+								},
+							};
+							
+							let body = serde_json::to_vec(&messages_error).map_err(AIError::ResponseMarshal)?;
+							log.store(Some(llm_resp));
+							
+							parts.status = StatusCode::INTERNAL_SERVER_ERROR;
+							parts.headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+							parts.headers.remove(header::CONTENT_LENGTH);
+							let resp = Response::from_parts(parts, Body::from(body));
+							return Ok(resp);
+						}
+					}
+				}
+			} else if let AIProvider::Anthropic(_) = self {
+				// For direct Anthropic provider with Messages route, pass through response as-is
+				// since it's already in Messages format
+				let llm_resp = if parts.status.is_success() {
+					// Parse to extract usage info for logging
+					match serde_json::from_slice::<messages::MessagesResponse>(&bytes) {
+						Ok(messages_response) => LLMResponse {
+							request: req,
+							input_tokens_from_response: Some(messages_response.usage.input_tokens as u64),
+							output_tokens: Some(messages_response.usage.output_tokens as u64),
+							total_tokens: Some((messages_response.usage.input_tokens + messages_response.usage.output_tokens) as u64),
+							provider_model: Some(strng::new(&messages_response.model)),
+							completion: if include_completion_in_log {
+								Some(
+									messages_response
+										.content
+										.iter()
+										.filter_map(|block| match block {
+											messages::ResponseContentBlock::Text(text_block) => Some(text_block.text.clone()),
+											_ => None,
+										})
+										.collect(),
+								)
+							} else {
+								None
+							},
+							first_token: Default::default(),
+						},
+						Err(_) => LLMResponse {
+							request: req,
+							input_tokens_from_response: None,
+							output_tokens: None,
+							total_tokens: None,
+							provider_model: None,
+							completion: None,
+							first_token: None,
+						},
+					}
+				} else {
+					LLMResponse {
+						request: req,
+						input_tokens_from_response: None,
+						output_tokens: None,
+						total_tokens: None,
+						provider_model: None,
+						completion: None,
+						first_token: None,
+					}
+				};
+				
+				log.store(Some(llm_resp));
+				let resp = Response::from_parts(parts, Body::from(bytes));
+				return Ok(resp);
+			} else {
+				return Err(AIError::MessagesUnsupportedForProvider(self.provider()));
+			}
+		}
+
+		// Handle Universal format for non-Messages routes
 		// 3 cases: success, error properly handled, and unexpected error we need to synthesize
 		let openai_response = self
-			.process_response_status(&req, parts.status, &bytes)
+			.process_response_status(&req, parts.status, &bytes, route_type)
 			.await
 			.unwrap_or_else(|err| {
 				Err(ChatCompletionErrorResponse {
@@ -496,6 +768,7 @@ impl AIProvider {
 		req: &LLMRequest,
 		status: StatusCode,
 		bytes: &Bytes,
+		_route_type: RouteType,
 	) -> Result<Result<universal::Response, ChatCompletionErrorResponse>, AIError> {
 		if status.is_success() {
 			let openai_response = match self {
@@ -504,8 +777,9 @@ impl AIProvider {
 				AIProvider::Vertex(p) => p.process_response(bytes).await?,
 				AIProvider::Anthropic(p) => p.process_response(bytes).await?,
 				AIProvider::Bedrock(p) => {
-					p.process_response(req.request_model.as_str(), bytes)
-						.await?
+					// Note: Messages routes are handled earlier in process_response method
+					// This method now only handles Universal format routes
+					p.process_response(req.request_model.as_str(), bytes).await?
 				},
 			};
 			Ok(Ok(openai_response))
@@ -528,6 +802,7 @@ impl AIProvider {
 		log: AsyncLog<llm::LLMResponse>,
 		include_completion_in_log: bool,
 		resp: Response,
+		route_type: RouteType,
 	) -> Result<Response, AIError> {
 		let model = req.request_model.clone();
 		// Store an empty response, as we stream in info we will parse into it
@@ -541,16 +816,29 @@ impl AIProvider {
 			first_token: Default::default(),
 		};
 		log.store(Some(llmresp));
-		let resp = match self {
-			AIProvider::Anthropic(p) => p.process_streaming(log, resp).await,
-			AIProvider::Bedrock(p) => p.process_streaming(log, resp, model.as_str()).await,
-			_ => {
-				self
-					.default_process_streaming(log, include_completion_in_log, rate_limit, resp)
-					.await
+		match self {
+			AIProvider::Anthropic(p) => Ok(p.process_streaming(log, resp).await),
+			AIProvider::Bedrock(p) => {
+				match route_type {
+					RouteType::Messages => {
+						// Use Anthropic provider for Messages API responses
+						let anthropic_provider = bedrock::anthropic::Provider {
+							common: p.common.clone(),
+						};
+						Ok(anthropic_provider.process_streaming(log, rate_limit, resp, model.as_str()).await)
+					},
+					_ => {
+						// Use Universal provider for other responses
+						Ok(p.process_streaming(log, resp, model.as_str()).await)
+					}
+				}
 			},
-		};
-		Ok(resp)
+			_ => {
+				Ok(self
+					.default_process_streaming(log, include_completion_in_log, rate_limit, resp)
+					.await)
+			},
+		}
 	}
 
 	async fn default_process_streaming(
@@ -619,6 +907,30 @@ impl AIProvider {
 		})
 	}
 
+	/// Create LLMRequest from Messages API format
+	pub fn to_llm_request_from_messages(
+		&self,
+		req: &messages::MessagesRequest,
+		tokenize: bool,
+	) -> LLMRequest {
+		LLMRequest {
+			input_tokens: if tokenize {
+				Some(estimate_tokens_from_messages(req))
+			} else {
+				None
+			},
+			request_model: strng::new(&req.model),
+			provider: self.provider(),
+			streaming: req.stream.unwrap_or(false),
+			params: LLMRequestParams {
+				temperature: req.temperature.map(|x| x as f64),
+				max_tokens: Some(req.max_tokens as u64),
+				top_p: req.top_p.map(|x| x as f64),
+				..Default::default()
+			},
+		}
+	}
+
 	pub async fn to_llm_request(
 		&self,
 		req: &universal::Request,
@@ -653,6 +965,137 @@ impl AIProvider {
 			},
 		};
 		Ok(llm)
+	}
+
+	/// Get list of available models for this provider
+	pub fn list_models(&self) -> universal::ModelsResponse {
+		match self {
+			AIProvider::OpenAI(_) => universal::ModelsResponse {
+				data: vec![
+					universal::ModelInfo {
+						id: "gpt-4o".to_string(),
+						display_name: "GPT-4o".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-05-13T00:00:00Z".to_string(),
+					},
+					universal::ModelInfo {
+						id: "gpt-4o-mini".to_string(),
+						display_name: "GPT-4o mini".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-07-18T00:00:00Z".to_string(),
+					},
+					universal::ModelInfo {
+						id: "gpt-4-turbo".to_string(),
+						display_name: "GPT-4 Turbo".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-04-09T00:00:00Z".to_string(),
+					},
+					universal::ModelInfo {
+						id: "gpt-3.5-turbo".to_string(),
+						display_name: "GPT-3.5 Turbo".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2022-03-01T00:00:00Z".to_string(),
+					},
+				],
+				first_id: Some("gpt-4o".to_string()),
+				last_id: Some("gpt-3.5-turbo".to_string()),
+				has_more: false,
+			},
+			AIProvider::Anthropic(_) => universal::ModelsResponse {
+				data: vec![
+					universal::ModelInfo {
+						id: "claude-3-5-sonnet-20241022".to_string(),
+						display_name: "Claude 3.5 Sonnet".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-10-22T00:00:00Z".to_string(),
+					},
+					universal::ModelInfo {
+						id: "claude-3-5-haiku-20241022".to_string(),
+						display_name: "Claude 3.5 Haiku".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-10-22T00:00:00Z".to_string(),
+					},
+					universal::ModelInfo {
+						id: "claude-3-opus-20240229".to_string(),
+						display_name: "Claude 3 Opus".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-02-29T00:00:00Z".to_string(),
+					},
+				],
+				first_id: Some("claude-3-5-sonnet-20241022".to_string()),
+				last_id: Some("claude-3-opus-20240229".to_string()),
+				has_more: false,
+			},
+			AIProvider::Bedrock(_) => universal::ModelsResponse {
+				data: vec![
+					universal::ModelInfo {
+						id: "anthropic.claude-3-5-sonnet-20241022-v2:0".to_string(),
+						display_name: "Claude 3.5 Sonnet (v2) via Bedrock".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-10-22T00:00:00Z".to_string(),
+					},
+					universal::ModelInfo {
+						id: "anthropic.claude-3-5-haiku-20241022-v1:0".to_string(),
+						display_name: "Claude 3.5 Haiku via Bedrock".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-10-22T00:00:00Z".to_string(),
+					},
+					universal::ModelInfo {
+						id: "anthropic.claude-3-opus-20240229-v1:0".to_string(),
+						display_name: "Claude 3 Opus via Bedrock".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-02-29T00:00:00Z".to_string(),
+					},
+					universal::ModelInfo {
+						id: "meta.llama3-2-90b-instruct-v1:0".to_string(),
+						display_name: "Llama 3.2 90B Instruct via Bedrock".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-09-25T00:00:00Z".to_string(),
+					},
+				],
+				first_id: Some("anthropic.claude-3-5-sonnet-20241022-v2:0".to_string()),
+				last_id: Some("meta.llama3-2-90b-instruct-v1:0".to_string()),
+				has_more: false,
+			},
+			AIProvider::Gemini(_) => universal::ModelsResponse {
+				data: vec![
+					universal::ModelInfo {
+						id: "gemini-1.5-pro".to_string(),
+						display_name: "Gemini 1.5 Pro".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-02-15T00:00:00Z".to_string(),
+					},
+					universal::ModelInfo {
+						id: "gemini-1.5-flash".to_string(),
+						display_name: "Gemini 1.5 Flash".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-05-14T00:00:00Z".to_string(),
+					},
+				],
+				first_id: Some("gemini-1.5-pro".to_string()),
+				last_id: Some("gemini-1.5-flash".to_string()),
+				has_more: false,
+			},
+			AIProvider::Vertex(_) => universal::ModelsResponse {
+				data: vec![
+					universal::ModelInfo {
+						id: "gemini-1.5-pro".to_string(),
+						display_name: "Gemini 1.5 Pro via Vertex AI".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-02-15T00:00:00Z".to_string(),
+					},
+					universal::ModelInfo {
+						id: "gemini-1.5-flash".to_string(),
+						display_name: "Gemini 1.5 Flash via Vertex AI".to_string(),
+						r#type: "model".to_string(),
+						created_at: "2024-05-14T00:00:00Z".to_string(),
+					},
+				],
+				first_id: Some("gemini-1.5-pro".to_string()),
+				last_id: Some("gemini-1.5-flash".to_string()),
+				has_more: false,
+			},
+		}
 	}
 }
 
@@ -697,6 +1140,127 @@ fn num_tokens_from_messages(
 	Ok(num_tokens)
 }
 
+/// Estimate tokens from Anthropic Messages format
+/// Uses simple heuristic: ~4 characters per token, rounded up
+/// More accurate than full tokenization but much faster
+fn estimate_tokens_from_messages(req: &messages::MessagesRequest) -> u64 {
+	let mut token_count = 0u64;
+
+	// System message estimation - only text content
+	if let Some(system) = &req.system {
+		let system_chars = match system {
+			messages::SystemPrompt::String(text) => text.len(),
+			messages::SystemPrompt::Blocks(blocks) => blocks.iter().map(|block| block.text.len()).sum(),
+		};
+		token_count += (system_chars as u64).div_ceil(4); // chars/4, round up
+	}
+
+	// Message content estimation - only simple text content
+	for message in &req.messages {
+		if let messages::MessageContent::String(text) = &message.content {
+			token_count += (text.len() as u64).div_ceil(4);
+		}
+		// Skip complex blocks for consistency with universal route behavior
+	}
+
+	// Add message formatting overhead
+	token_count += (req.messages.len() as u64) * 5;
+
+	token_count
+}
+
+/// Helper functions for Messages API format text extraction (similar to universal helpers)
+/// Extract text content from Messages API system prompt
+pub fn messages_system_text(system: &messages::SystemPrompt) -> Vec<String> {
+	match system {
+		messages::SystemPrompt::String(text) => vec![text.clone()],
+		messages::SystemPrompt::Blocks(blocks) => {
+			blocks.iter().map(|block| block.text.clone()).collect()
+		}
+	}
+}
+
+/// Extract text content from Messages API message content
+pub fn messages_content_text(content: &messages::MessageContent) -> Vec<String> {
+	match content {
+		messages::MessageContent::String(text) => vec![text.clone()],
+		messages::MessageContent::Blocks(blocks) => {
+			messages_extract_text_from_blocks(blocks)
+		}
+	}
+}
+
+/// Extract text from various content block types
+pub fn messages_extract_text_from_blocks(blocks: &[messages::RequestContentBlock]) -> Vec<String> {
+	let mut texts = Vec::new();
+	for block in blocks {
+		match block {
+			messages::RequestContentBlock::Text(text_block) => {
+				texts.push(text_block.text.clone());
+			}
+			messages::RequestContentBlock::Document(doc_block) => {
+				match &doc_block.source {
+					messages::DocumentSource::PlainText { data, .. } => {
+						texts.push(data.clone());
+					}
+					messages::DocumentSource::ContentBlock { content_blocks } => {
+						texts.extend(messages_extract_text_from_blocks(content_blocks));
+					}
+					_ => {
+						// Skip binary or non-text content for prompt guard
+					}
+				}
+			}
+			messages::RequestContentBlock::ToolResult(tool_result) => {
+				if let Some(content) = &tool_result.content {
+					match content {
+						messages::ToolResultContent::Text(text) => {
+							texts.push(text.clone());
+						}
+						messages::ToolResultContent::Blocks(blocks) => {
+							texts.extend(messages_extract_text_from_blocks(blocks));
+						}
+						_ => {
+							// Skip unknown content types
+						}
+					}
+				}
+			}
+			messages::RequestContentBlock::Thinking(thinking) => {
+				texts.push(thinking.thinking.clone());
+			}
+			messages::RequestContentBlock::SearchResult(search) => {
+				texts.push(search.title.clone());
+				for content_block in &search.content {
+					texts.push(content_block.text.clone());
+				}
+			}
+			_ => {
+				// Skip image, tool_use and other non-text content for prompt guard
+			}
+		}
+	}
+	texts
+}
+
+/// Extract all text content from Messages API request for prompt guard
+pub fn messages_extract_all_text(req: &messages::MessagesRequest) -> Vec<String> {
+	let mut all_text = Vec::new();
+	
+	// Extract system text
+	if let Some(system) = &req.system {
+		all_text.extend(messages_system_text(system));
+	}
+	
+	// Extract message text
+	for message in &req.messages {
+		all_text.extend(messages_content_text(&message.content));
+	}
+	
+	all_text
+}
+
+
 /// Tokenizers take about 200ms to load and are lazy loaded. This loads them on demand, outside the
 /// request path
 pub fn preload_tokenizers() {
@@ -732,6 +1296,8 @@ pub enum AIError {
 	UnsupportedModel,
 	#[error("unsupported content")]
 	UnsupportedContent,
+	#[error("Messages API is not yet supported for {0} provider. Please use the /v1/chat/completions endpoint instead")]
+	MessagesUnsupportedForProvider(Strng),
 	#[error("request was too large")]
 	RequestTooLarge,
 	#[error("prompt guard failed")]
