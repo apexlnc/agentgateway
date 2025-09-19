@@ -1,6 +1,6 @@
 use agent_core::prelude::Strng;
 use agent_core::strng;
-use async_openai::types::FinishReason;
+// Remove unused import - using universal::FinishReason instead
 use bytes::Bytes;
 use chrono;
 use rand::Rng;
@@ -492,7 +492,7 @@ pub(super) fn translate_response(
 	})
 }
 
-fn translate_stop_reason(resp: &StopReason) -> FinishReason {
+fn translate_stop_reason(resp: &StopReason) -> universal::FinishReason {
 	match resp {
 		StopReason::EndTurn => universal::FinishReason::Stop,
 		StopReason::MaxTokens => universal::FinishReason::Length,
@@ -517,12 +517,29 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 				.collect::<std::collections::HashMap<String, bool>>()
 		});
 
-	// Extract system messages from OpenAI format
-	let mut system_text = Vec::new();
-	let mut messages = Vec::new();
 
-	for msg in &req.messages {
-		match msg {
+	// Extract anthropic beta headers from vendor bag for additionalModelRequestFields
+	let additional_model_request_fields = req.vendor
+		.as_ref()
+		.and_then(|vendor| vendor.get("anthropic"))
+		.and_then(|anthropic| anthropic.get("headers"))
+		.and_then(|headers| headers.get("beta"))
+		.and_then(|beta| beta.as_array())
+		.filter(|beta_array| !beta_array.is_empty())
+		.map(|beta_array| {
+			serde_json::json!({
+				"anthropic_beta": beta_array
+			})
+		});
+
+	// Extract system messages from Universal format
+	let mut system_text = Vec::new();
+	let mut messages: Vec<types::Message> = Vec::new();
+
+	// Coalesce messages following Anthropic pattern: Assistant(tool_use) → User(tool_result + text)
+	let mut i = 0;
+	while i < req.messages.len() {
+		match &req.messages[i] {
 			universal::RequestMessage::System(sys_msg) => {
 				let text = match &sys_msg.content {
 					universal::RequestSystemMessageContent::Text(t) => t.clone(),
@@ -538,22 +555,110 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 					}
 				};
 				system_text.push(text);
+				i += 1;
+			},
+			universal::RequestMessage::Assistant(assistant_msg) => {
+				// Convert assistant message
+				let content = convert_openai_message_to_bedrock_content(&req.messages[i], tool_results_meta.as_ref());
+				// Always include Assistant messages, especially those with tool_calls
+				// Empty content check could miss tool_calls without text content
+				let has_tool_calls = assistant_msg.tool_calls.as_ref().map_or(false, |calls| !calls.is_empty());
+				if !content.is_empty() || has_tool_calls {
+					messages.push(types::Message {
+						role: types::Role::Assistant,
+						content,
+					});
+				}
+
+				// Check if this assistant has tool calls - if so, coalesce the following pattern:
+				// Tool messages → optional User message into a single User message
+				if has_tool_calls {
+					i += 1; // Move past assistant
+
+					// Collect tool_call_ids from the assistant to match against
+					let tool_call_ids: std::collections::HashSet<String> = assistant_msg.tool_calls
+						.as_ref()
+						.unwrap()
+						.iter()
+						.map(|call| call.id.clone())
+						.collect();
+
+					// Step 1: Collect contiguous Tool messages that match the assistant's tool_calls
+					let mut tool_results = Vec::new();
+					while i < req.messages.len() {
+						if let universal::RequestMessage::Tool(tool_msg) = &req.messages[i] {
+							// Only collect tool results that match this assistant's tool calls
+							if tool_call_ids.contains(&tool_msg.tool_call_id) {
+								let tool_content = convert_openai_message_to_bedrock_content(&req.messages[i], tool_results_meta.as_ref());
+								tool_results.extend(tool_content);
+								i += 1;
+							} else {
+								break; // Tool doesn't match this assistant, stop collecting
+							}
+						} else {
+							break; // Not a tool message, stop collecting
+						}
+					}
+
+					// Step 2: Check for an optional trailing User message
+					let mut user_content = Vec::new();
+					if i < req.messages.len() {
+						if let universal::RequestMessage::User(_) = &req.messages[i] {
+							user_content = convert_openai_message_to_bedrock_content(&req.messages[i], tool_results_meta.as_ref());
+							i += 1; // Consume the user message
+						}
+					}
+
+					// Step 3: Create a single User message with tool_results FIRST, then user text
+					let mut combined_content = tool_results;
+					combined_content.extend(user_content);
+
+					if !combined_content.is_empty() {
+						messages.push(types::Message {
+							role: types::Role::User,
+							content: combined_content,
+						});
+					}
+					continue; // We've already advanced i appropriately
+				}
+
+				i += 1;
 			},
 			_ => {
-				// Convert OpenAI messages to Bedrock format
-				let role = match msg {
+				// Handle other message types (User, Function, Developer)
+				let role = match &req.messages[i] {
 					universal::RequestMessage::User(_) => types::Role::User,
-					universal::RequestMessage::Assistant(_) => types::Role::Assistant,
-					universal::RequestMessage::Tool(_) => types::Role::User, // Tool messages become user
-					universal::RequestMessage::System(_) => continue, // Already handled above
 					universal::RequestMessage::Function(_) => types::Role::User, // Map deprecated function to user
 					universal::RequestMessage::Developer(_) => types::Role::User, // Map developer to user
+					universal::RequestMessage::Tool(_) => {
+						// Orphaned tool message - create a User message with just tool results
+						let mut tool_content = Vec::new();
+						while i < req.messages.len() {
+							if let universal::RequestMessage::Tool(_) = &req.messages[i] {
+								let content = convert_openai_message_to_bedrock_content(&req.messages[i], tool_results_meta.as_ref());
+								tool_content.extend(content);
+								i += 1;
+							} else {
+								break;
+							}
+						}
+						if !tool_content.is_empty() {
+							messages.push(types::Message {
+								role: types::Role::User,
+								content: tool_content,
+							});
+						}
+						continue; // Already advanced i
+					},
+					universal::RequestMessage::System(_) => unreachable!(), // Already handled above
+					universal::RequestMessage::Assistant(_) => unreachable!(), // Already handled above
 				};
 
-				let content = convert_openai_message_to_bedrock_content(msg, tool_results_meta.as_ref());
+				let content = convert_openai_message_to_bedrock_content(&req.messages[i], tool_results_meta.as_ref());
 				if !content.is_empty() {
 					messages.push(types::Message { role, content });
 				}
+				i += 1;
 			}
 		}
 	}
@@ -640,7 +745,7 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 		inference_config: Some(inference_config),
 		tool_config,
 		guardrail_config,
-		additional_model_request_fields: None,
+		additional_model_request_fields,
 		additional_model_response_field_paths: None,
 		request_metadata: None,
 		performance_config: None,
@@ -2335,5 +2440,115 @@ pub mod streaming {
 			StopReason::GuardrailIntervened => "stop_sequence".to_string(), // Map to stop_sequence
 			StopReason::ToolUse => "tool_use".to_string(),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::llm::universal;
+	use serde_json::json;
+	use std::collections::HashMap;
+
+	#[test]
+	fn test_anthropic_beta_extraction() {
+		// Create a Universal request with anthropic beta headers in vendor bag
+		let mut vendor = HashMap::new();
+		vendor.insert("anthropic".to_string(), json!({
+			"headers": {
+				"beta": ["computer-use-2025-01-24", "fine-grained-tool-streaming-2025-05-14"]
+			}
+		}));
+
+		let request = universal::Request {
+			model: "claude-3-sonnet-20240229".to_string(),
+			messages: vec![universal::RequestMessage::User(universal::RequestUserMessage {
+				content: universal::RequestUserMessageContent::Text("test".to_string()),
+				name: None,
+			})],
+			temperature: None,
+			max_completion_tokens: Some(100),
+			max_tokens: None,
+			top_p: None,
+			stop: None,
+			stream: None,
+			tools: None,
+			tool_choice: None,
+			vendor: Some(vendor),
+		};
+
+		let provider = Provider::new("aws".to_string(), "bedrock".to_string());
+		let converse_request = translate_openai_request(&request, &provider, "anthropic.claude-3-sonnet-20240229-v1:0");
+
+		// Verify that additional_model_request_fields contains anthropic_beta
+		assert!(converse_request.additional_model_request_fields.is_some());
+		let additional_fields = converse_request.additional_model_request_fields.unwrap();
+		
+		let expected = json!({
+			"anthropic_beta": ["computer-use-2025-01-24", "fine-grained-tool-streaming-2025-05-14"]
+		});
+		
+		assert_eq!(additional_fields, expected);
+	}
+
+	#[test]
+	fn test_no_beta_headers() {
+		// Create a Universal request without beta headers
+		let request = universal::Request {
+			model: "claude-3-sonnet-20240229".to_string(),
+			messages: vec![universal::RequestMessage::User(universal::RequestUserMessage {
+				content: universal::RequestUserMessageContent::Text("test".to_string()),
+				name: None,
+			})],
+			temperature: None,
+			max_completion_tokens: Some(100),
+			max_tokens: None,
+			top_p: None,
+			stop: None,
+			stream: None,
+			tools: None,
+			tool_choice: None,
+			vendor: None,
+		};
+
+		let provider = Provider::new("aws".to_string(), "bedrock".to_string());
+		let converse_request = translate_openai_request(&request, &provider, "anthropic.claude-3-sonnet-20240229-v1:0");
+
+		// Verify that additional_model_request_fields is None when no beta headers
+		assert!(converse_request.additional_model_request_fields.is_none());
+	}
+
+	#[test]
+	fn test_empty_beta_headers() {
+		// Create a Universal request with empty beta headers array
+		let mut vendor = HashMap::new();
+		vendor.insert("anthropic".to_string(), json!({
+			"headers": {
+				"beta": []
+			}
+		}));
+
+		let request = universal::Request {
+			model: "claude-3-sonnet-20240229".to_string(),
+			messages: vec![universal::RequestMessage::User(universal::RequestUserMessage {
+				content: universal::RequestUserMessageContent::Text("test".to_string()),
+				name: None,
+			})],
+			temperature: None,
+			max_completion_tokens: Some(100),
+			max_tokens: None,
+			top_p: None,
+			stop: None,
+			stream: None,
+			tools: None,
+			tool_choice: None,
+			vendor: Some(vendor),
+		};
+
+		let provider = Provider::new("aws".to_string(), "bedrock".to_string());
+		let converse_request = translate_openai_request(&request, &provider, "anthropic.claude-3-sonnet-20240229-v1:0");
+
+		// Verify that additional_model_request_fields is None when beta headers array is empty
+		assert!(converse_request.additional_model_request_fields.is_none());
 	}
 }

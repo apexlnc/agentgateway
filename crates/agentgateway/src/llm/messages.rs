@@ -843,65 +843,103 @@ pub mod ingress {
         name.chars().all(|c| c.is_alphanumeric() || c == '_')
     }
 
-    /// Validate tool use/result pairing for the current conversation window
-    /// Rule: Any assistant tool_use must be answered by a user tool_result in the subsequent user message
+    /// Validate tool use/result pairing with strict Anthropic/Bedrock compliance
+    /// Rules:
+    /// 1. Every tool_use.id from the last assistant must appear exactly once in the next user message
+    /// 2. The next user message must not contain any tool_result ids from older turns  
+    /// 3. The count of tool_result blocks must equal the number of prior tool_use blocks
+    /// 4. No tool_result blocks in any later user messages
     fn validate_tool_pairing(m: &types::MessagesRequest) -> Result<(), AIError> {
         if m.messages.is_empty() {
             return Ok(());
         }
 
-        // Find the last assistant message with tool_use (if any)
-        let mut last_assistant_tool_uses: Vec<String> = Vec::new();
-        
-        for message in m.messages.iter().rev() {
+        // 1) Collect tool_use ids from the LAST assistant turn
+        let mut last_tool_uses: Vec<String> = Vec::new();
+        let mut last_assistant_idx: Option<usize> = None;
+        for (idx, message) in m.messages.iter().enumerate().rev() {
             match message.role {
                 types::MessageRole::Assistant => {
-                    // Look for tool_use blocks in this assistant message
+                    last_assistant_idx = Some(idx);
                     if let types::MessageContent::Blocks(blocks) = &message.content {
                         for block in blocks {
-                            if let types::RequestContentBlock::ToolUse(tool_use) = block {
-                                last_assistant_tool_uses.push(tool_use.id.clone());
+                            if let types::RequestContentBlock::ToolUse(tu) = block {
+                                last_tool_uses.push(tu.id.clone());
                             }
                         }
                     }
-                    break; // Stop at first assistant message (going backwards)
-                },
-                types::MessageRole::User => {
-                    // If we hit a user message first, no tool_use to check
+                    break; // stop at the last assistant encountered
+                }
+                types::MessageRole::User => break
+            }
+        }
+        if last_tool_uses.is_empty() {
+            return Ok(());
+        }
+
+        // 2) Inspect the IMMEDIATE next user message (if any)
+        let mut next_user_idx: Option<usize> = None;
+        if let Some(a_idx) = last_assistant_idx {
+            for i in (a_idx + 1)..m.messages.len() {
+                if m.messages[i].role == types::MessageRole::User {
+                    next_user_idx = Some(i);
                     break;
+                } else if m.messages[i].role == types::MessageRole::Assistant {
+                    break; // another assistant appeared; no user to pair with
                 }
             }
         }
 
-        // If the last assistant message had tool_use blocks, ensure they have matching tool_results
-        if !last_assistant_tool_uses.is_empty() {
-            let mut found_tool_results: Vec<String> = Vec::new();
+        use std::collections::HashSet;
+        let allowed: HashSet<_> = last_tool_uses.iter().cloned().collect();
 
-            // Look for tool_results in subsequent user messages
-            let mut found_assistant = false;
-            for message in m.messages.iter().rev() {
-                if message.role == types::MessageRole::Assistant {
-                    found_assistant = true;
-                    continue;
-                }
-                
-                if found_assistant && message.role == types::MessageRole::User {
-                    // Check this user message for tool_results
-                    if let types::MessageContent::Blocks(blocks) = &message.content {
-                        for block in blocks {
-                            if let types::RequestContentBlock::ToolResult(tool_result) = block {
-                                found_tool_results.push(tool_result.tool_use_id.clone());
-                            }
-                        }
+        let mut found: Vec<String> = Vec::new();
+        if let Some(u_idx) = next_user_idx {
+            if let types::MessageContent::Blocks(blocks) = &m.messages[u_idx].content {
+                for block in blocks {
+                    if let types::RequestContentBlock::ToolResult(tr) = block {
+                        found.push(tr.tool_use_id.clone());
                     }
-                    break; // Only check the immediate next user message
                 }
             }
+        }
 
-            // Validate that all tool_uses have corresponding tool_results
-            for tool_use_id in &last_assistant_tool_uses {
-                if !found_tool_results.contains(tool_use_id) {
-                    return Err(AIError::UnpairedToolUse(tool_use_id.clone()));
+        // 2a) All required results present
+        for need in &last_tool_uses {
+            if !found.contains(need) {
+                return Err(AIError::UnpairedToolUse(need.clone()));
+            }
+        }
+        // 2b) No extras & no foreign ids
+        if found.len() != allowed.len() {
+            return Err(AIError::InvalidMessageSequence(format!(
+                "Expected exactly {} tool_result block(s) in the next user message, found {}",
+                allowed.len(),
+                found.len()
+            )));
+        }
+        for id in &found {
+            if !allowed.contains(id) {
+                return Err(AIError::InvalidMessageSequence(format!(
+                    "tool_result '{}' does not correspond to a tool_use in the previous assistant turn",
+                    id
+                )));
+            }
+        }
+
+        // 3) Forbid ANY tool_result blocks in later user messages
+        if let Some(u_idx) = next_user_idx {
+            for msg in m.messages.iter().skip(u_idx + 1) {
+                if msg.role == types::MessageRole::User {
+                    if let types::MessageContent::Blocks(blocks) = &msg.content {
+                        if blocks.iter().any(|b| matches!(b, types::RequestContentBlock::ToolResult(_))) {
+                            return Err(AIError::InvalidMessageSequence(
+                                "tool_result blocks may only appear in the immediate next user message".into(),
+                            ));
+                        }
+                    }
+                } else if msg.role == types::MessageRole::Assistant {
+                    break; // once a new assistant appears, stop scanning
                 }
             }
         }
@@ -1113,13 +1151,20 @@ pub mod ingress {
                     process_content_block(block, &mut result, beta_features)?;
                 }
 
-                // Build Universal messages - primary message plus separate tool messages for tool_results
+                // Build Universal messages - preserve conversation flow by NOT splitting tool results
                 let mut messages = Vec::new();
+                
+                // Validate tool_use_ids exist for any tool_results
+                for tool_use_id in result.tool_results.keys() {
+                    if !seen_tool_use_ids.contains(tool_use_id) {
+                        return Err(AIError::UnpairedToolResult(tool_use_id.clone()));
+                    }
+                }
                 
                 // Create primary user/assistant message
                 let primary_msg = match msg.role {
                     types::MessageRole::User => {
-                        // User messages: combine text, ignore tool_calls
+                        // User messages: combine text content - tool_results will be handled by vendor bag
                         let combined_text = if result.text_parts.is_empty() {
                             "[Non-text content]".to_string()
                         } else {
@@ -1164,13 +1209,9 @@ pub mod ingress {
                 };
                 messages.push(primary_msg);
 
-                // Create separate tool messages for each tool_result
+                // Create separate Tool messages for each tool_result
+                // These will be coalesced by the Bedrock adapter to maintain role alternation
                 for (tool_use_id, content) in result.tool_results {
-                    // Validate that we've seen this tool_use_id in a previous assistant message
-                    if !seen_tool_use_ids.contains(&tool_use_id) {
-                        return Err(AIError::UnpairedToolResult(tool_use_id));
-                    }
-                    
                     let tool_msg = universal::RequestMessage::Tool(
                         universal::RequestToolMessage {
                             tool_call_id: tool_use_id,
@@ -2426,6 +2467,7 @@ mod tests {
     mod system_prompt_tests {
         use super::*;
         use crate::llm::{universal, AIError};
+        use http::HeaderMap;
 
         #[test]
         fn test_convert_system_prompt_simple_string() {
