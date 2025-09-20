@@ -531,10 +531,18 @@ impl AIProvider {
 				AIProvider::Vertex(p) => p.process_response(bytes).await?,
 				AIProvider::Anthropic(p) => p.process_response(bytes).await?,
 				AIProvider::Bedrock(p) => {
-					// Use BackendAdapter with direct Bedrock → OpenAI conversion
-					let bedrock_resp: bedrock::types::ConverseResponse =
-						serde_json::from_slice(bytes).map_err(AIError::ResponseParsing)?;
-					p.from_backend(bedrock_resp, req.request_model.as_str())?
+					// Check route type - Messages route returns Messages API format from the gateway
+					if req.route_type == RouteType::Messages {
+						// Response is in Messages API format, convert to universal
+						let messages_resp: anthropic::types::MessagesResponse =
+							serde_json::from_slice(bytes).map_err(AIError::ResponseParsing)?;
+						anthropic::translate_response(messages_resp)
+					} else {
+						// Completions route returns ConverseResponse that needs conversion
+						let bedrock_resp: bedrock::types::ConverseResponse =
+							serde_json::from_slice(bytes).map_err(AIError::ResponseParsing)?;
+						p.from_backend(bedrock_resp, req.request_model.as_str())?
+					}
 				},
 			};
 			Ok(Ok(openai_response))
