@@ -987,14 +987,9 @@ pub mod ingress {
     fn extract_beta_features(headers: &HeaderMap) -> Vec<String> {
         let mut features = Vec::new();
 
-        // Debug: Log all headers to see what we're getting
-        tracing::debug!("All headers: {:?}", headers);
-
         // Get all anthropic-beta header values
         for value in headers.get_all("anthropic-beta") {
-            tracing::debug!("Found anthropic-beta header: {:?}", value);
             if let Ok(value_str) = value.to_str() {
-                tracing::debug!("Parsed anthropic-beta value: {}", value_str);
                 // Split by comma and clean up whitespace
                 for feature in value_str.split(',') {
                     let trimmed = feature.trim();
@@ -1005,7 +1000,6 @@ pub mod ingress {
             }
         }
 
-        tracing::debug!("Extracted beta features: {:?}", features);
         features
     }
 
@@ -1470,7 +1464,6 @@ pub mod ingress {
         m: &types::MessagesRequest,
         headers: &HeaderMap
     ) -> Result<universal::Request, AIError> {
-        tracing::warn!("🚨 MESSAGES_TO_UNIVERSAL: Called with {} headers", headers.len());
         // FAIL-FAST VALIDATION: Validate request before any conversion
         validate_messages_request(m)?;
         
@@ -1552,12 +1545,6 @@ pub mod ingress {
             return_trace: false, // redact provider thinking by default
         });
 
-        // Debug: Log what we extracted for visibility
-        if let Some(ref providers) = provider_data {
-            if let Some(anthropic) = providers.get("anthropic") {
-                tracing::warn!("🔍 MESSAGES_INGRESS: Extracted anthropic data: {:?}", anthropic);
-            }
-        }
 
         Ok(universal::Request {
             messages,
@@ -1602,107 +1589,6 @@ pub mod ingress {
         })
     }
 
-    /// Clean edge decoder: convert Anthropic Messages API request to Universal format
-    /// 
-    /// This function provides a simple, header-free interface for converting Messages API
-    /// requests to the universal format. It focuses on the core conversion logic without
-    /// provider-specific header processing.
-    pub fn decode_messages_to_universal(req: &types::MessagesRequest) -> Result<universal::Request, AIError> {
-        tracing::warn!("🚨 DECODE_MESSAGES_TO_UNIVERSAL: Called (NO HEADERS)");
-        // FAIL-FAST VALIDATION: Validate request before any conversion
-        validate_messages_request(req)?;
-        
-        // Validate system prompt if present
-        if let Some(system) = &req.system {
-            validate_system_prompt(system)?;
-        }
-        
-        // Build messages array using our enhanced conversion logic (with tool_result support)
-        let (messages, _content_provider_data, _tool_results_meta) = build_universal_messages(req, &[])?;
-        
-        // Create provider context to store Anthropic-specific data
-        let mut provider_data = std::collections::HashMap::new();
-        let mut anthropic_data = serde_json::Map::new();
-        anthropic_data.insert("original_max_tokens".to_string(), serde_json::json!(req.max_tokens));
-        if let Some(top_k) = req.top_k {
-            anthropic_data.insert("top_k".to_string(), serde_json::json!(top_k));
-        }
-        if let Some(thinking) = &req.thinking {
-            anthropic_data.insert("thinking".to_string(), serde_json::to_value(thinking).unwrap());
-        }
-        if let Some(metadata) = &req.metadata {
-            anthropic_data.insert("metadata".to_string(), serde_json::to_value(metadata).unwrap());
-        }
-        if let Some(system) = &req.system {
-            anthropic_data.insert("system".to_string(), serde_json::to_value(system).unwrap());
-        }
-        provider_data.insert("anthropic".to_string(), serde_json::Value::Object(anthropic_data));
-        
-        // Convert tools if present
-        let universal_tools = req.tools.as_deref().map(convert_tools);
-        let universal_tool_choice = req.tool_choice.as_ref().map(convert_tool_choice);
-        
-        // Build stop sequences in Universal format
-        let stop = req.stop_sequences.as_ref().map(|stops| {
-            if stops.len() == 1 {
-                async_openai::types::Stop::String(stops[0].clone())
-            } else {
-                async_openai::types::Stop::StringArray(stops.clone())
-            }
-        });
-
-        // Build reasoning control from Anthropic thinking config (if present)
-        let reasoning = req.thinking.as_ref().map(|t| ReasoningControl {
-            enabled: matches!(t.thinking_type, types::ThinkingType::Enabled),
-            effort: None,
-            budget_tokens: t.budget_tokens,
-            return_trace: false,
-        });
-
-        Ok(universal::Request {
-            messages,
-            model: Some(req.model.clone()),
-            stream: req.stream,
-            temperature: req.temperature,
-            top_p: req.top_p,
-            stop,
-            tools: universal_tools,
-            tool_choice: universal_tool_choice,
-            providers: Some(provider_data),
-            route: Some(universal::Route::Messages),
-            reasoning,
-
-            // Use max_tokens field (universal OpenAI field) for token limit
-            #[allow(deprecated)]
-            max_tokens: Some(req.max_tokens),
-            max_completion_tokens: None,
-            
-            // Initialize remaining fields with defaults
-            store: None,
-            reasoning_effort: None,
-            metadata: None,
-            frequency_penalty: None,
-            logit_bias: None,
-            logprobs: None,
-            top_logprobs: None,
-            n: None,
-            modalities: None,
-            prediction: None,
-            audio: None,
-            presence_penalty: None,
-            response_format: None,
-            seed: None,
-            service_tier: None,
-            stream_options: None,
-            parallel_tool_calls: None,
-            user: None,
-            web_search_options: None,
-            #[allow(deprecated)]
-            function_call: None,
-            #[allow(deprecated)]
-            functions: None,
-        })
-    }
 }
 
 pub mod egress {
@@ -1712,7 +1598,7 @@ pub mod egress {
 
     /// Clean edge encoder: convert Universal response to Anthropic Messages API format
     /// 
-    /// This function provides the response encoding counterpart to decode_messages_to_universal(),
+    /// This function provides the response encoding counterpart to to_universal(),
     /// converting universal responses back to Messages API format while preserving provider-specific
     /// metadata and handling route-specific response formatting.
     pub fn encode_universal_to_messages(u: &universal::Response) -> Result<types::MessagesResponse, AIError> {
@@ -1799,7 +1685,7 @@ pub use types::{
     Tool, ToolChoice, MessagesErrorResponse, ApiError
 };
 
-pub use ingress::{to_universal, validate_messages_request, decode_messages_to_universal};
+pub use ingress::{to_universal, validate_messages_request};
 pub use egress::{from_universal_json, encode_universal_to_messages};
 
 /// Fast token estimator for Messages API requests (optional optimization)
@@ -2214,94 +2100,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_decode_messages_to_universal() {
-        // Test the clean edge decoder function
-        let messages_req = types::MessagesRequest {
-            model: "claude-3-5-sonnet-20241022".to_string(),
-            max_tokens: 150,
-            messages: vec![
-                types::InputMessage {
-                    role: types::MessageRole::User,
-                    content: types::MessageContent::String("Hello, Claude!".to_string()),
-                }
-            ],
-            system: Some(types::SystemPrompt::String("You are a helpful assistant.".to_string())),
-            tools: None,
-            tool_choice: None,
-            stream: Some(true),
-            temperature: Some(0.7),
-            top_p: Some(0.9),
-            top_k: Some(50),
-            stop_sequences: Some(vec!["END".to_string()]),
-            metadata: None,
-            thinking: None,
-        };
-        
-        let result = ingress::decode_messages_to_universal(&messages_req);
-        assert!(result.is_ok());
-        
-        let universal_req = result.unwrap();
-        
-        // Verify universal fields are populated correctly
-        #[allow(deprecated)]
-        {
-            assert_eq!(universal_req.max_tokens, Some(150)); // Uses universal max_tokens field
-        }
-        assert_eq!(universal_req.model, Some("claude-3-5-sonnet-20241022".to_string()));
-        assert_eq!(universal_req.stream, Some(true));
-        assert_eq!(universal_req.temperature, Some(0.7));
-        assert_eq!(universal_req.top_p, Some(0.9));
-        
-        // Verify stop sequences are mapped to universal stop field
-        assert!(universal_req.stop.is_some());
-        match &universal_req.stop {
-            Some(async_openai::types::Stop::StringArray(stops)) => {
-                assert_eq!(stops, &vec!["END".to_string()]);
-            },
-            _ => panic!("Expected string array stop sequences"),
-        }
-        
-        // Verify providers context is set and route is marked
-        assert!(universal_req.providers.is_some());
-        assert_eq!(universal_req.route, Some(universal::Route::Messages));
-
-        // Verify Anthropic-specific data is stored in providers bag
-        let providers = universal_req.providers.as_ref().unwrap();
-        let anthropic_data = providers.get("anthropic").expect("Should have anthropic provider data");
-        assert_eq!(anthropic_data["original_max_tokens"], serde_json::json!(150));
-        assert_eq!(anthropic_data["top_k"], serde_json::json!(50));
-        assert!(anthropic_data["system"].is_object());
-        
-        // Verify messages conversion (should include system message + user message)
-        assert_eq!(universal_req.messages.len(), 2);
-        
-        // First should be system message
-        match &universal_req.messages[0] {
-            universal::RequestMessage::System(msg) => {
-                match &msg.content {
-                    universal::RequestSystemMessageContent::Text(text) => {
-                        assert_eq!(text, "You are a helpful assistant.");
-                    },
-                    _ => panic!("Expected text content"),
-                }
-            },
-            _ => panic!("Expected system message"),
-        }
-        
-        // Second should be user message
-        match &universal_req.messages[1] {
-            universal::RequestMessage::User(msg) => {
-                match &msg.content {
-                    universal::RequestUserMessageContent::Text(text) => {
-                        assert_eq!(text, "Hello, Claude!");
-                    },
-                    _ => panic!("Expected text content"),
-                }
-            },
-            _ => panic!("Expected user message"),
-        }
-    }
 
     #[test]
     fn test_encode_universal_to_messages() {

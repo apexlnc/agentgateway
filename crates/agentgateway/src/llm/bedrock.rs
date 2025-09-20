@@ -521,38 +521,18 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 
 
 	// Extract anthropic beta headers from providers bag for additionalModelRequestFields
-	tracing::debug!("Bedrock: Checking providers bag: {:?}", req.providers);
 	let additional_model_request_fields = req.providers
 		.as_ref()
-		.and_then(|providers| {
-			tracing::debug!("Bedrock: Found providers: {:?}", providers);
-			providers.get("anthropic")
-		})
-		.and_then(|anthropic| {
-			tracing::debug!("Bedrock: Found anthropic section: {:?}", anthropic);
-			anthropic.get("headers")
-		})
-		.and_then(|headers| {
-			tracing::debug!("Bedrock: Found headers section: {:?}", headers);
-			headers.get("beta")
-		})
-		.and_then(|beta| {
-			tracing::debug!("Bedrock: Found beta value: {:?}", beta);
-			beta.as_array()
-		})
-		.filter(|beta_array| {
-			tracing::debug!("Bedrock: Beta array length: {}", beta_array.len());
-			!beta_array.is_empty()
-		})
+		.and_then(|providers| providers.get("anthropic"))
+		.and_then(|anthropic| anthropic.get("headers"))
+		.and_then(|headers| headers.get("beta"))
+		.and_then(|beta| beta.as_array())
+		.filter(|beta_array| !beta_array.is_empty())
 		.map(|beta_array| {
-			let result = serde_json::json!({
+			serde_json::json!({
 				"anthropic_beta": beta_array
-			});
-			tracing::debug!("Bedrock: Created additionalModelRequestFields: {:?}", result);
-			result
+			})
 		});
-
-	tracing::debug!("Bedrock: Final additionalModelRequestFields: {:?}", additional_model_request_fields);
 
 	// Extract system messages from Universal format
 	let mut system_text = Vec::new();
