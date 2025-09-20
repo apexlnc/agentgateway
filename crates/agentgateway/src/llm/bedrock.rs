@@ -693,38 +693,56 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 					universal::RequestMessage::Developer(_) => types::Role::User, // Map developer to user
 					universal::RequestMessage::Tool(_) => {
 						// Tool messages at root level need special handling
-						// They might be:
-						// 1. Part of a sequence that should have been coalesced but wasn't (e.g., intervening User message)
-						// 2. Truly orphaned (no matching assistant tool_calls)
+						// CRITICAL: Tool results can ONLY be created if they immediately follow
+						// the Assistant message with matching tool_use blocks
 
-						// Collect ALL contiguous Tool messages and determine their fate
+						// Bedrock's strict requirement: tool_result blocks must be in the
+						// IMMEDIATELY following message after tool_use blocks
+
+						// Check if the immediately preceding message is an Assistant with tool_calls
+						let can_create_tool_results = if messages.is_empty() {
+							false
+						} else {
+							// Get the last message we've added to Bedrock messages
+							let last_bedrock_msg = messages.last().unwrap();
+							// Check if it's an Assistant with tool_use blocks
+							if last_bedrock_msg.role == types::Role::Assistant {
+								// Check if it has tool_use blocks
+								last_bedrock_msg.content.iter().any(|block| {
+									matches!(block, ContentBlock::ToolUse(_))
+								})
+							} else {
+								false
+							}
+						};
+
+						// Collect ALL contiguous Tool messages
 						use std::collections::BTreeMap;
 						let mut tool_results_by_id: BTreeMap<String, types::ToolResultBlock> = BTreeMap::new();
 						let mut orphaned_tools = Vec::new();
 
+						// If we can create tool results, get the tool_use_ids from the last assistant
+						let valid_tool_ids: std::collections::HashSet<String> = if can_create_tool_results {
+							// Extract tool_use_ids from the last assistant's content
+							messages.last()
+								.map(|msg| {
+									msg.content.iter()
+										.filter_map(|block| {
+											if let ContentBlock::ToolUse(tu) = block {
+												Some(tu.tool_use_id.clone())
+											} else {
+												None
+											}
+										})
+										.collect()
+								})
+								.unwrap_or_default()
+						} else {
+							std::collections::HashSet::new()
+						};
+
 						while i < req.messages.len() {
 							if let universal::RequestMessage::Tool(tool_msg) = &req.messages[i] {
-								// Check if this tool matches any previous assistant's tool_calls
-								let mut found_match = false;
-								for j in (0..i).rev() {
-									if let universal::RequestMessage::Assistant(assistant_msg) = &req.messages[j] {
-										if let Some(tool_calls) = &assistant_msg.tool_calls {
-											let tool_call_ids: std::collections::HashSet<String> = tool_calls
-												.iter()
-												.map(|call| call.id.clone())
-												.collect();
-											if tool_call_ids.contains(&tool_msg.tool_call_id) {
-												found_match = true;
-												debug!("Bedrock: Tool message '{}' at index {} matches assistant at index {}",
-													tool_msg.tool_call_id, i, j);
-												break;
-											}
-										}
-										// Stop at first assistant when looking backwards
-										break;
-									}
-								}
-
 								let chunk_text = match &tool_msg.content {
 									universal::RequestToolMessageContent::Text(t) => t.clone(),
 									universal::RequestToolMessageContent::Array(parts) => parts.iter()
@@ -735,8 +753,8 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 										.join("\n"),
 								};
 
-								if found_match {
-									// This tool has a matching assistant - create a proper ToolResult
+								// Only create tool_result if we can AND this tool_id matches
+								if can_create_tool_results && valid_tool_ids.contains(&tool_msg.tool_call_id) {
 									let id = tool_msg.tool_call_id.clone();
 									let status = tool_results_meta
 										.as_ref()
@@ -762,9 +780,11 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 									};
 
 									entry.content.push(ContentBlock::Text(chunk_text));
+									debug!("Bedrock: Creating tool_result for tool_use_id '{}' at index {}", id, i);
 								} else {
-									// Truly orphaned - degrade to text
-									debug!("Bedrock: Tool message '{}' at index {} is orphaned", tool_msg.tool_call_id, i);
+									// Cannot create tool_result - degrade to text
+									debug!("Bedrock: Tool message '{}' at index {} degraded to text (can_create={}, valid_ids={})",
+										tool_msg.tool_call_id, i, can_create_tool_results, valid_tool_ids.len());
 									orphaned_tools.push(format!("[Tool: {}]\n{}", tool_msg.tool_call_id, chunk_text));
 								}
 
