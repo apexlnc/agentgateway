@@ -916,8 +916,8 @@ async fn make_backend_call(
 				let messages_request: messages::MessagesRequest = serde_json::from_slice(&body_bytes)
 					.map_err(|e| ProxyError::ProcessingString(format!("Invalid JSON in request body: {}", e)))?;
 
-				// Use edge decoder to convert Messages API to universal format
-				let universal_request = messages::ingress::decode_messages_to_universal(&messages_request)
+				// Use full ingress processor to convert Messages API to universal format WITH headers
+				let universal_request = messages::ingress::to_universal(&messages_request, req.headers())
 					.map_err(|e| ProxyError::ProcessingString(format!("Request validation failed: {}", e)))?;
 
 				// Put universal request back into HTTP body to reuse shared policy pipeline
