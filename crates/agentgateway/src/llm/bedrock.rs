@@ -521,18 +521,38 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 
 
 	// Extract anthropic beta headers from providers bag for additionalModelRequestFields
+	tracing::debug!("Bedrock: Checking providers bag: {:?}", req.providers);
 	let additional_model_request_fields = req.providers
 		.as_ref()
-		.and_then(|providers| providers.get("anthropic"))
-		.and_then(|anthropic| anthropic.get("headers"))
-		.and_then(|headers| headers.get("beta"))
-		.and_then(|beta| beta.as_array())
-		.filter(|beta_array| !beta_array.is_empty())
+		.and_then(|providers| {
+			tracing::debug!("Bedrock: Found providers: {:?}", providers);
+			providers.get("anthropic")
+		})
+		.and_then(|anthropic| {
+			tracing::debug!("Bedrock: Found anthropic section: {:?}", anthropic);
+			anthropic.get("headers")
+		})
+		.and_then(|headers| {
+			tracing::debug!("Bedrock: Found headers section: {:?}", headers);
+			headers.get("beta")
+		})
+		.and_then(|beta| {
+			tracing::debug!("Bedrock: Found beta value: {:?}", beta);
+			beta.as_array()
+		})
+		.filter(|beta_array| {
+			tracing::debug!("Bedrock: Beta array length: {}", beta_array.len());
+			!beta_array.is_empty()
+		})
 		.map(|beta_array| {
-			serde_json::json!({
+			let result = serde_json::json!({
 				"anthropic_beta": beta_array
-			})
+			});
+			tracing::debug!("Bedrock: Created additionalModelRequestFields: {:?}", result);
+			result
 		});
+
+	tracing::debug!("Bedrock: Final additionalModelRequestFields: {:?}", additional_model_request_fields);
 
 	// Extract system messages from Universal format
 	let mut system_text = Vec::new();
@@ -2660,7 +2680,7 @@ mod tests {
 		}));
 
 		let request = universal::Request {
-			model: "claude-3-sonnet-20240229".to_string(),
+			model: Some("claude-3-sonnet-20240229".to_string()),
 			messages: vec![universal::RequestMessage::User(universal::RequestUserMessage {
 				content: universal::RequestUserMessageContent::Text("test".to_string()),
 				name: None,
@@ -2673,10 +2693,17 @@ mod tests {
 			stream: None,
 			tools: None,
 			tool_choice: None,
-			vendor: Some(vendor),
+			providers: Some(vendor),
+			route: Some(universal::Route::Messages),
+			reasoning: None,
 		};
 
-		let provider = Provider::new("aws".to_string(), "bedrock".to_string());
+		let provider = Provider {
+			model: None,
+			region: "us-east-1".into(),
+			guardrail_identifier: None,
+			guardrail_version: None,
+		};
 		let converse_request = translate_openai_request(&request, &provider, "anthropic.claude-3-sonnet-20240229-v1:0");
 
 		// Verify that additional_model_request_fields contains anthropic_beta
@@ -2694,7 +2721,7 @@ mod tests {
 	fn test_no_beta_headers() {
 		// Create a Universal request without beta headers
 		let request = universal::Request {
-			model: "claude-3-sonnet-20240229".to_string(),
+			model: Some("claude-3-sonnet-20240229".to_string()),
 			messages: vec![universal::RequestMessage::User(universal::RequestUserMessage {
 				content: universal::RequestUserMessageContent::Text("test".to_string()),
 				name: None,
@@ -2710,7 +2737,12 @@ mod tests {
 			vendor: None,
 		};
 
-		let provider = Provider::new("aws".to_string(), "bedrock".to_string());
+		let provider = Provider {
+			model: None,
+			region: "us-east-1".into(),
+			guardrail_identifier: None,
+			guardrail_version: None,
+		};
 		let converse_request = translate_openai_request(&request, &provider, "anthropic.claude-3-sonnet-20240229-v1:0");
 
 		// Verify that additional_model_request_fields is None when no beta headers
@@ -2728,7 +2760,7 @@ mod tests {
 		}));
 
 		let request = universal::Request {
-			model: "claude-3-sonnet-20240229".to_string(),
+			model: Some("claude-3-sonnet-20240229".to_string()),
 			messages: vec![universal::RequestMessage::User(universal::RequestUserMessage {
 				content: universal::RequestUserMessageContent::Text("test".to_string()),
 				name: None,
@@ -2741,10 +2773,17 @@ mod tests {
 			stream: None,
 			tools: None,
 			tool_choice: None,
-			vendor: Some(vendor),
+			providers: Some(vendor),
+			route: Some(universal::Route::Messages),
+			reasoning: None,
 		};
 
-		let provider = Provider::new("aws".to_string(), "bedrock".to_string());
+		let provider = Provider {
+			model: None,
+			region: "us-east-1".into(),
+			guardrail_identifier: None,
+			guardrail_version: None,
+		};
 		let converse_request = translate_openai_request(&request, &provider, "anthropic.claude-3-sonnet-20240229-v1:0");
 
 		// Verify that additional_model_request_fields is None when beta headers array is empty

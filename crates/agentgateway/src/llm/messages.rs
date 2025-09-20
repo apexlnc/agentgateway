@@ -986,10 +986,15 @@ pub mod ingress {
     /// 3. Mixed format combinations
     fn extract_beta_features(headers: &HeaderMap) -> Vec<String> {
         let mut features = Vec::new();
-        
+
+        // Debug: Log all headers to see what we're getting
+        tracing::debug!("All headers: {:?}", headers);
+
         // Get all anthropic-beta header values
         for value in headers.get_all("anthropic-beta") {
+            tracing::debug!("Found anthropic-beta header: {:?}", value);
             if let Ok(value_str) = value.to_str() {
+                tracing::debug!("Parsed anthropic-beta value: {}", value_str);
                 // Split by comma and clean up whitespace
                 for feature in value_str.split(',') {
                     let trimmed = feature.trim();
@@ -999,7 +1004,8 @@ pub mod ingress {
                 }
             }
         }
-        
+
+        tracing::debug!("Extracted beta features: {:?}", features);
         features
     }
 
