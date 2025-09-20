@@ -1467,9 +1467,10 @@ pub mod ingress {
     }
 
     pub fn to_universal(
-        m: &types::MessagesRequest, 
+        m: &types::MessagesRequest,
         headers: &HeaderMap
     ) -> Result<universal::Request, AIError> {
+        tracing::warn!("🚨 MESSAGES_TO_UNIVERSAL: Called with {} headers", headers.len());
         // FAIL-FAST VALIDATION: Validate request before any conversion
         validate_messages_request(m)?;
         
@@ -1551,6 +1552,13 @@ pub mod ingress {
             return_trace: false, // redact provider thinking by default
         });
 
+        // Debug: Log what we extracted for visibility
+        if let Some(ref providers) = provider_data {
+            if let Some(anthropic) = providers.get("anthropic") {
+                tracing::warn!("🔍 MESSAGES_INGRESS: Extracted anthropic data: {:?}", anthropic);
+            }
+        }
+
         Ok(universal::Request {
             messages,
             model: Some(m.model.clone()),
@@ -1600,6 +1608,7 @@ pub mod ingress {
     /// requests to the universal format. It focuses on the core conversion logic without
     /// provider-specific header processing.
     pub fn decode_messages_to_universal(req: &types::MessagesRequest) -> Result<universal::Request, AIError> {
+        tracing::warn!("🚨 DECODE_MESSAGES_TO_UNIVERSAL: Called (NO HEADERS)");
         // FAIL-FAST VALIDATION: Validate request before any conversion
         validate_messages_request(req)?;
         
