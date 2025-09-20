@@ -3,7 +3,6 @@ use agent_core::strng;
 // Remove unused import - using universal::FinishReason instead
 use bytes::Bytes;
 use chrono;
-use itertools::Itertools;
 use rand::Rng;
 use tracing::{trace, debug};
 
@@ -506,6 +505,8 @@ fn translate_stop_reason(resp: &StopReason) -> universal::FinishReason {
 
 /// Convert OpenAI request directly to Bedrock ConverseRequest format
 pub(super) fn translate_openai_request(req: &universal::Request, provider: &Provider, model: &str) -> ConverseRequest {
+	debug!("Bedrock: Starting translation for {} messages", req.messages.len());
+
 	// Extract tool_results_meta from vendor bag for proper ToolResult.status handling
 	let tool_results_meta = req.vendor
 		.as_ref()
@@ -643,13 +644,26 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 						}
 					}
 
-					// Materialize aggregated results
-					let tool_results: Vec<ContentBlock> = tool_results_by_id
-						.into_values()
-						.map(ContentBlock::ToolResult)
-						.collect();
+					// Materialize aggregated results - but we MUST have results for each tool_use!
+					let mut tool_results: Vec<ContentBlock> = Vec::new();
 
-					debug!("Bedrock: Collected {} unique tool results matching assistant's tool_calls", tool_results.len());
+					// Create tool_results for ALL tool_calls, even if we didn't find matching Tool messages
+					for tool_call_id in &tool_call_ids {
+						if let Some(result) = tool_results_by_id.remove(tool_call_id) {
+							// We found a matching tool result
+							tool_results.push(ContentBlock::ToolResult(result));
+						} else {
+							// No matching tool result found - create a placeholder
+							debug!("Bedrock: No tool_result found for tool_use_id '{}', creating placeholder", tool_call_id);
+							tool_results.push(ContentBlock::ToolResult(types::ToolResultBlock {
+								tool_use_id: tool_call_id.clone(),
+								content: vec![ContentBlock::Text("Tool execution pending or unavailable".to_string())],
+								status: Some(types::ToolResultStatus::Error),
+							}));
+						}
+					}
+
+					debug!("Bedrock: Created {} tool_results for {} tool_calls", tool_results.len(), tool_call_ids.len());
 
 					// Step 2: Check for an optional trailing User message
 					let mut user_content = Vec::new();
@@ -664,22 +678,13 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 					let mut combined_content = tool_results;
 					combined_content.extend(user_content);
 
-					// CRITICAL: If Assistant has tool_use but we found no tool_results,
-					// we still need a User message to satisfy Bedrock's sequencing requirements
-					if combined_content.is_empty() && !tool_call_ids.is_empty() {
-						debug!("Bedrock: Assistant has {} tool_calls but no tool_results found - creating placeholder User message", tool_call_ids.len());
-						// Create a User message with a text explanation
-						combined_content.push(ContentBlock::Text(
-							format!("Tool results not available for tool calls: {}", tool_call_ids.iter().join(", "))
-						));
-					}
+					// ALWAYS create a User message after Assistant with tool_use
+					// Bedrock REQUIRES this for proper sequencing
+					messages.push(types::Message {
+						role: types::Role::User,
+						content: combined_content,
+					});
 
-					if !combined_content.is_empty() {
-						messages.push(types::Message {
-							role: types::Role::User,
-							content: combined_content,
-						});
-					}
 					continue; // We've already advanced i appropriately
 				}
 
@@ -903,6 +908,25 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 			}),
 		}
 	});
+
+	debug!("Bedrock: Translation complete. Output: {} messages", messages.len());
+	for (idx, msg) in messages.iter().enumerate() {
+		debug!("  [{}] {:?} with {} content blocks", idx, msg.role, msg.content.len());
+		for (cidx, block) in msg.content.iter().enumerate() {
+			match block {
+				ContentBlock::ToolUse(tu) => {
+					debug!("    [{}] ToolUse: {}", cidx, tu.tool_use_id);
+				},
+				ContentBlock::ToolResult(tr) => {
+					debug!("    [{}] ToolResult: {}", cidx, tr.tool_use_id);
+				},
+				ContentBlock::Text(t) => {
+					debug!("    [{}] Text: {} chars", cidx, t.len());
+				},
+				_ => {}
+			}
+		}
+	}
 
 	ConverseRequest {
 		model_id: model.to_string(),
