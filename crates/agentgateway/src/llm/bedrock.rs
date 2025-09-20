@@ -507,10 +507,10 @@ fn translate_stop_reason(resp: &StopReason) -> universal::FinishReason {
 pub(super) fn translate_openai_request(req: &universal::Request, provider: &Provider, model: &str) -> ConverseRequest {
 	debug!("Bedrock: Starting translation for {} messages", req.messages.len());
 
-	// Extract tool_results_meta from vendor bag for proper ToolResult.status handling
-	let tool_results_meta = req.vendor
+	// Extract tool_results_meta from providers bag for proper ToolResult.status handling
+	let tool_results_meta = req.providers
 		.as_ref()
-		.and_then(|vendor| vendor.get("anthropic"))
+		.and_then(|providers| providers.get("anthropic"))
 		.and_then(|anthropic| anthropic.get("tool_results_meta"))
 		.and_then(|meta| meta.as_object())
 		.map(|obj| {
@@ -520,10 +520,10 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 		});
 
 
-	// Extract anthropic beta headers from vendor bag for additionalModelRequestFields
-	let additional_model_request_fields = req.vendor
+	// Extract anthropic beta headers from providers bag for additionalModelRequestFields
+	let additional_model_request_fields = req.providers
 		.as_ref()
-		.and_then(|vendor| vendor.get("anthropic"))
+		.and_then(|providers| providers.get("anthropic"))
 		.and_then(|anthropic| anthropic.get("headers"))
 		.and_then(|headers| headers.get("beta"))
 		.and_then(|beta| beta.as_array())

@@ -676,6 +676,7 @@ pub mod ingress {
     //! Messages -> Universal conversion
     use super::*;
     use crate::llm::{universal, AIError};
+    use crate::llm::universal::ReasoningControl;
     use http::HeaderMap;
     use std::collections::{HashMap, HashSet};
     use serde_json::{json, Map, Value};
@@ -947,7 +948,7 @@ pub mod ingress {
         Ok(())
     }
 
-    /// Extract Anthropic-specific headers for vendor storage
+    /// Extract Anthropic-specific headers for provider storage
     pub fn extract_anthropic_headers(headers: &HeaderMap) -> Option<Value> {
         let mut anthropic_headers = Map::new();
         
@@ -1002,17 +1003,17 @@ pub mod ingress {
         features
     }
 
-    /// Build vendor data structure for Universal format
-    /// 
-    /// Creates the vendor field structure for provider-specific metadata.
-    /// Only populates when there's actual vendor data to include.
-    pub fn build_vendor_data(headers: &HeaderMap, provider: &str) -> Option<HashMap<String, Value>> {
-        let mut vendor_data = HashMap::new();
+    /// Build provider data structure for Universal format
+    ///
+    /// Creates the `providers` field structure for provider-specific metadata.
+    /// Only populates when there's actual provider data to include.
+    pub fn build_provider_data(headers: &HeaderMap, provider: &str) -> Option<HashMap<String, Value>> {
+        let mut provider_data = HashMap::new();
         
         match provider {
             "anthropic" => {
                 if let Some(anthropic_data) = extract_anthropic_headers(headers) {
-                    vendor_data.insert("anthropic".to_string(), anthropic_data.get("anthropic").unwrap().clone());
+                    provider_data.insert("anthropic".to_string(), anthropic_data.get("anthropic").unwrap().clone());
                 }
             },
             _ => {
@@ -1021,10 +1022,10 @@ pub mod ingress {
             }
         }
         
-        if vendor_data.is_empty() {
+        if provider_data.is_empty() {
             None
         } else {
-            Some(vendor_data)
+            Some(provider_data)
         }
     }
 
@@ -1110,9 +1111,13 @@ pub mod ingress {
         Ok(())
     }
 
-    /// Convert Messages API input message to Universal format and return vendor data
+    /// Convert Messages API input message to Universal format and return provider-preserved data
     /// Returns multiple messages - primary user/assistant message plus separate tool messages for tool_results
-    fn convert_input_message_with_vendor_data(msg: &types::InputMessage, beta_features: &[String], seen_tool_use_ids: &std::collections::HashSet<String>) -> Result<(Vec<universal::RequestMessage>, VendorData, HashMap<String, bool>), AIError> {
+    fn convert_input_message_with_provider_data(
+        msg: &types::InputMessage,
+        beta_features: &[String],
+        seen_tool_use_ids: &std::collections::HashSet<String>
+    ) -> Result<(Vec<universal::RequestMessage>, ProviderData, HashMap<String, bool>), AIError> {
         match &msg.content {
             types::MessageContent::String(text) => {
                 let universal_msg = match msg.role {
@@ -1134,7 +1139,7 @@ pub mod ingress {
                         }
                     ),
                 };
-                Ok((vec![universal_msg], VendorData::default(), HashMap::new()))
+                Ok((vec![universal_msg], ProviderData::default(), HashMap::new()))
             },
             types::MessageContent::Blocks(blocks) => {
                 // Process content blocks into unified structure
@@ -1143,7 +1148,7 @@ pub mod ingress {
                     tool_calls: Vec::new(),
                     tool_results: HashMap::new(),
                     tool_results_meta: HashMap::new(),
-                    vendor_data: VendorData::default(),
+                    provider_data: ProviderData::default(),
                 };
 
                 // Process each content block
@@ -1164,7 +1169,7 @@ pub mod ingress {
                 // Create primary user/assistant message
                 let primary_msg = match msg.role {
                     types::MessageRole::User => {
-                        // User messages: combine text content - tool_results will be handled by vendor bag
+                        // User messages: combine text content - tool_results will be handled by providers bag
                         let combined_text = if result.text_parts.is_empty() {
                             "[Non-text content]".to_string()
                         } else {
@@ -1221,7 +1226,7 @@ pub mod ingress {
                     messages.push(tool_msg);
                 }
 
-                Ok((messages, result.vendor_data, result.tool_results_meta))
+                Ok((messages, result.provider_data, result.tool_results_meta))
             }
         }
     }
@@ -1235,15 +1240,15 @@ pub mod ingress {
         tool_calls: Vec<universal::MessageToolCall>,
         /// Tool results mapping (tool_use_id -> content) - handled separately
         tool_results: HashMap<String, String>,
-        /// Tool results metadata (tool_use_id -> is_error) for vendor bag preservation
+        /// Tool results metadata (tool_use_id -> is_error) for providers bag preservation
         tool_results_meta: HashMap<String, bool>,
-        /// Vendor-specific data to preserve for provider egress
-        vendor_data: VendorData,
+        /// Provider-specific data to preserve for egress
+        provider_data: ProviderData,
     }
 
-    /// Vendor-specific data preservation for provider egress
+    /// Provider-specific data preservation for egress
     #[derive(Debug, Default)]
-    pub(crate) struct VendorData {
+    pub(crate) struct ProviderData {
         /// Original Anthropic content blocks for lossless reconstruction
         anthropic_content_blocks: Vec<types::RequestContentBlock>,
         /// Thinking blocks for providers that support them
@@ -1258,7 +1263,7 @@ pub mod ingress {
     /// - Text blocks: accumulate for concatenation
     /// - ToolUse blocks: convert to tool_calls array
     /// - ToolResult blocks: store for separate Tool messages (current limitation: not fully implemented)
-    /// - Image/Document blocks: stash in vendor data + add placeholder text
+    /// - Image/Document blocks: stash in provider data + add placeholder text
     /// - Thinking blocks: EXPERIMENTAL - only allowed with appropriate anthropic-beta header
     /// - SearchResult blocks: EXPERIMENTAL - only allowed with appropriate anthropic-beta header
     fn process_content_block(
@@ -1318,7 +1323,7 @@ pub mod ingress {
                 // Store for separate Tool message creation
                 result.tool_results.insert(tool_result.tool_use_id.clone(), final_content);
                 
-                // Preserve is_error in vendor bag for provider-specific handling
+                // Preserve is_error in providers bag for provider-specific handling
                 if let Some(is_error) = tool_result.is_error {
                     result.tool_results_meta.insert(tool_result.tool_use_id.clone(), is_error);
                 }
@@ -1326,47 +1331,41 @@ pub mod ingress {
                 // No longer add placeholder text - tool_results become separate messages
             },
 
-            // Thinking blocks: EXPERIMENTAL - gate behind beta header
+            // Thinking blocks: preserve and pass through; provider will reject if header is required
             types::RequestContentBlock::Thinking(thinking) => {
-                // Check if thinking blocks are enabled via anthropic-beta header
-                if !beta_features.iter().any(|f| f.contains("thinking") || f.contains("experimental")) {
-                    return Err(AIError::UnsupportedContent);
+                if !beta_features.iter().any(|f| f.contains("thinking")) {
+                    tracing::warn!("Thinking block present but no thinking-related anthropic-beta header found");
                 }
-                
-                result.vendor_data.thinking_blocks.push((**thinking).clone());
+                result.provider_data.thinking_blocks.push((**thinking).clone());
                 // Add thinking content to text for providers that don't support thinking
                 result.text_parts.push(format!("[THINKING] {}", thinking.thinking));
             },
 
             // Image blocks: standard feature, always allowed
             types::RequestContentBlock::Image(_) => {
-                // Store in vendor data for lossless reconstruction
-                result.vendor_data.anthropic_content_blocks.push(block.clone());
+                // Store in provider data for lossless reconstruction
+                result.provider_data.anthropic_content_blocks.push(block.clone());
                 // Add descriptive fallback for text-only providers
                 result.text_parts.push("[IMAGE_ATTACHMENT]".to_string());
             },
 
-            // Document blocks: EXPERIMENTAL - gate behind beta header
+            // Document blocks: preserve and pass through; provider will reject if header is required
             types::RequestContentBlock::Document(doc) => {
-                // Check if document blocks are enabled via anthropic-beta header
-                if !beta_features.iter().any(|f| f.contains("document") || f.contains("experimental")) {
-                    return Err(AIError::UnsupportedContent);
+                if !beta_features.iter().any(|f| f.contains("document")) {
+                    tracing::warn!("Document block present but no document-related anthropic-beta header found");
                 }
-
-                // Store in vendor data for lossless reconstruction
-                result.vendor_data.anthropic_content_blocks.push(block.clone());
+                // Store in provider data for lossless reconstruction
+                result.provider_data.anthropic_content_blocks.push(block.clone());
                 // Add descriptive fallback for text-only providers
                 result.text_parts.push(format!("[DOCUMENT: {}]", doc.title.as_deref().unwrap_or("Untitled")));
             },
 
-            // Search result blocks: EXPERIMENTAL - gate behind beta header
+            // Search result blocks: preserve and pass through; provider will reject if header is required
             types::RequestContentBlock::SearchResult(search) => {
-                // Check if search result blocks are enabled via anthropic-beta header
-                if !beta_features.iter().any(|f| f.contains("search") || f.contains("experimental")) {
-                    return Err(AIError::UnsupportedContent);
+                if !beta_features.iter().any(|f| f.contains("search")) {
+                    tracing::warn!("Search result block present but no search-related anthropic-beta header found");
                 }
-
-                result.vendor_data.search_results.push((**search).clone());
+                result.provider_data.search_results.push((**search).clone());
                 
                 // Extract and add searchable content to main text
                 let search_text = format!(
@@ -1416,13 +1415,13 @@ pub mod ingress {
         }
     }
 
-    /// Build Universal messages array with system message first and collect vendor data
+    /// Build Universal messages array with system message first and collect provider data
     pub(crate) fn build_universal_messages(
         messages_req: &types::MessagesRequest,
         beta_features: &[String],
-    ) -> Result<(Vec<universal::RequestMessage>, VendorData, HashMap<String, bool>), AIError> {
+    ) -> Result<(Vec<universal::RequestMessage>, ProviderData, HashMap<String, bool>), AIError> {
         let mut universal_messages = Vec::new();
-        let mut collected_vendor_data = VendorData::default();
+        let mut collected_provider_data = ProviderData::default();
         let mut collected_tool_results_meta = HashMap::new();
         let mut seen_tool_use_ids = std::collections::HashSet::new();
         
@@ -1433,7 +1432,7 @@ pub mod ingress {
             }
         }
         
-        // 2. Add conversation messages and collect vendor data
+        // 2. Add conversation messages and collect provider data
         for msg in &messages_req.messages {
             // First pass: collect tool_use_ids from assistant messages to validate tool_results
             if let types::MessageRole::Assistant = msg.role {
@@ -1446,19 +1445,19 @@ pub mod ingress {
                 }
             }
             
-            let (msg_universal_messages, msg_vendor_data, msg_tool_results_meta) = convert_input_message_with_vendor_data(msg, beta_features, &seen_tool_use_ids)?;
+            let (msg_universal_messages, msg_provider_data, msg_tool_results_meta) = convert_input_message_with_provider_data(msg, beta_features, &seen_tool_use_ids)?;
             universal_messages.extend(msg_universal_messages);
             
-            // Merge vendor data from this message
-            collected_vendor_data.anthropic_content_blocks.extend(msg_vendor_data.anthropic_content_blocks);
-            collected_vendor_data.thinking_blocks.extend(msg_vendor_data.thinking_blocks);
-            collected_vendor_data.search_results.extend(msg_vendor_data.search_results);
+            // Merge provider-preserved data from this message
+            collected_provider_data.anthropic_content_blocks.extend(msg_provider_data.anthropic_content_blocks);
+            collected_provider_data.thinking_blocks.extend(msg_provider_data.thinking_blocks);
+            collected_provider_data.search_results.extend(msg_provider_data.search_results);
             
             // Merge tool results metadata
             collected_tool_results_meta.extend(msg_tool_results_meta);
         }
         
-        Ok((universal_messages, collected_vendor_data, collected_tool_results_meta))
+        Ok((universal_messages, collected_provider_data, collected_tool_results_meta))
     }
 
     pub fn to_universal(
@@ -1473,21 +1472,21 @@ pub mod ingress {
             validate_system_prompt(system)?;
         }
         
-        // Extract vendor-specific headers for Anthropic provider
-        let mut vendor_data = build_vendor_data(headers, "anthropic");
+        // Extract provider-specific headers for Anthropic
+        let mut provider_data = build_provider_data(headers, "anthropic");
         
         // Extract beta features for experimental content gating
         let beta_features = extract_beta_features(headers);
         
-        // Build messages array and collect vendor data from content blocks
-        let (messages, content_vendor_data, tool_results_meta) = build_universal_messages(m, &beta_features)?;
+        // Build messages array and collect provider data from content blocks
+        let (messages, content_provider_data, tool_results_meta) = build_universal_messages(m, &beta_features)?;
         
-        // Merge content vendor data and Anthropic-specific fields into vendor bag
-        let vendor_map = vendor_data.get_or_insert_with(HashMap::new);
-        let anthropic_data = vendor_map.entry("anthropic".to_string())
+        // Merge content provider data and Anthropic-specific fields
+        let provider_map = provider_data.get_or_insert_with(HashMap::new);
+        let anthropic_data = provider_map.entry("anthropic".to_string())
             .or_insert_with(|| serde_json::json!({}));
         
-        // Store Anthropic-specific request fields in vendor bag
+        // Store Anthropic-specific request fields in providers bag
         anthropic_data["original_max_tokens"] = serde_json::json!(m.max_tokens);
         if let Some(top_k) = m.top_k {
             anthropic_data["top_k"] = serde_json::json!(top_k);
@@ -1502,19 +1501,19 @@ pub mod ingress {
             anthropic_data["system"] = serde_json::to_value(system).unwrap_or_else(|_| serde_json::json!({}));
         }
         
-        // Merge content vendor data into vendor bag
-        if !content_vendor_data.anthropic_content_blocks.is_empty() {
-            anthropic_data["content_blocks"] = serde_json::to_value(&content_vendor_data.anthropic_content_blocks)
+        // Merge content provider data into the bag
+        if !content_provider_data.anthropic_content_blocks.is_empty() {
+            anthropic_data["content_blocks"] = serde_json::to_value(&content_provider_data.anthropic_content_blocks)
                 .unwrap_or_else(|_| serde_json::json!([]));
         }
         
-        if !content_vendor_data.thinking_blocks.is_empty() {
-            anthropic_data["thinking_blocks"] = serde_json::to_value(&content_vendor_data.thinking_blocks)
+        if !content_provider_data.thinking_blocks.is_empty() {
+            anthropic_data["thinking_blocks"] = serde_json::to_value(&content_provider_data.thinking_blocks)
                 .unwrap_or_else(|_| serde_json::json!([]));
         }
         
-        if !content_vendor_data.search_results.is_empty() {
-            anthropic_data["search_results"] = serde_json::to_value(&content_vendor_data.search_results)
+        if !content_provider_data.search_results.is_empty() {
+            anthropic_data["search_results"] = serde_json::to_value(&content_provider_data.search_results)
                 .unwrap_or_else(|_| serde_json::json!([]));
         }
         
@@ -1537,7 +1536,15 @@ pub mod ingress {
                 async_openai::types::Stop::StringArray(stops.clone())
             }
         });
-        
+
+        // Build reasoning control from Anthropic thinking config (if present)
+        let reasoning = m.thinking.as_ref().map(|t| ReasoningControl {
+            enabled: matches!(t.thinking_type, types::ThinkingType::Enabled),
+            effort: None,
+            budget_tokens: t.budget_tokens,
+            return_trace: false, // redact provider thinking by default
+        });
+
         Ok(universal::Request {
             messages,
             model: Some(m.model.clone()),
@@ -1549,8 +1556,10 @@ pub mod ingress {
             stop,
             tools: m.tools.as_deref().map(convert_tools),
             tool_choice: m.tool_choice.as_ref().map(convert_tool_choice),
-            vendor: vendor_data,
-            
+            providers: provider_data,
+            route: Some(universal::Route::Messages),
+            reasoning,
+
             // Initialize other fields with defaults
             store: None,
             reasoning_effort: None,
@@ -1583,7 +1592,7 @@ pub mod ingress {
     /// 
     /// This function provides a simple, header-free interface for converting Messages API
     /// requests to the universal format. It focuses on the core conversion logic without
-    /// vendor-specific header processing.
+    /// provider-specific header processing.
     pub fn decode_messages_to_universal(req: &types::MessagesRequest) -> Result<universal::Request, AIError> {
         // FAIL-FAST VALIDATION: Validate request before any conversion
         validate_messages_request(req)?;
@@ -1594,13 +1603,10 @@ pub mod ingress {
         }
         
         // Build messages array using our enhanced conversion logic (with tool_result support)
-        let (messages, _content_vendor_data, _tool_results_meta) = build_universal_messages(req, &[])?;
+        let (messages, _content_provider_data, _tool_results_meta) = build_universal_messages(req, &[])?;
         
-        // Create vendor context to mark this as Messages API route and store Anthropic-specific data
-        let mut vendor_data = std::collections::HashMap::new();
-        vendor_data.insert("route_type".to_string(), serde_json::json!("messages"));
-        
-        // Store Anthropic-specific fields in vendor bag
+        // Create provider context to store Anthropic-specific data
+        let mut provider_data = std::collections::HashMap::new();
         let mut anthropic_data = serde_json::Map::new();
         anthropic_data.insert("original_max_tokens".to_string(), serde_json::json!(req.max_tokens));
         if let Some(top_k) = req.top_k {
@@ -1615,7 +1621,7 @@ pub mod ingress {
         if let Some(system) = &req.system {
             anthropic_data.insert("system".to_string(), serde_json::to_value(system).unwrap());
         }
-        vendor_data.insert("anthropic".to_string(), serde_json::Value::Object(anthropic_data));
+        provider_data.insert("anthropic".to_string(), serde_json::Value::Object(anthropic_data));
         
         // Convert tools if present
         let universal_tools = req.tools.as_deref().map(convert_tools);
@@ -1629,7 +1635,15 @@ pub mod ingress {
                 async_openai::types::Stop::StringArray(stops.clone())
             }
         });
-        
+
+        // Build reasoning control from Anthropic thinking config (if present)
+        let reasoning = req.thinking.as_ref().map(|t| ReasoningControl {
+            enabled: matches!(t.thinking_type, types::ThinkingType::Enabled),
+            effort: None,
+            budget_tokens: t.budget_tokens,
+            return_trace: false,
+        });
+
         Ok(universal::Request {
             messages,
             model: Some(req.model.clone()),
@@ -1639,8 +1653,10 @@ pub mod ingress {
             stop,
             tools: universal_tools,
             tool_choice: universal_tool_choice,
-            vendor: Some(vendor_data),
-            
+            providers: Some(provider_data),
+            route: Some(universal::Route::Messages),
+            reasoning,
+
             // Use max_tokens field (universal OpenAI field) for token limit
             #[allow(deprecated)]
             max_tokens: Some(req.max_tokens),
@@ -1682,7 +1698,7 @@ pub mod egress {
     /// Clean edge encoder: convert Universal response to Anthropic Messages API format
     /// 
     /// This function provides the response encoding counterpart to decode_messages_to_universal(),
-    /// converting universal responses back to Messages API format while preserving vendor-specific
+    /// converting universal responses back to Messages API format while preserving provider-specific
     /// metadata and handling route-specific response formatting.
     pub fn encode_universal_to_messages(u: &universal::Response) -> Result<types::MessagesResponse, AIError> {
         // Extract the assistant message from choices
@@ -1728,8 +1744,8 @@ pub mod egress {
         };
 
         // Check if response was stopped by a custom stop sequence
-        // This info should be preserved in vendor bag from the original request
-        let stop_sequence = None; // TODO: Extract from vendor bag if available
+        // This info could be preserved in providers bag from the original request
+        let stop_sequence = None; // TODO: Extract from providers bag if available
 
         Ok(types::MessagesResponse {
             id: u.id.clone(),
@@ -2139,7 +2155,7 @@ mod tests {
         let result = ingress::build_universal_messages(&messages_req, &[]);
         assert!(result.is_ok());
         
-        let (universal_messages, _vendor_data, _tool_results_meta) = result.unwrap();
+        let (universal_messages, _provider_data, _tool_results_meta) = result.unwrap();
         
         // Should have: assistant message, user message, and separate tool message
         assert_eq!(universal_messages.len(), 3);
@@ -2231,13 +2247,13 @@ mod tests {
             _ => panic!("Expected string array stop sequences"),
         }
         
-        // Verify vendor context is set
-        assert!(universal_req.vendor.is_some());
-        let vendor = universal_req.vendor.as_ref().unwrap();
-        assert_eq!(vendor.get("route_type"), Some(&serde_json::json!("messages")));
-        
-        // Verify Anthropic-specific data is stored in vendor bag
-        let anthropic_data = vendor.get("anthropic").expect("Should have anthropic vendor data");
+        // Verify providers context is set and route is marked
+        assert!(universal_req.providers.is_some());
+        assert_eq!(universal_req.route, Some(universal::Route::Messages));
+
+        // Verify Anthropic-specific data is stored in providers bag
+        let providers = universal_req.providers.as_ref().unwrap();
+        let anthropic_data = providers.get("anthropic").expect("Should have anthropic provider data");
         assert_eq!(anthropic_data["original_max_tokens"], serde_json::json!(150));
         assert_eq!(anthropic_data["top_k"], serde_json::json!(50));
         assert!(anthropic_data["system"].is_object());
@@ -2397,7 +2413,7 @@ mod tests {
         assert!(ingress::validate_messages_request(&tool_request).is_ok());
     }
 
-    /// Tests for header extraction and vendor data processing
+    /// Tests for header extraction and provider data processing
     mod header_tests {
         use super::*;
         use http::{HeaderMap, HeaderValue};
@@ -2408,10 +2424,10 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
             
-            let vendor_data = ingress::extract_anthropic_headers(&headers);
-            assert!(vendor_data.is_some());
-            
-            let data = vendor_data.unwrap();
+            let provider_data = ingress::extract_anthropic_headers(&headers);
+            assert!(provider_data.is_some());
+
+            let data = provider_data.unwrap();
             let headers_obj = &data["anthropic"]["headers"];
             assert_eq!(headers_obj["version"], "2023-06-01");
         }
@@ -2422,8 +2438,8 @@ mod tests {
             headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
             headers.insert("anthropic-beta", HeaderValue::from_static("feature1,feature2,feature3"));
             
-            let vendor_data = ingress::extract_anthropic_headers(&headers).unwrap();
-            let headers_obj = &vendor_data["anthropic"]["headers"];
+            let provider_data = ingress::extract_anthropic_headers(&headers).unwrap();
+            let headers_obj = &provider_data["anthropic"]["headers"];
             
             let beta_array = headers_obj["beta"].as_array().unwrap();
             assert_eq!(beta_array.len(), 3);
@@ -2435,8 +2451,8 @@ mod tests {
         #[test]
         fn test_no_anthropic_headers() {
             let headers = HeaderMap::new();
-            let vendor_data = ingress::extract_anthropic_headers(&headers);
-            assert!(vendor_data.is_none());
+            let provider_data = ingress::extract_anthropic_headers(&headers);
+            assert!(provider_data.is_none());
         }
 
         #[test]
@@ -2453,11 +2469,11 @@ mod tests {
             
             let universal_request = ingress::to_universal(&request, &headers).unwrap();
             
-            assert!(universal_request.vendor.is_some());
-            let vendor = universal_request.vendor.unwrap();
-            assert!(vendor.contains_key("anthropic"));
-            
-            let anthropic_data = &vendor["anthropic"];
+            assert!(universal_request.providers.is_some());
+            let providers = universal_request.providers.unwrap();
+            assert!(providers.contains_key("anthropic"));
+
+            let anthropic_data = &providers["anthropic"];
             let headers_obj = &anthropic_data["headers"];
             assert_eq!(headers_obj["version"], "2023-06-01");
         }

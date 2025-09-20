@@ -33,6 +33,37 @@ pub use async_openai::types::{
 };
 use serde::{Deserialize, Serialize};
 
+// Helper for serde skip_if
+fn is_false(b: &bool) -> bool { !*b }
+
+/// Provider-agnostic reasoning control.
+/// - OpenAI o-series: use `effort` (low|medium|high)
+/// - Anthropic / Gemini: use `budget_tokens` and enable internal thinking
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReasoningControl {
+    /// Master switch. If false/None, adapters shouldn't enable provider "thinking".
+    pub enabled: bool,
+    /// OpenAI o-series only. If present, overrides top-level `reasoning_effort`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
+    /// Token budget for internal thinking (Anthropic/Gemini).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
+    /// If true, allow adapters to pass back any provider "thinking/trace" blocks.
+    /// Default is false — redact by default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub return_trace: bool,
+}
+
+/// Which HTTP "shape" this request is targeting.
+/// This lets adapters skip guessing based on URL shape and avoids
+/// sprinkling `"route_type"` strings into a metadata bag.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Route {
+    Completions,
+    Messages,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -189,15 +220,20 @@ pub struct Request {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub user: Option<String>,
 
-	/// Vendor-specific data for provider compatibility and observability.
+	/// Provider-specific data for compatibility and observability.
 	/// Structure: {"provider_name": {"key": "value"}}
 	#[serde(skip_serializing_if = "Option::is_none")]
-	pub vendor: Option<HashMap<String, serde_json::Value>>,
+	pub providers: Option<HashMap<String, serde_json::Value>>,
 
 	/// This tool searches the web for relevant results to use in a response.
 	/// Learn more about the [web search tool](https://platform.openai.com/docs/guides/tools-web-search?api-mode=chat).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub web_search_options: Option<WebSearchOptions>,
+
+	/// The targeted route shape for this request.
+	/// (e.g., OpenAI Chat Completions vs. Anthropic Messages)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub route: Option<Route>,
 
 	/// Deprecated in favor of `tool_choice`.
 	///
@@ -220,6 +256,10 @@ pub struct Request {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub functions: Option<Vec<ChatCompletionFunctions>>,
 
+	/// Provider-agnostic reasoning control (o-series / Messages / Gemini).
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub reasoning: Option<ReasoningControl>,
+
 }
 
 impl From<Request> for CreateChatCompletionRequest {
@@ -229,7 +269,12 @@ impl From<Request> for CreateChatCompletionRequest {
 			messages: req.messages,
 			model: req.model.unwrap_or_default(),
 			store: req.store,
-			reasoning_effort: req.reasoning_effort,
+			// Prefer universal control if provided; fall back to legacy field
+			reasoning_effort: req
+				.reasoning
+				.as_ref()
+				.and_then(|r| r.effort.clone())
+				.or(req.reasoning_effort),
 			metadata: req.metadata,
 			frequency_penalty: req.frequency_penalty,
 			logit_bias: req.logit_bias,
@@ -355,28 +400,36 @@ pub fn stop_sequence(req: &Request) -> Vec<String> {
 }
 
 /// Clean edge decoder: convert OpenAI Chat Completions request to Universal format
-/// 
+///
 /// Since Chat Completions requests are already in universal format, this function
-/// primarily adds vendor context to mark the route type and ensure consistent processing.
+/// primarily marks the route and ensures a provider entry exists for observability.
 pub fn decode_completions_to_universal(mut req: Request) -> Result<Request, crate::llm::AIError> {
-	// OpenAI Chat Completions requests are already in universal format
-	// We just need to mark the vendor context to indicate this is a Completions route
-	
-	let mut vendor_data = req.vendor.unwrap_or_default();
-	vendor_data.insert("route_type".to_string(), serde_json::json!("completions"));
-	vendor_data.insert("openai".to_string(), serde_json::json!({}));
-	
-	req.vendor = Some(vendor_data);
-	
+	// OpenAI Chat Completions requests are already universal:
+	// set the route and ensure a providers entry exists.
+	let mut providers = req.providers.unwrap_or_default();
+	providers.entry("openai".to_string()).or_insert_with(|| serde_json::json!({}));
+	req.providers = Some(providers);
+	req.route = Some(Route::Completions);
+
+	// Convert legacy reasoning_effort to new reasoning control if needed
+	if req.reasoning.is_none() && req.reasoning_effort.is_some() {
+		req.reasoning = Some(ReasoningControl {
+			enabled: true,
+			effort: req.reasoning_effort.clone(),
+			budget_tokens: None,
+			return_trace: false,
+		});
+	}
+
 	Ok(req)
 }
 
 /// Clean edge encoder: convert Universal response to OpenAI Chat Completions format
-/// 
+///
 /// Since Universal responses are already in OpenAI format, this function is essentially
 /// a passthrough but provides a consistent interface with the Messages API encoder.
 pub fn encode_universal_to_completions(response: Response) -> Result<Response, crate::llm::AIError> {
 	// Universal responses are already in OpenAI Chat Completions format
-	// No conversion needed - this is mainly for API consistency with Messages encoder
+	// No conversion needed - this is mainly for API consistency with the Messages API encoder
 	Ok(response)
 }
