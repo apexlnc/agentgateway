@@ -3,6 +3,7 @@ use agent_core::strng;
 // Remove unused import - using universal::FinishReason instead
 use bytes::Bytes;
 use chrono;
+use itertools::Itertools;
 use rand::Rng;
 use tracing::{trace, debug};
 
@@ -663,6 +664,16 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 					let mut combined_content = tool_results;
 					combined_content.extend(user_content);
 
+					// CRITICAL: If Assistant has tool_use but we found no tool_results,
+					// we still need a User message to satisfy Bedrock's sequencing requirements
+					if combined_content.is_empty() && !tool_call_ids.is_empty() {
+						debug!("Bedrock: Assistant has {} tool_calls but no tool_results found - creating placeholder User message", tool_call_ids.len());
+						// Create a User message with a text explanation
+						combined_content.push(ContentBlock::Text(
+							format!("Tool results not available for tool calls: {}", tool_call_ids.iter().join(", "))
+						));
+					}
+
 					if !combined_content.is_empty() {
 						messages.push(types::Message {
 							role: types::Role::User,
@@ -681,52 +692,41 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 					universal::RequestMessage::Function(_) => types::Role::User, // Map deprecated function to user
 					universal::RequestMessage::Developer(_) => types::Role::User, // Map developer to user
 					universal::RequestMessage::Tool(_) => {
-						// Check if this is truly an orphaned tool message
-						// Look backwards to see if there was a recent assistant with tool_calls
-						let mut is_orphaned = true;
-						let tool_msg = if let universal::RequestMessage::Tool(tm) = &req.messages[i] {
-							tm
-						} else {
-							unreachable!()
-						};
+						// Tool messages at root level need special handling
+						// They might be:
+						// 1. Part of a sequence that should have been coalesced but wasn't (e.g., intervening User message)
+						// 2. Truly orphaned (no matching assistant tool_calls)
 
-						debug!("Bedrock: Checking if Tool message at index {} with id '{}' is orphaned", i, tool_msg.tool_call_id);
+						// Collect ALL contiguous Tool messages and determine their fate
+						use std::collections::BTreeMap;
+						let mut tool_results_by_id: BTreeMap<String, types::ToolResultBlock> = BTreeMap::new();
+						let mut orphaned_tools = Vec::new();
 
-						for j in (0..i).rev() {
-							if let universal::RequestMessage::Assistant(assistant_msg) = &req.messages[j] {
-								if let Some(tool_calls) = &assistant_msg.tool_calls {
-									// Check if this tool message matches any of the assistant's tool calls
-									let tool_call_ids: std::collections::HashSet<String> = tool_calls
-										.iter()
-										.map(|call| call.id.clone())
-										.collect();
-									if tool_call_ids.contains(&tool_msg.tool_call_id) {
-										// This tool belongs to a previous assistant, not orphaned
-										debug!("Bedrock: Tool message '{}' matches assistant at index {}, not orphaned", tool_msg.tool_call_id, j);
-										is_orphaned = false;
+						while i < req.messages.len() {
+							if let universal::RequestMessage::Tool(tool_msg) = &req.messages[i] {
+								// Check if this tool matches any previous assistant's tool_calls
+								let mut found_match = false;
+								for j in (0..i).rev() {
+									if let universal::RequestMessage::Assistant(assistant_msg) = &req.messages[j] {
+										if let Some(tool_calls) = &assistant_msg.tool_calls {
+											let tool_call_ids: std::collections::HashSet<String> = tool_calls
+												.iter()
+												.map(|call| call.id.clone())
+												.collect();
+											if tool_call_ids.contains(&tool_msg.tool_call_id) {
+												found_match = true;
+												debug!("Bedrock: Tool message '{}' at index {} matches assistant at index {}",
+													tool_msg.tool_call_id, i, j);
+												break;
+											}
+										}
+										// Stop at first assistant when looking backwards
 										break;
 									}
 								}
-								debug!("Bedrock: Found assistant at index {} but tool '{}' doesn't match its tool_calls", j, tool_msg.tool_call_id);
-								break; // Stop at the first assistant we find going backwards
-							}
-						}
 
-						if !is_orphaned {
-							// Skip this tool message - it should have been handled by the coalescing logic
-							debug!("Bedrock: Skipping non-orphaned tool message '{}'", tool_msg.tool_call_id);
-							i += 1;
-							continue;
-						}
-
-						debug!("Bedrock: Tool message '{}' is orphaned; degrading to text", tool_msg.tool_call_id);
-
-						// This is truly an orphaned tool message - degrade to plain text instead of ToolResult
-						let mut text_acc = Vec::new();
-						while i < req.messages.len() {
-							if let universal::RequestMessage::Tool(tmsg) = &req.messages[i] {
-								let t = match &tmsg.content {
-									universal::RequestToolMessageContent::Text(s) => s.clone(),
+								let chunk_text = match &tool_msg.content {
+									universal::RequestToolMessageContent::Text(t) => t.clone(),
 									universal::RequestToolMessageContent::Array(parts) => parts.iter()
 										.filter_map(|p| match p {
 											async_openai::types::ChatCompletionRequestToolMessageContentPart::Text(tp) => Some(tp.text.as_str()),
@@ -734,17 +734,64 @@ pub(super) fn translate_openai_request(req: &universal::Request, provider: &Prov
 										.collect::<Vec<_>>()
 										.join("\n"),
 								};
-								text_acc.push(format!("[Tool: {}]\n{}", tmsg.tool_call_id, t));
+
+								if found_match {
+									// This tool has a matching assistant - create a proper ToolResult
+									let id = tool_msg.tool_call_id.clone();
+									let status = tool_results_meta
+										.as_ref()
+										.and_then(|m| m.get(&id))
+										.map(|is_error| if *is_error { types::ToolResultStatus::Error } else { types::ToolResultStatus::Success });
+
+									let entry = tool_results_by_id.entry(id.clone()).or_insert_with(|| types::ToolResultBlock {
+										tool_use_id: id.clone(),
+										content: Vec::new(),
+										status: status.clone(),
+									});
+
+									// Prefer Error if any chunk marks it as Error
+									entry.status = match (entry.status.take(), status) {
+										(Some(types::ToolResultStatus::Error), _) | (_, Some(types::ToolResultStatus::Error)) => {
+											Some(types::ToolResultStatus::Error)
+										}
+										(Some(types::ToolResultStatus::Success), Some(types::ToolResultStatus::Success)) => {
+											Some(types::ToolResultStatus::Success)
+										}
+										(s @ Some(_), None) | (None, s @ Some(_)) => s,
+										(None, None) => None,
+									};
+
+									entry.content.push(ContentBlock::Text(chunk_text));
+								} else {
+									// Truly orphaned - degrade to text
+									debug!("Bedrock: Tool message '{}' at index {} is orphaned", tool_msg.tool_call_id, i);
+									orphaned_tools.push(format!("[Tool: {}]\n{}", tool_msg.tool_call_id, chunk_text));
+								}
+
 								i += 1;
 							} else {
 								break;
 							}
 						}
 
-						if !text_acc.is_empty() {
+						// Create User message with collected content
+						let mut content = Vec::new();
+
+						// Add proper tool_results first
+						content.extend(
+							tool_results_by_id.into_values()
+								.map(ContentBlock::ToolResult)
+						);
+
+						// Add orphaned tools as plain text
+						if !orphaned_tools.is_empty() {
+							content.push(ContentBlock::Text(orphaned_tools.join("\n\n")));
+						}
+
+						if !content.is_empty() {
 							messages.push(types::Message {
 								role: types::Role::User,
-								content: vec![ContentBlock::Text(text_acc.join("\n\n"))],
+								content,
 							});
 						}
 						continue; // Already advanced i
@@ -1487,6 +1534,17 @@ pub struct TokenUsage {
 
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub cache_write_input_tokens: Option<u32>,
+
+	/// Additional fields that may be present in Bedrock responses
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub cache_read_input_token_count: Option<u32>,
+
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub cache_write_input_token_count: Option<u32>,
+
+	/// Server-side tool usage (arbitrary JSON object)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub server_tool_usage: Option<serde_json::Value>,
 }
 
 /// Request metrics
