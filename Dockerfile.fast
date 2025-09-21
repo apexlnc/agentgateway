@@ -1,0 +1,104 @@
+ARG BUILDER=base
+
+FROM docker.io/library/node:23.11.0-bookworm AS node
+
+WORKDIR /app
+
+COPY ui .
+
+RUN --mount=type=cache,target=/app/npm/cache npm install
+
+RUN --mount=type=cache,target=/app/npm/cache npm run build
+
+FROM docker.io/library/rust:1.89.0-slim-bookworm AS musl-builder
+
+ARG TARGETARCH
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    make musl-tools
+
+RUN <<EOF
+mkdir /build
+if [ "$TARGETARCH" = "arm64" ]; then
+  rustup target add aarch64-unknown-linux-musl;
+  echo aarch64-unknown-linux-musl > /build/target
+else
+  rustup target add x86_64-unknown-linux-musl;
+  echo x86_64-unknown-linux-musl > /build/target
+fi
+EOF
+
+FROM docker.io/library/rust:1.89.0-slim-bookworm AS base-builder
+
+ARG TARGETARCH
+
+RUN <<EOF
+mkdir /build
+if [ "$TARGETARCH" = "arm64" ]; then
+  echo aarch64-unknown-linux-gnu > /build/target
+else
+  echo x86_64-unknown-linux-gnu > /build/target
+fi
+echo "Building $(cat /build/target)"
+EOF
+
+FROM ${BUILDER}-builder AS builder
+ARG TARGETARCH
+ARG PROFILE=quick-release
+
+WORKDIR /app
+
+# OPTIMIZATION: Copy only dependency files first for perfect caching
+COPY Cargo.toml Cargo.lock ./
+COPY crates/agentgateway/Cargo.toml ./crates/agentgateway/
+COPY crates/agentgateway-app/Cargo.toml ./crates/agentgateway-app/
+COPY crates/core/Cargo.toml ./crates/core/
+COPY crates/hbone/Cargo.toml ./crates/hbone/
+COPY crates/a2a-sdk/Cargo.toml ./crates/a2a-sdk/
+COPY crates/xds/Cargo.toml ./crates/xds/
+COPY crates/xtask/Cargo.toml ./crates/xtask/
+COPY crates/mock-server/Cargo.toml ./crates/mock-server/
+COPY crates/hyper-util-fork/Cargo.toml ./crates/hyper-util-fork/
+
+# Create dummy source files for dependency build
+RUN find crates -name Cargo.toml -exec dirname {} \; | xargs -I {} mkdir -p {}/src && \
+    find crates -name Cargo.toml -exec dirname {} \; | xargs -I {} touch {}/src/lib.rs && \
+    echo 'fn main() {}' > crates/agentgateway-app/src/main.rs && \
+    echo 'fn main() {}' > crates/xtask/src/main.rs && \
+    echo 'fn main() {}' > crates/mock-server/src/main.rs && \
+    mkdir -p crates/agentgateway/benches && \
+    echo 'fn main() {}' > crates/agentgateway/benches/bench_tests.rs
+
+# OPTIMIZATION: Build dependencies only (this layer gets cached!)
+RUN --mount=type=cache,id=cargo-deps,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-build-deps,target=/app/target \
+    cargo build --features ui --target "$(cat /build/target)" --profile ${PROFILE}
+
+# Copy actual source code
+COPY crates ./crates
+COPY common ./common
+COPY --from=node /app/out ./ui/out
+
+# OPTIMIZATION: Build final binary (fast because deps are already compiled)
+RUN --mount=type=cache,id=cargo-build,target=/app/target \
+    --mount=type=cache,id=cargo-deps,target=/usr/local/cargo/registry \
+    cargo build --features ui --target "$(cat /build/target)" --profile ${PROFILE} && \
+    mkdir /out && \
+    mv /app/target/$(cat /build/target)/${PROFILE}/agentgateway /out
+
+FROM gcr.io/distroless/cc-debian12 AS runner 
+
+ARG TARGETARCH
+
+WORKDIR /
+
+COPY --from=builder /out/agentgateway /app/agentgateway
+
+LABEL org.opencontainers.image.source=https://github.com/agentgateway/agentgateway
+LABEL org.opencontainers.image.description="Agentgateway is an open source project that is built on AI-native protocols to connect, secure, and observe agent-to-agent and agent-to-tool communication across any agent framework and environment."
+
+ENTRYPOINT ["/app/agentgateway"]
