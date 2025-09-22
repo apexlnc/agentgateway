@@ -7,6 +7,7 @@ use std::collections::HashMap;
 #[allow(deprecated_in_future)]
 pub use async_openai::types::ChatCompletionFunctions;
 use async_openai::types::Stop;
+// Re-export core types from async_openai
 pub use async_openai::types::{
 	ChatChoice, ChatChoiceStream, ChatCompletionAudio, ChatCompletionFunctionCall,
 	ChatCompletionMessageToolCall as MessageToolCall, ChatCompletionModalities,
@@ -23,15 +24,117 @@ pub use async_openai::types::{
 	ChatCompletionRequestToolMessageContent as RequestToolMessageContent,
 	ChatCompletionRequestUserMessage as RequestUserMessage,
 	ChatCompletionRequestUserMessageContent as RequestUserMessageContent,
-	ChatCompletionResponseMessage as ResponseMessage, ChatCompletionStreamOptions as StreamOptions,
-	ChatCompletionStreamResponseDelta as StreamResponseDelta, ChatCompletionTool,
-	ChatCompletionToolChoiceOption as ToolChoiceOption, ChatCompletionToolChoiceOption,
+	ChatCompletionStreamOptions as StreamOptions,
+	ChatCompletionToolChoiceOption as ToolChoiceOption,
 	ChatCompletionToolType as ToolType, CompletionUsage as Usage, CreateChatCompletionRequest,
-	CreateChatCompletionResponse as Response, CreateChatCompletionStreamResponse as StreamResponse,
-	FinishReason, FunctionCall, PredictionContent, ReasoningEffort, ResponseFormat, Role,
+	CreateChatCompletionStreamResponse as StreamResponse,
+	FinishReason, FunctionCall, FunctionObject, FunctionName, PredictionContent, ReasoningEffort, ResponseFormat, Role,
 	ServiceTier, WebSearchOptions,
 };
+
+// Re-export additional types
+pub use async_openai::types::{
+	ChatCompletionTool,
+	ChatCompletionResponseMessage,
+	ChatCompletionStreamResponseDelta,
+	CreateChatCompletionResponse,
+};
 use serde::{Deserialize, Serialize};
+
+// Helper for serde skip_if
+fn is_false(b: &bool) -> bool { !*b }
+
+/// Modern reasoning configuration matching OpenRouter's unified approach.
+/// This replaces legacy include_reasoning patterns.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Reasoning {
+    /// Turn reasoning on/off
+    pub enabled: bool,
+
+    /// Reasoning effort level: "low" | "medium" | "high" (OpenAI o-series, OpenRouter)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
+
+    /// Direct token budget when provider supports it (Anthropic/Gemini/Bedrock)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+
+    /// Hide reasoning from responses/stream if true (default: false)
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exclude: bool,
+}
+
+/// Structured reasoning detail for providers that expose it
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReasoningDetail {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+/// Reasoning detail delta for streaming
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReasoningDetailDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+// Extended types with reasoning support
+// Note: For now, we'll use the standard types and add reasoning fields later
+// This avoids breaking existing field access patterns
+
+// Type aliases for reasoning-enabled responses (future expansion)
+pub type ResponseMessage = ChatCompletionResponseMessage;
+pub type StreamResponseDelta = ChatCompletionStreamResponseDelta;
+pub type Response = CreateChatCompletionResponse;
+
+// TODO: Later, we can create wrapper types that add reasoning fields without breaking existing access
+
+
+/// Which HTTP "shape" this request is targeting.
+/// This lets adapters skip guessing based on URL shape and avoids
+/// sprinkling `"route_type"` strings into a metadata bag.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Route {
+    Messages,
+}
+
+/// Cache strategy for performance optimization
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheStrategy {
+    /// Single cache boundary (recommended)
+    #[serde(rename = "single_boundary")]
+    SingleBoundary,
+    /// Multiple cache boundaries (advanced)
+    #[serde(rename = "multi_boundary")]
+    MultiBoundary,
+}
+
+/// Cache boundary location
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BoundaryLocation {
+    /// Cache up to end of static prefix (recommended)
+    #[serde(rename = "end_of_static_prefix")]
+    EndOfStaticPrefix,
+}
+
+/// Semantic cache plan expressing intent rather than implementation details
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CachePlan {
+    /// Cache strategy to use
+    pub strategy: CacheStrategy,
+    /// Where to place the cache boundary
+    pub boundary: BoundaryLocation,
+    /// Optional TTL hint (e.g., "5m", "1h")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_hint: Option<String>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -178,7 +281,7 @@ pub struct Request {
 	pub tools: Option<Vec<ChatCompletionTool>>,
 
 	#[serde(skip_serializing_if = "Option::is_none")]
-	pub tool_choice: Option<ChatCompletionToolChoiceOption>,
+	pub tool_choice: Option<ToolChoiceOption>,
 
 	/// Whether to enable [parallel function calling](https://platform.openai.com/docs/guides/function-calling/parallel-function-calling) during tool use.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -188,10 +291,20 @@ pub struct Request {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub user: Option<String>,
 
+	/// Provider-specific data for compatibility and observability.
+	/// Structure: {"provider_name": {"key": "value"}}
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub providers: Option<HashMap<String, serde_json::Value>>,
+
 	/// This tool searches the web for relevant results to use in a response.
 	/// Learn more about the [web search tool](https://platform.openai.com/docs/guides/tools-web-search?api-mode=chat).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub web_search_options: Option<WebSearchOptions>,
+
+	/// The targeted route shape for this request.
+	/// (e.g., OpenAI Chat Completions vs. Anthropic Messages)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub route: Option<Route>,
 
 	/// Deprecated in favor of `tool_choice`.
 	///
@@ -213,6 +326,16 @@ pub struct Request {
 	#[allow(deprecated_in_future)]
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub functions: Option<Vec<ChatCompletionFunctions>>,
+
+	/// Modern reasoning configuration (replaces include_reasoning patterns).
+	/// Matches OpenRouter's unified reasoning parameter.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub reasoning: Option<Reasoning>,
+
+	/// Semantic cache plan expressing intent rather than vendor-specific flags
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub cache: Option<CachePlan>,
+
 }
 
 impl From<Request> for CreateChatCompletionRequest {
@@ -222,7 +345,12 @@ impl From<Request> for CreateChatCompletionRequest {
 			messages: req.messages,
 			model: req.model.unwrap_or_default(),
 			store: req.store,
-			reasoning_effort: req.reasoning_effort,
+			// Map modern reasoning to legacy reasoning_effort for OpenAI compat
+			reasoning_effort: req
+				.reasoning
+				.as_ref()
+				.and_then(|r| r.effort.clone())
+				.or(req.reasoning_effort),
 			metadata: req.metadata,
 			frequency_penalty: req.frequency_penalty,
 			logit_bias: req.logit_bias,
@@ -327,12 +455,16 @@ pub fn message_text(msg: &RequestMessage) -> Option<&str> {
 
 pub fn max_tokens(req: &Request) -> usize {
 	#![allow(deprecated)]
-	req.max_completion_tokens.or(req.max_tokens).unwrap_or(4096) as usize
+	req.max_completion_tokens
+		.or(req.max_tokens)
+		.unwrap_or(4096) as usize
 }
 
 pub fn max_tokens_option(req: &Request) -> Option<u64> {
 	#![allow(deprecated)]
-	req.max_completion_tokens.or(req.max_tokens).map(Into::into)
+	req.max_completion_tokens
+		.or(req.max_tokens)
+		.map(Into::into)
 }
 
 pub fn stop_sequence(req: &Request) -> Vec<String> {
@@ -342,3 +474,5 @@ pub fn stop_sequence(req: &Request) -> Vec<String> {
 		_ => vec![],
 	}
 }
+
+

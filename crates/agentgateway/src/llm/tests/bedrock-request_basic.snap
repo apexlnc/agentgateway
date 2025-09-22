@@ -10,7 +10,6 @@ info:
       content: What is the name of the LLM provider?
 ---
 {
-  "modelId": "replaceme",
   "messages": [
     {
       "role": "user",
