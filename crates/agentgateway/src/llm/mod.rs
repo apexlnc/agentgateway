@@ -334,7 +334,15 @@ impl AIProvider {
 			serde_json::from_slice(bytes.as_ref()).map_err(AIError::RequestParsing)?
 		};
 		self
-			.process_request(client, policies, InputFormat::Completions, req, parts, tokenize, log)
+			.process_request(
+				client,
+				policies,
+				InputFormat::Completions,
+				req,
+				parts,
+				tokenize,
+				log,
+			)
 			.await
 	}
 
@@ -359,10 +367,19 @@ impl AIProvider {
 
 		let universal_req = anthropic::translate_anthropic_request(req);
 		self
-			.process_request(client, policies, InputFormat::Messages, universal_req, parts, tokenize, log)
+			.process_request(
+				client,
+				policies,
+				InputFormat::Messages,
+				universal_req,
+				parts,
+				tokenize,
+				log,
+			)
 			.await
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	async fn process_request(
 		&self,
 		client: &client::Client,
@@ -506,11 +523,13 @@ impl AIProvider {
 				}
 
 				let body = match input_format {
-					InputFormat::Completions => serde_json::to_vec(&success).map_err(AIError::ResponseMarshal)?,
+					InputFormat::Completions => {
+						serde_json::to_vec(&success).map_err(AIError::ResponseMarshal)?
+					},
 					InputFormat::Messages => {
 						let final_response = anthropic::translate_anthropic_response(success);
 						serde_json::to_vec(&final_response).map_err(AIError::ResponseMarshal)?
-					}
+					},
 				};
 				(llm_resp, body)
 			},
