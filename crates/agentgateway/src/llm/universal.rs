@@ -376,6 +376,20 @@ pub struct Request {
 	#[allow(deprecated_in_future)]
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub functions: Option<Vec<ChatCompletionFunctions>>,
+
+	/// Agentgateway: vendor specific fields we allow only for internal creation
+	#[serde(flatten, skip_deserializing)]
+	pub vendor_extensions: RequestVendorExtensions,
+}
+
+#[derive(Clone, Debug, Serialize, Default)]
+pub struct RequestVendorExtensions {
+	/// Anthropic
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub top_k: Option<usize>,
+	/// Anthropic
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub thinking_budget_tokens: Option<u64>,
 }
 
 impl From<Request> for CreateChatCompletionRequest {
