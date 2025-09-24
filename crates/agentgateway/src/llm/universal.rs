@@ -59,6 +59,8 @@ pub trait RequestType {
 
 pub mod passthrough {
 	use crate::json;
+	use crate::llm::anthropic::translate_response;
+	use crate::llm::anthropic::types::MessagesResponse;
 	use crate::llm::universal::ResponseType;
 	use crate::llm::{
 		AIError, InputFormat, LLMRequest, LLMRequestParams, LLMResponse, SimpleChatCompletionMessage,
@@ -76,17 +78,21 @@ pub mod passthrough {
 		input_format: InputFormat,
 	) -> Result<Box<dyn ResponseType>, AIError> {
 		match input_format {
-			InputFormat::Completions => {},
+			InputFormat::Completions => {
+				let resp = serde_json::from_slice::<universal::passthrough::Response>(bytes)
+					.map_err(AIError::ResponseParsing)?;
+
+				Ok(Box::new(resp))
+			},
 			InputFormat::Messages => {
-				return Err(AIError::UnsupportedConversion(strng::literal!(
-					"anthropic from openai response"
-				)));
+				let resp =
+					serde_json::from_slice::<universal::Response>(bytes).map_err(AIError::ResponseParsing)?;
+				let anthropic = anthropic::translate_anthropic_response(resp);
+				let passthrough = json::convert::<_, anthropic::passthrough::Response>(&anthropic)
+					.map_err(AIError::ResponseParsing)?;
+				Ok(Box::new(passthrough))
 			},
 		}
-		let resp = serde_json::from_slice::<universal::passthrough::Response>(bytes)
-			.map_err(AIError::ResponseParsing)?;
-
-		Ok(Box::new(resp))
 	}
 
 	#[derive(Clone, Debug, Serialize, Deserialize)]
