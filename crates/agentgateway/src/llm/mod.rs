@@ -392,7 +392,44 @@ impl AIProvider {
 		tokenize: bool,
 		log: &mut Option<&mut RequestLog>,
 	) -> Result<RequestResult, AIError> {
-		todo!()
+		match self {
+			AIProvider::Anthropic(p) => {},
+			_ => {
+				return Err(AIError::UnsupportedConversion(strng::format!(
+					"anthropic messages for provider {}",
+					self.provider()
+				)));
+			},
+		};
+
+		// Buffer the body, max 2mb
+		let (parts, body) = req.into_parts();
+		let Ok(bytes) = axum::body::to_bytes(body, 2_097_152).await else {
+			return Err(AIError::RequestTooLarge);
+		};
+		let mut req: anthropic::passthrough::Request = if let Some(p) = policies {
+			p.unmarshal_request(&bytes)?
+		} else {
+			serde_json::from_slice(bytes.as_ref()).map_err(AIError::RequestParsing)?
+		};
+
+		if let Some(provider_model) = &self.override_model() {
+			req.model = Some(provider_model.to_string());
+		} else if req.model.is_none() {
+			return Err(AIError::MissingField("model not specified".into()));
+		}
+
+		self
+			.process_request(
+				client,
+				policies,
+				InputFormat::Completions,
+				req,
+				parts,
+				tokenize,
+				log,
+			)
+			.await
 	}
 
 	#[allow(clippy::too_many_arguments)]
@@ -586,6 +623,7 @@ impl AIProvider {
 		resp: Response,
 	) -> Result<Response, AIError> {
 		let model = req.request_model.clone();
+		let input_format = req.input_format;
 		// Store an empty response, as we stream in info we will parse into it
 		let llmresp = LLMInfo {
 			request: req,
@@ -593,7 +631,7 @@ impl AIProvider {
 		};
 		log.store(Some(llmresp));
 		let resp = match self {
-			AIProvider::Anthropic(p) => p.process_streaming(log, resp).await,
+			AIProvider::Anthropic(p) => p.process_streaming(log, resp, input_format).await,
 			AIProvider::Bedrock(p) => p.process_streaming(log, resp, model.as_str()).await,
 			_ => {
 				self
@@ -671,7 +709,6 @@ impl AIProvider {
 	}
 }
 
-// TODO: do we always want to spend cost of tokenizing, or just allow skipping and using the response?
 fn num_tokens_from_messages(
 	model: &str,
 	messages: &[universal::passthrough::RequestMessage],
@@ -690,11 +727,6 @@ fn num_tokens_from_messages(
 		num_tokens += tokens_per_message;
 		// Role is always 1 token
 		num_tokens += 1;
-		// num_tokens += bpe
-		// .encode_with_special_tokens(
-		// 	message.role
-		// )
-		// .len() as u64;
 		if let Some(t) = message.message_text() {
 			num_tokens += bpe
 				.encode_with_special_tokens(
@@ -706,6 +738,37 @@ fn num_tokens_from_messages(
 		if let Some(name) = &message.name {
 			num_tokens += bpe.encode_with_special_tokens(name).len() as u64;
 			num_tokens += tokens_per_name;
+		}
+	}
+	num_tokens += 3; // every reply is primed with <|start|>assistant<|message|>
+	Ok(num_tokens)
+}
+
+fn num_tokens_from_anthropic_messages(
+	model: &str,
+	messages: &[anthropic::passthrough::RequestMessage],
+) -> Result<u64, AIError> {
+	let tokenizer = get_tokenizer(model).unwrap_or(Tokenizer::Cl100kBase);
+	if tokenizer != Tokenizer::Cl100kBase && tokenizer != Tokenizer::O200kBase {
+		// Chat completion is only supported chat models
+		return Err(AIError::UnsupportedModel);
+	}
+	let bpe = get_bpe_from_tokenizer(tokenizer);
+
+	let (tokens_per_message, tokens_per_name) = (3, 1);
+
+	let mut num_tokens: u64 = 0;
+	for message in messages {
+		num_tokens += tokens_per_message;
+		// Role is always 1 token
+		num_tokens += 1;
+		if let Some(t) = message.message_text() {
+			num_tokens += bpe
+				.encode_with_special_tokens(
+					// We filter non-text previously
+					t,
+				)
+				.len() as u64;
 		}
 	}
 	num_tokens += 3; // every reply is primed with <|start|>assistant<|message|>
