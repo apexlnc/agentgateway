@@ -3,6 +3,10 @@
 
 use std::collections::HashMap;
 
+use crate::llm;
+use crate::llm::{AIError, LLMRequest, LLMResponse, anthropic, universal};
+use agent_core::strng;
+use agent_core::strng::Strng;
 #[allow(deprecated)]
 #[allow(deprecated_in_future)]
 pub use async_openai::types::ChatCompletionFunctions;
@@ -32,7 +36,257 @@ pub use async_openai::types::{
 	FinishReason, FunctionCall, FunctionName, FunctionObject, PredictionContent, ReasoningEffort,
 	ResponseFormat, Role, ServiceTier, Stop, WebSearchOptions,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+pub trait ResponseType: Send + Sync {
+	fn to_llm_response(&self, include_completion_in_log: bool) -> LLMResponse;
+	fn serialize(&self) -> serde_json::Result<Vec<u8>>;
+}
+pub trait RequestType {
+	fn prepend_prompts(&mut self);
+	fn to_llm_request(&self, provider: Strng, tokenize: bool) -> Result<LLMRequest, AIError>;
+	fn get_messages(&self) -> Vec<llm::SimpleChatCompletionMessage>;
+
+	fn to_openai(&self) -> Result<Vec<u8>, AIError> {
+		Err(AIError::UnsupportedConversion(strng::literal!("openai")))
+	}
+
+	fn to_anthropic(&self) -> Result<Vec<u8>, AIError> {
+		Err(AIError::UnsupportedConversion(strng::literal!("anthropic")))
+	}
+}
+
+pub mod passthrough {
+	use crate::llm::universal::{ChatChoice, ResponseType};
+	use crate::llm::{
+		AIError, InputFormat, LLMRequest, LLMRequestParams, LLMResponse, SimpleChatCompletionMessage,
+		anthropic, num_tokens_from_messages, universal,
+	};
+	use agent_core::strng;
+	use agent_core::strng::Strng;
+	use async_openai::types::CompletionUsage;
+	use bytes::Bytes;
+	use itertools::Itertools;
+	use serde::{Deserialize, Serialize};
+	use crate::json;
+
+	pub fn process_response(bytes: &Bytes, input_format: InputFormat) -> Result<Box<dyn ResponseType>, AIError> {
+		match input_format {
+			InputFormat::Completions => {}
+			InputFormat::Messages => return Err(AIError::UnsupportedConversion(strng::literal!("anthropic from openai response"))),
+		}
+		let resp =
+		serde_json::from_slice::<universal::passthrough::Response>(bytes).map_err(AIError::ResponseParsing)?;
+
+		Ok(Box::new(resp))
+	}
+
+	#[derive(Clone, Debug, Serialize, Deserialize)]
+	pub struct Request {
+		pub messages: Vec<RequestMessage>,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub model: Option<String>,
+
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub top_p: Option<f32>,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub temperature: Option<f32>,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub stream: Option<bool>,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub frequency_penalty: Option<f32>,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub presence_penalty: Option<f32>,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub seed: Option<i64>,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub stream_options: Option<StreamOptions>,
+
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub max_tokens: Option<u32>,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub max_completion_tokens: Option<u32>,
+
+		#[serde(flatten, default)]
+		pub rest: serde_json::Value,
+	}
+
+	/// Options for streaming response. Only set this when you set `stream: true`.
+	#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+	pub struct StreamOptions {
+		/// If set, an additional chunk will be streamed before the `data: [DONE]` message. The `usage` field on this chunk shows the token usage statistics for the entire request, and the `choices` field will always be an empty array. All other chunks will also include a `usage` field, but with a null value.
+		pub include_usage: bool,
+	}
+
+	#[derive(Debug, Deserialize, Clone, Serialize)]
+	pub struct Response {
+		pub model: String,
+		pub usage: Option<Usage>,
+		/// A list of chat completion choices. Can be more than one if `n` is greater than 1.
+		pub choices: Vec<Choice>,
+		#[serde(flatten, default)]
+		pub rest: serde_json::Value,
+	}
+
+	#[derive(Debug, Deserialize, Clone, Serialize)]
+	pub struct Choice {
+		pub message: ResponseMessage,
+		#[serde(flatten, default)]
+		pub rest: serde_json::Value,
+	}
+
+	#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+	pub struct ResponseMessage {
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub content: Option<String>,
+		#[serde(flatten, default)]
+		pub rest: serde_json::Value,
+	}
+	#[derive(Debug, Deserialize, Clone, Serialize)]
+	pub struct Usage {
+		/// Number of tokens in the prompt.
+		pub prompt_tokens: u32,
+		/// Number of tokens in the generated completion.
+		pub completion_tokens: u32,
+		/// Total number of tokens used in the request (prompt + completion).
+		pub total_tokens: u32,
+		#[serde(flatten, default)]
+		pub rest: serde_json::Value,
+	}
+
+	impl super::ResponseType for Response {
+		fn to_llm_response(&self, include_completion_in_log: bool) -> LLMResponse {
+			LLMResponse {
+				input_tokens: self.usage.as_ref().map(|u| u.prompt_tokens as u64),
+				output_tokens: self.usage.as_ref().map(|u| u.completion_tokens as u64),
+				total_tokens: self.usage.as_ref().map(|u| u.total_tokens as u64),
+				provider_model: Some(strng::new(&self.model)),
+				completion: if include_completion_in_log {
+					Some(
+						self
+							.choices
+							.iter()
+							.flat_map(|c| c.message.content.clone())
+							.collect_vec(),
+					)
+				} else {
+					None
+				},
+				first_token: Default::default(),
+			}
+		}
+
+		fn serialize(&self) -> serde_json::Result<Vec<u8>> {
+			serde_json::to_vec(&self)
+		}
+	}
+
+	impl super::RequestType for Request {
+		fn prepend_prompts(&mut self) {
+			todo!()
+		}
+
+		fn to_anthropic(&self) -> Result<Vec<u8>, AIError> {
+			let typed = json::convert::<_, universal::Request>(self).map_err(AIError::RequestMarshal)?;
+			let xlated = anthropic::translate_request(typed);
+			serde_json::to_vec(&xlated).map_err(AIError::RequestMarshal)
+		}
+
+		fn to_openai(&self) -> Result<Vec<u8>, AIError> {
+			serde_json::to_vec(&self).map_err(AIError::RequestMarshal)
+		}
+
+		fn to_llm_request(&self, provider: Strng, tokenize: bool) -> Result<LLMRequest, AIError> {
+			let model = strng::new(self.model.as_deref().unwrap_or_default());
+			let input_tokens = if tokenize {
+				let tokens = num_tokens_from_messages(&model, &self.messages)?;
+				Some(tokens)
+			} else {
+				None
+			};
+			// Pass the original body through
+			let llm = LLMRequest {
+				input_tokens,
+				input_format: InputFormat::Completions,
+				request_model: model,
+				provider,
+				streaming: self.stream.unwrap_or_default(),
+				params: LLMRequestParams {
+					temperature: self.temperature.map(Into::into),
+					top_p: self.top_p.map(Into::into),
+					frequency_penalty: self.frequency_penalty.map(Into::into),
+					presence_penalty: self.presence_penalty.map(Into::into),
+					seed: self.seed,
+					max_tokens: self
+						.max_completion_tokens
+						.or(self.max_tokens)
+						.map(Into::into),
+				},
+			};
+			Ok(llm)
+		}
+
+		fn get_messages(&self) -> Vec<SimpleChatCompletionMessage> {
+			self
+				.messages
+				.iter()
+				.map(|m| {
+					let content = m
+						.content
+						.as_ref()
+						.and_then(|c| match c {
+							Content::Text(t) => Some(strng::new(t)),
+							// TODO?
+							Content::Array(_) => None,
+						})
+						.unwrap_or_default();
+					SimpleChatCompletionMessage {
+						role: strng::new(&m.role),
+						content,
+					}
+				})
+				.collect()
+		}
+	}
+
+	#[derive(Clone, Debug, Serialize, Deserialize)]
+	pub struct RequestMessage {
+		pub role: String,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub name: Option<String>,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub content: Option<Content>,
+		#[serde(flatten, default)]
+		pub rest: serde_json::Value,
+	}
+
+	impl RequestMessage {
+		pub fn message_text(&self) -> Option<&str> {
+			self.content.as_ref().and_then(|c| match c {
+				Content::Text(t) => Some(t.as_str()),
+				// TODO?
+				Content::Array(_) => None,
+			})
+		}
+	}
+
+	#[derive(Clone, Debug, Serialize, Deserialize)]
+	#[serde(untagged)]
+	pub enum Content {
+		Text(String),
+		Array(Vec<ContentPart>),
+	}
+
+	#[derive(Clone, Debug, Serialize, Deserialize)]
+	pub struct ContentPart {
+		pub r#type: String,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub text: Option<String>,
+		#[serde(flatten, default)]
+		pub rest: serde_json::Value,
+	}
+}
 
 /// Represents a chat completion response returned by model, based on the provided input.
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]

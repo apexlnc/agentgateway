@@ -12,8 +12,8 @@ use crate::llm::anthropic::types::{
 	ContentBlock, ContentBlockDelta, MessagesErrorResponse, MessagesRequest, MessagesResponse,
 	MessagesStreamEvent, StopReason, ThinkingInput, ToolResultContent, ToolResultContentPart,
 };
-use crate::llm::universal::{RequestSystemMessage, RequestVendorExtensions};
-use crate::llm::{AIError, LLMResponse, universal};
+use crate::llm::universal::{RequestSystemMessage, RequestVendorExtensions, ResponseType};
+use crate::llm::{AIError, InputFormat, LLMInfo, LLMResponse, anthropic, universal};
 use crate::telemetry::log::AsyncLog;
 use crate::{parse, *};
 use itertools::Itertools;
@@ -44,18 +44,12 @@ impl Provider {
 		let anthropic_message = translate_request(req);
 		Ok(anthropic_message)
 	}
-	pub async fn process_response(&self, bytes: &Bytes) -> Result<universal::Response, AIError> {
-		let resp =
-			serde_json::from_slice::<MessagesResponse>(bytes).map_err(AIError::ResponseParsing)?;
-		let openai = translate_response(resp);
-		Ok(openai)
-	}
 
-	pub async fn process_streaming(&self, log: AsyncLog<LLMResponse>, resp: Response) -> Response {
+	pub async fn process_streaming(&self, log: AsyncLog<LLMInfo>, resp: Response) -> Response {
 		resp.map(|b| translate_stream(b, log))
 	}
 
-	pub async fn process_error(
+	pub fn process_error(
 		&self,
 		bytes: &Bytes,
 	) -> Result<universal::ChatCompletionErrorResponse, AIError> {
@@ -65,6 +59,27 @@ impl Provider {
 	}
 }
 
+pub fn process_response(
+	bytes: &Bytes,
+	input_format: InputFormat,
+) -> Result<Box<dyn ResponseType>, AIError> {
+	match input_format {
+		InputFormat::Completions => {
+			let resp =
+				serde_json::from_slice::<MessagesResponse>(bytes).map_err(AIError::ResponseParsing)?;
+			let openai = translate_response(resp);
+			let passthrough = json::convert::<_, universal::passthrough::Response>(&openai)
+				.map_err(AIError::ResponseParsing)?;
+			Ok(Box::new(passthrough))
+		},
+		InputFormat::Messages => {
+			let resp =
+				serde_json::from_slice::<passthrough::Response>(bytes).map_err(AIError::ResponseParsing)?;
+
+			Ok(Box::new(resp))
+		},
+	}
+}
 pub(super) fn translate_error(
 	resp: MessagesErrorResponse,
 ) -> Result<universal::ChatCompletionErrorResponse, AIError> {
@@ -283,7 +298,7 @@ pub(super) fn translate_request(req: universal::Request) -> types::MessagesReque
 	}
 }
 
-pub(super) fn translate_stream(b: Body, log: AsyncLog<LLMResponse>) -> Body {
+pub(super) fn translate_stream(b: Body, log: AsyncLog<LLMInfo>) -> Body {
 	let mut message_id = None;
 	let mut model = String::new();
 	let created = chrono::Utc::now().timestamp() as u32;
@@ -314,9 +329,9 @@ pub(super) fn translate_stream(b: Body, log: AsyncLog<LLMResponse>) -> Body {
 				model = message.model.clone();
 				input_tokens = message.usage.input_tokens;
 				log.non_atomic_mutate(|r| {
-					r.output_tokens = Some(message.usage.output_tokens as u64);
-					r.input_tokens_from_response = Some(message.usage.input_tokens as u64);
-					r.provider_model = Some(strng::new(&message.model))
+					r.response.output_tokens = Some(message.usage.output_tokens as u64);
+					r.response.input_tokens = Some(message.usage.input_tokens as u64);
+					r.response.provider_model = Some(strng::new(&message.model))
 				});
 				// no need to respond with anything yet
 				None
@@ -330,7 +345,7 @@ pub(super) fn translate_stream(b: Body, log: AsyncLog<LLMResponse>) -> Body {
 				if !saw_token {
 					saw_token = true;
 					log.non_atomic_mutate(|r| {
-						r.first_token = Some(Instant::now());
+						r.response.first_token = Some(Instant::now());
 					});
 				}
 				let mut dr = universal::StreamResponseDelta::default();
@@ -355,9 +370,9 @@ pub(super) fn translate_stream(b: Body, log: AsyncLog<LLMResponse>) -> Body {
 				// TODO
 				// finish_reason = delta.stop_reason.as_ref().map(translate_stop_reason);
 				log.non_atomic_mutate(|r| {
-					r.output_tokens = Some(usage.output_tokens as u64);
-					if let Some(inp) = r.input_tokens_from_response {
-						r.total_tokens = Some(inp + usage.output_tokens as u64)
+					r.response.output_tokens = Some(usage.output_tokens as u64);
+					if let Some(inp) = r.response.input_tokens {
+						r.response.total_tokens = Some(inp + usage.output_tokens as u64)
 					}
 				});
 				mk(
@@ -1032,5 +1047,64 @@ pub(super) mod types {
 		/// Custom metadata fields
 		#[serde(flatten)]
 		pub fields: std::collections::HashMap<String, String>,
+	}
+}
+pub mod passthrough {
+	use crate::llm::universal::ResponseType;
+	use crate::llm::{AIError, LLMRequest, LLMResponse, universal};
+	use agent_core::strng;
+	use itertools::Itertools;
+	use serde::{Deserialize, Serialize};
+
+	#[derive(Debug, Deserialize, Clone, Serialize)]
+	pub struct Response {
+		pub model: String,
+		pub usage: Usage,
+		pub content: Vec<Content>,
+		#[serde(flatten, default)]
+		pub rest: serde_json::Value,
+	}
+
+	#[derive(Debug, Deserialize, Clone, Serialize)]
+	pub struct Content {
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub text: Option<String>,
+		#[serde(flatten, default)]
+		pub rest: serde_json::Value,
+	}
+
+	#[derive(Debug, Deserialize, Clone, Serialize)]
+	pub struct Usage {
+		pub input_tokens: u64,
+		pub output_tokens: u64,
+		#[serde(flatten, default)]
+		pub rest: serde_json::Value,
+	}
+
+	impl ResponseType for Response {
+		fn to_llm_response(&self, include_completion_in_log: bool) -> LLMResponse {
+			LLMResponse {
+				input_tokens: Some(self.usage.input_tokens),
+				output_tokens: Some(self.usage.output_tokens),
+				total_tokens: Some(self.usage.output_tokens + self.usage.input_tokens),
+				provider_model: Some(strng::new(&self.model)),
+				completion: if include_completion_in_log {
+					Some(
+						self
+							.content
+							.iter()
+							.flat_map(|c| c.text.clone())
+							.collect_vec(),
+					)
+				} else {
+					None
+				},
+				first_token: Default::default(),
+			}
+		}
+
+		fn serialize(&self) -> serde_json::Result<Vec<u8>> {
+			serde_json::to_vec(&self)
+		}
 	}
 }
