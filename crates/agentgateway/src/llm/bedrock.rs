@@ -12,7 +12,7 @@ use crate::llm::bedrock::types::{
 	ContentBlock, ContentBlockDelta, ConverseErrorResponse, ConverseRequest, ConverseResponse,
 	ConverseStreamOutput, StopReason,
 };
-use crate::llm::{AIError, LLMResponse, universal, LLMInfo};
+use crate::llm::{AIError, LLMInfo, LLMResponse, universal};
 use crate::telemetry::log::AsyncLog;
 use crate::*;
 

@@ -392,16 +392,6 @@ impl AIProvider {
 		tokenize: bool,
 		log: &mut Option<&mut RequestLog>,
 	) -> Result<RequestResult, AIError> {
-		match self {
-			AIProvider::Anthropic(p) => {},
-			_ => {
-				return Err(AIError::UnsupportedConversion(strng::format!(
-					"anthropic messages for provider {}",
-					self.provider()
-				)));
-			},
-		};
-
 		// Buffer the body, max 2mb
 		let (parts, body) = req.into_parts();
 		let Ok(bytes) = axum::body::to_bytes(body, 2_097_152).await else {
