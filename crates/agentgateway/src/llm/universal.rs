@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use crate::llm;
-use crate::llm::{AIError, LLMRequest, LLMResponse, anthropic, universal};
+use crate::llm::{AIError, LLMRequest, LLMResponse};
 use agent_core::strng;
 use agent_core::strng::Strng;
 #[allow(deprecated)]
@@ -58,26 +58,33 @@ pub trait RequestType {
 }
 
 pub mod passthrough {
-	use crate::llm::universal::{ChatChoice, ResponseType};
+	use crate::json;
+	use crate::llm::universal::ResponseType;
 	use crate::llm::{
 		AIError, InputFormat, LLMRequest, LLMRequestParams, LLMResponse, SimpleChatCompletionMessage,
-		anthropic, num_tokens_from_messages, universal,
+		anthropic, universal,
 	};
 	use agent_core::strng;
 	use agent_core::strng::Strng;
-	use async_openai::types::CompletionUsage;
 	use bytes::Bytes;
 	use itertools::Itertools;
 	use serde::{Deserialize, Serialize};
-	use crate::json;
+	use tiktoken_rs::num_tokens_from_messages;
 
-	pub fn process_response(bytes: &Bytes, input_format: InputFormat) -> Result<Box<dyn ResponseType>, AIError> {
+	pub fn process_response(
+		bytes: &Bytes,
+		input_format: InputFormat,
+	) -> Result<Box<dyn ResponseType>, AIError> {
 		match input_format {
-			InputFormat::Completions => {}
-			InputFormat::Messages => return Err(AIError::UnsupportedConversion(strng::literal!("anthropic from openai response"))),
+			InputFormat::Completions => {},
+			InputFormat::Messages => {
+				return Err(AIError::UnsupportedConversion(strng::literal!(
+					"anthropic from openai response"
+				)));
+			},
 		}
-		let resp =
-		serde_json::from_slice::<universal::passthrough::Response>(bytes).map_err(AIError::ResponseParsing)?;
+		let resp = serde_json::from_slice::<universal::passthrough::Response>(bytes)
+			.map_err(AIError::ResponseParsing)?;
 
 		Ok(Box::new(resp))
 	}
@@ -200,7 +207,7 @@ pub mod passthrough {
 		fn to_llm_request(&self, provider: Strng, tokenize: bool) -> Result<LLMRequest, AIError> {
 			let model = strng::new(self.model.as_deref().unwrap_or_default());
 			let input_tokens = if tokenize {
-				let tokens = num_tokens_from_messages(&model, &self.messages)?;
+				let tokens = crate::llm::num_tokens_from_messages(&model, &self.messages)?;
 				Some(tokens)
 			} else {
 				None

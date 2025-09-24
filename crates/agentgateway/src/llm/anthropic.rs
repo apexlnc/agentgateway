@@ -32,21 +32,16 @@ pub const DEFAULT_HOST: Strng = strng::literal!(DEFAULT_HOST_STR);
 pub const DEFAULT_PATH: &str = "/v1/messages";
 
 impl Provider {
-	pub async fn process_request(
+	pub async fn process_streaming(
 		&self,
-		mut req: universal::Request,
-	) -> Result<MessagesRequest, AIError> {
-		if let Some(provider_model) = &self.model {
-			req.model = Some(provider_model.to_string());
-		} else if req.model.is_none() {
-			return Err(AIError::MissingField("model not specified".into()));
+		log: AsyncLog<LLMInfo>,
+		resp: Response,
+		input_format: InputFormat,
+	) -> Response {
+		match input_format {
+			InputFormat::Completions => resp.map(|b| translate_stream(b, log)),
+			InputFormat::Messages => resp.map(|b| passthrough_stream(b, log)),
 		}
-		let anthropic_message = translate_request(req);
-		Ok(anthropic_message)
-	}
-
-	pub async fn process_streaming(&self, log: AsyncLog<LLMInfo>, resp: Response) -> Response {
-		resp.map(|b| translate_stream(b, log))
 	}
 
 	pub fn process_error(
@@ -391,6 +386,49 @@ pub(super) fn translate_stream(b: Body, log: AsyncLog<LLMInfo>) -> Body {
 			MessagesStreamEvent::ContentBlockStop { .. } => None,
 			MessagesStreamEvent::MessageStop => None,
 			MessagesStreamEvent::Ping => None,
+		}
+	})
+}
+
+pub(super) fn passthrough_stream(b: Body, log: AsyncLog<LLMInfo>) -> Body {
+	let mut input_tokens = 0;
+	let mut saw_token = false;
+	// https://docs.anthropic.com/en/docs/build-with-claude/streaming
+	parse::sse::json_passthrough::<MessagesStreamEvent>(b, move |f| {
+		// ignore errors... what else can we do?
+		let Some(Ok(f)) = f else { return };
+
+		// Extract info we need
+		match f {
+			MessagesStreamEvent::MessageStart { message } => {
+				input_tokens = message.usage.input_tokens;
+				log.non_atomic_mutate(|r| {
+					r.response.output_tokens = Some(message.usage.output_tokens as u64);
+					r.response.input_tokens = Some(message.usage.input_tokens as u64);
+					r.response.provider_model = Some(strng::new(&message.model))
+				});
+			},
+			MessagesStreamEvent::ContentBlockStart { .. } => {},
+			MessagesStreamEvent::ContentBlockDelta { delta, .. } => {
+				if !saw_token {
+					saw_token = true;
+					log.non_atomic_mutate(|r| {
+						r.response.first_token = Some(Instant::now());
+					});
+				}
+			},
+			MessagesStreamEvent::MessageDelta { usage, delta: _ } => {
+				log.non_atomic_mutate(|r| {
+					r.response.output_tokens = Some(usage.output_tokens as u64);
+					if let Some(inp) = r.response.input_tokens {
+						r.response.total_tokens = Some(inp + usage.output_tokens as u64)
+					}
+				});
+			},
+			MessagesStreamEvent::ContentBlockStart { .. }
+			| MessagesStreamEvent::ContentBlockStop { .. }
+			| MessagesStreamEvent::MessageStop
+			| MessagesStreamEvent::Ping => {},
 		}
 	})
 }
@@ -1050,11 +1088,70 @@ pub(super) mod types {
 	}
 }
 pub mod passthrough {
-	use crate::llm::universal::ResponseType;
-	use crate::llm::{AIError, LLMRequest, LLMResponse, universal};
+	use crate::json;
+	use crate::llm::universal::{RequestType, ResponseType};
+	use crate::llm::{
+		AIError, InputFormat, LLMRequest, LLMRequestParams, LLMResponse, SimpleChatCompletionMessage,
+		anthropic, num_tokens_from_anthropic_messages, universal,
+	};
+	use agent_core::prelude::Strng;
 	use agent_core::strng;
 	use itertools::Itertools;
 	use serde::{Deserialize, Serialize};
+
+	#[derive(Debug, Deserialize, Clone, Serialize)]
+	pub struct Request {
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub model: Option<String>,
+		pub messages: Vec<RequestMessage>,
+
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub top_p: Option<f32>,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub temperature: Option<f32>,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub stream: Option<bool>,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub max_tokens: Option<u64>,
+
+		#[serde(flatten, default)]
+		pub rest: serde_json::Value,
+	}
+
+	#[derive(Debug, Deserialize, Clone, Serialize)]
+	pub struct RequestMessage {
+		pub role: String,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub content: Option<RequestContent>,
+		#[serde(flatten, default)]
+		pub rest: serde_json::Value,
+	}
+
+	impl RequestMessage {
+		pub fn message_text(&self) -> Option<&str> {
+			self.content.as_ref().and_then(|c| match c {
+				RequestContent::Text(t) => Some(t.as_str()),
+				// TODO?
+				RequestContent::Array(_) => None,
+			})
+		}
+	}
+
+	#[derive(Debug, Deserialize, Clone, Serialize)]
+	#[serde(untagged)]
+	pub enum RequestContent {
+		Text(String),
+		Array(Vec<ContentPart>),
+	}
+
+	#[derive(Clone, Debug, Serialize, Deserialize)]
+	pub struct ContentPart {
+		pub r#type: String,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub text: Option<String>,
+		#[serde(flatten, default)]
+		pub rest: serde_json::Value,
+	}
 
 	#[derive(Debug, Deserialize, Clone, Serialize)]
 	pub struct Response {
@@ -1079,6 +1176,72 @@ pub mod passthrough {
 		pub output_tokens: u64,
 		#[serde(flatten, default)]
 		pub rest: serde_json::Value,
+	}
+
+	impl RequestType for Request {
+		fn prepend_prompts(&mut self) {
+			todo!()
+		}
+
+		fn to_llm_request(&self, provider: Strng, tokenize: bool) -> Result<LLMRequest, AIError> {
+			let model = strng::new(self.model.as_deref().unwrap_or_default());
+			let input_tokens = if tokenize {
+				let tokens = num_tokens_from_anthropic_messages(&model, &self.messages)?;
+				Some(tokens)
+			} else {
+				None
+			};
+			// Pass the original body through
+			let llm = LLMRequest {
+				input_tokens,
+				input_format: InputFormat::Messages,
+				request_model: model,
+				provider,
+				streaming: self.stream.unwrap_or_default(),
+				params: LLMRequestParams {
+					temperature: self.temperature.map(Into::into),
+					top_p: self.top_p.map(Into::into),
+					frequency_penalty: None,
+					presence_penalty: None,
+					seed: None,
+					max_tokens: self.max_tokens,
+				},
+			};
+			Ok(llm)
+		}
+
+		fn get_messages(&self) -> Vec<SimpleChatCompletionMessage> {
+			self
+				.messages
+				.iter()
+				.map(|m| {
+					let content = m
+						.content
+						.as_ref()
+						.and_then(|c| match c {
+							RequestContent::Text(t) => Some(strng::new(t)),
+							// TODO?
+							RequestContent::Array(_) => None,
+						})
+						.unwrap_or_default();
+					SimpleChatCompletionMessage {
+						role: strng::new(&m.role),
+						content,
+					}
+				})
+				.collect()
+		}
+
+		fn to_openai(&self) -> Result<Vec<u8>, AIError> {
+			let typed =
+				json::convert::<_, anthropic::MessagesRequest>(self).map_err(AIError::RequestMarshal)?;
+			let xlated = anthropic::translate_anthropic_request(typed);
+			serde_json::to_vec(&xlated).map_err(AIError::RequestMarshal)
+		}
+
+		fn to_anthropic(&self) -> Result<Vec<u8>, AIError> {
+			serde_json::to_vec(&self).map_err(AIError::RequestMarshal)
+		}
 	}
 
 	impl ResponseType for Response {
