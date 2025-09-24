@@ -12,7 +12,7 @@ use crate::llm::bedrock::types::{
 	ContentBlock, ContentBlockDelta, ConverseErrorResponse, ConverseRequest, ConverseResponse,
 	ConverseStreamOutput, StopReason,
 };
-use crate::llm::{AIError, LLMResponse, universal};
+use crate::llm::{AIError, LLMResponse, universal, LLMInfo};
 use crate::telemetry::log::AsyncLog;
 use crate::*;
 
@@ -54,7 +54,7 @@ impl Provider {
 		Ok(bedrock_request)
 	}
 
-	pub async fn process_response(
+	pub fn process_response(
 		&self,
 		model: &str,
 		bytes: &Bytes,
@@ -67,7 +67,7 @@ impl Provider {
 		translate_response(resp, model)
 	}
 
-	pub async fn process_error(
+	pub fn process_error(
 		&self,
 		bytes: &Bytes,
 	) -> Result<universal::ChatCompletionErrorResponse, AIError> {
@@ -78,7 +78,7 @@ impl Provider {
 
 	pub(super) async fn process_streaming(
 		&self,
-		log: AsyncLog<LLMResponse>,
+		log: AsyncLog<LLMInfo>,
 		resp: Response,
 		model: &str,
 	) -> Response {
@@ -344,7 +344,7 @@ pub(super) fn translate_request(req: universal::Request, provider: &Provider) ->
 
 pub(super) fn translate_stream(
 	b: Body,
-	log: AsyncLog<LLMResponse>,
+	log: AsyncLog<LLMInfo>,
 	model: String,
 	message_id: String,
 ) -> Body {
@@ -371,7 +371,7 @@ pub(super) fn translate_stream(
 				if !saw_token {
 					saw_token = true;
 					log.non_atomic_mutate(|r| {
-						r.first_token = Some(Instant::now());
+						r.response.first_token = Some(Instant::now());
 					});
 				}
 				let delta = d.delta.map(|delta| {
@@ -441,9 +441,9 @@ pub(super) fn translate_stream(
 			ConverseStreamOutput::Metadata(metadata) => {
 				if let Some(usage) = metadata.usage {
 					log.non_atomic_mutate(|r| {
-						r.output_tokens = Some(usage.output_tokens as u64);
-						r.input_tokens_from_response = Some(usage.input_tokens as u64);
-						r.total_tokens = Some(usage.total_tokens as u64);
+						r.response.output_tokens = Some(usage.output_tokens as u64);
+						r.response.input_tokens = Some(usage.input_tokens as u64);
+						r.response.total_tokens = Some(usage.total_tokens as u64);
 					});
 
 					mk(

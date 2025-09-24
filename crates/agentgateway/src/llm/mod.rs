@@ -15,7 +15,9 @@ use tiktoken_rs::tokenizer::{Tokenizer, get_tokenizer};
 use crate::http::auth::{AwsAuth, BackendAuth};
 use crate::http::jwt::Claims;
 use crate::http::{Body, Request, Response};
-use crate::llm::universal::{ChatCompletionError, ChatCompletionErrorResponse};
+use crate::llm::universal::{
+	ChatCompletionError, ChatCompletionErrorResponse, RequestType, ResponseType,
+};
 use crate::store::{BackendPolicies, LLMResponsePolicies};
 use crate::telemetry::log::{AsyncLog, RequestLog};
 use crate::types::agent::Target;
@@ -162,23 +164,32 @@ pub struct LLMRequestParams {
 }
 
 #[derive(Debug, Clone)]
-pub struct LLMResponse {
+pub struct LLMInfo {
 	pub request: LLMRequest,
-	pub input_tokens_from_response: Option<u64>,
+	pub response: LLMResponse,
+}
+
+impl LLMInfo {
+	fn new(req: LLMRequest, resp: LLMResponse) -> Self {
+		Self {
+			request: req,
+			response: resp,
+		}
+	}
+	pub fn input_tokens(&self) -> Option<u64> {
+		self.response.input_tokens.or(self.request.input_tokens)
+	}
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LLMResponse {
+	pub input_tokens: Option<u64>,
 	pub output_tokens: Option<u64>,
 	pub total_tokens: Option<u64>,
 	pub provider_model: Option<Strng>,
 	pub completion: Option<Vec<String>>,
 	// Time to get the first token. Only used for streaming.
 	pub first_token: Option<Instant>,
-}
-
-impl LLMResponse {
-	pub fn input_tokens(&self) -> Option<u64> {
-		self
-			.input_tokens_from_response
-			.or(self.request.input_tokens)
-	}
 }
 
 #[derive(Debug)]
@@ -196,6 +207,15 @@ impl AIProvider {
 			AIProvider::Gemini(_p) => gemini::Provider::NAME,
 			AIProvider::Vertex(_p) => vertex::Provider::NAME,
 			AIProvider::Bedrock(_p) => bedrock::Provider::NAME,
+		}
+	}
+	pub fn override_model(&self) -> Option<Strng> {
+		match self {
+			AIProvider::OpenAI(p) => p.model.clone(),
+			AIProvider::Anthropic(p) => p.model.clone(),
+			AIProvider::Gemini(p) => p.model.clone(),
+			AIProvider::Vertex(p) => p.model.clone(),
+			AIProvider::Bedrock(p) => p.model.clone(),
 		}
 	}
 	pub fn default_connector(&self) -> (Target, BackendPolicies) {
@@ -328,11 +348,29 @@ impl AIProvider {
 		let Ok(bytes) = axum::body::to_bytes(body, 2_097_152).await else {
 			return Err(AIError::RequestTooLarge);
 		};
-		let req: universal::Request = if let Some(p) = policies {
+		let mut req: universal::passthrough::Request = if let Some(p) = policies {
 			p.unmarshal_request(&bytes)?
 		} else {
 			serde_json::from_slice(bytes.as_ref()).map_err(AIError::RequestParsing)?
 		};
+
+		// If a user doesn't request usage, we will not get token information which we need
+		// We always set it.
+		// TODO?: this may impact the user, if they make assumptions about the stream NOT including usage.
+		// Notably, this adds a final SSE event.
+		// We could actually go remove that on the response, but it would mean we cannot do passthrough-parsing,
+		// so unless we have a compelling use case for it, for now we keep it.
+		if req.stream.unwrap_or_default() && req.stream_options.is_none() {
+			req.stream_options = Some(universal::passthrough::StreamOptions {
+				include_usage: true,
+			});
+		}
+		if let Some(provider_model) = &self.override_model() {
+			req.model = Some(provider_model.to_string());
+		} else if req.model.is_none() {
+			return Err(AIError::MissingField("model not specified".into()));
+		}
+
 		self
 			.process_request(
 				client,
@@ -354,29 +392,7 @@ impl AIProvider {
 		tokenize: bool,
 		log: &mut Option<&mut RequestLog>,
 	) -> Result<RequestResult, AIError> {
-		// Buffer the body, max 2mb
-		let (parts, body) = req.into_parts();
-		let Ok(bytes) = axum::body::to_bytes(body, 2_097_152).await else {
-			return Err(AIError::RequestTooLarge);
-		};
-		let req: anthropic::types::MessagesRequest = if let Some(p) = policies {
-			p.unmarshal_request(&bytes)?
-		} else {
-			serde_json::from_slice(bytes.as_ref()).map_err(AIError::RequestParsing)?
-		};
-
-		let universal_req = anthropic::translate_anthropic_request(req);
-		self
-			.process_request(
-				client,
-				policies,
-				InputFormat::Messages,
-				universal_req,
-				parts,
-				tokenize,
-				log,
-			)
-			.await
+		todo!()
 	}
 
 	#[allow(clippy::too_many_arguments)]
@@ -385,56 +401,39 @@ impl AIProvider {
 		client: &client::Client,
 		policies: Option<&Policy>,
 		original_format: InputFormat,
-		mut req: universal::Request,
+		mut req: impl RequestType,
 		mut parts: ::http::request::Parts,
 		tokenize: bool,
 		log: &mut Option<&mut RequestLog>,
 	) -> Result<RequestResult, AIError> {
 		if let Some(p) = policies {
-			p.apply_prompt_enrichment(&mut req);
+			// p.apply_prompt_enrichment(&mut req);
 			let http_headers = &parts.headers;
-			let claims = parts.extensions.get::<Claims>().cloned();
-			if let Some(dr) = p
-				.apply_prompt_guard(client, &mut req, http_headers, claims)
-				.await
-				.map_err(|e| {
-					warn!("failed to call prompt guard webhook: {e}");
-					AIError::PromptWebhookError
-				})? {
-				return Ok(RequestResult::Rejected(dr));
-			}
+			// 	let claims = parts.extensions.get::<Claims>().cloned();
+			// 	if let Some(dr) = p
+			// 		.apply_prompt_guard(client, &mut req, http_headers, claims)
+			// 		.await
+			// 		.map_err(|e| {
+			// 			warn!("failed to call prompt guard webhook: {e}");
+			// 			AIError::PromptWebhookError
+			// 		})? {
+			// 		return Ok(RequestResult::Rejected(dr));
+			// 	}
 		}
-		let llm_info = self.to_llm_request(&req, original_format, tokenize).await?;
+		let llm_info = req.to_llm_request(self.provider(), tokenize)?;
 		if let Some(log) = log {
 			let needs_prompt = log.cel.cel_context.with_llm_request(&llm_info);
 			if needs_prompt {
-				log
-					.cel
-					.cel_context
-					.with_llm_prompt(req.messages.iter().map(Into::into).collect_vec())
+				log.cel.cel_context.with_llm_prompt(req.get_messages())
 			}
 		}
 
-		// If a user doesn't request usage, we will not get token information which we need
-		// We always set it.
-		// TODO?: this may impact the user, if they make assumptions about the stream NOT including usage.
-		// Notably, this adds a final SSE event.
-		// We could actually go remove that on the response, but it would mean we cannot do passthrough-parsing,
-		// so unless we have a compelling use case for it, for now we keep it.
-		if req.stream.unwrap_or_default() && req.stream_options.is_none() {
-			req.stream_options = Some(universal::StreamOptions {
-				include_usage: true,
-			});
-		}
 		let new_request = match self {
-			AIProvider::OpenAI(p) => serde_json::to_vec(&p.process_request(req).await?),
-			AIProvider::Gemini(p) => serde_json::to_vec(&p.process_request(req).await?),
-			AIProvider::Vertex(p) => serde_json::to_vec(&p.process_request(req).await?),
-			AIProvider::Anthropic(p) => serde_json::to_vec(&p.process_request(req).await?),
-			AIProvider::Bedrock(p) => serde_json::to_vec(&p.process_request(req).await?),
+			AIProvider::OpenAI(_) | AIProvider::Gemini(_) | AIProvider::Vertex(_) => req.to_openai()?,
+			AIProvider::Anthropic(p) => req.to_anthropic()?,
+			AIProvider::Bedrock(p) => todo!(),
 		};
-		let body = new_request.map_err(AIError::RequestMarshal)?;
-		let resp = Body::from(body);
+		let resp = Body::from(new_request);
 		parts.headers.remove(header::CONTENT_LENGTH);
 		let req = Request::from_parts(parts, resp);
 		Ok(RequestResult::Success(req, llm_info))
@@ -445,7 +444,7 @@ impl AIProvider {
 		client: &client::Client,
 		req: LLMRequest,
 		rate_limit: LLMResponsePolicies,
-		log: AsyncLog<llm::LLMResponse>,
+		log: AsyncLog<llm::LLMInfo>,
 		include_completion_in_log: bool,
 		resp: Response,
 	) -> Result<Response, AIError> {
@@ -463,80 +462,43 @@ impl AIProvider {
 			return Err(AIError::RequestTooLarge);
 		};
 
-		// 3 cases: success, error properly handled, and unexpected error we need to synthesize
-		let openai_response = self
-			.process_response_status(&req, parts.status, &bytes)
-			.await
-			.unwrap_or_else(|err| {
-				Err(ChatCompletionErrorResponse {
-					event_id: None,
-					error: ChatCompletionError {
-						// Assume its due to the request being invalid, though we don't really know for sure
-						r#type: "invalid_request_error".to_string(),
-						message: format!(
-							"failed to process response body ({err}): {}",
-							std::str::from_utf8(&bytes).unwrap_or("invalid utf8")
-						),
-						param: None,
-						code: None,
-						event_id: None,
-					},
-				})
-			});
-
 		let input_format = req.input_format;
 
-		let (llm_resp, body) = match openai_response {
-			Ok(mut success) => {
-				let llm_resp = LLMResponse {
-					request: req,
-					input_tokens_from_response: success.usage.as_ref().map(|u| u.prompt_tokens as u64),
-					output_tokens: success.usage.as_ref().map(|u| u.completion_tokens as u64),
-					total_tokens: success.usage.as_ref().map(|u| u.total_tokens as u64),
-					provider_model: Some(strng::new(&success.model)),
-					completion: if include_completion_in_log {
-						Some(
-							success
-								.choices
-								.iter()
-								.flat_map(|c| c.message.content.clone())
-								.collect_vec(),
-						)
-					} else {
-						None
-					},
-					first_token: Default::default(),
-				};
-				// Apply response prompt guard
-				if let Some(dr) = Policy::apply_response_prompt_guard(
-					client,
-					&mut success,
-					&parts.headers,
-					&rate_limit.prompt_guard,
-				)
-				.await
-				.map_err(|e| {
-					warn!("failed to apply response prompt guard: {e}");
-					AIError::PromptWebhookError
-				})? {
-					return Ok(dr);
-				}
+		// 3 cases: success, error properly handled, and unexpected error we need to synthesize
+		let resp = self
+			.process_response_status(&req, parts.status, &bytes)
+			.unwrap_or_else(|e| Err(Self::convert_error(e, &bytes)));
 
-				let body = match input_format {
-					InputFormat::Completions => {
-						serde_json::to_vec(&success).map_err(AIError::ResponseMarshal)?
-					},
-					InputFormat::Messages => {
-						let final_response = anthropic::translate_anthropic_response(success);
-						serde_json::to_vec(&final_response).map_err(AIError::ResponseMarshal)?
-					},
-				};
-				(llm_resp, body)
-			},
+		if let Ok(resp) = &resp {
+			// Apply response prompt guard
+			// if let Some(dr) = Policy::apply_response_prompt_guard(
+			// 	client,
+			// 	&mut success,
+			// 	&parts.headers,
+			// 	&rate_limit.prompt_guard,
+			// )
+			// .await
+			// .map_err(|e| {
+			// 	warn!("failed to apply response prompt guard: {e}");
+			// 	AIError::PromptWebhookError
+			// })? {
+			// 	return Ok(dr);
+			// }
+		}
+
+		let resp = resp.and_then(|resp| {
+			let llm_resp = resp.to_llm_response(include_completion_in_log);
+			let body = resp
+				.serialize()
+				.map_err(AIError::ResponseParsing)
+				.map_err(|e| Self::convert_error(e, &bytes))?;
+			Ok((llm_resp, body))
+		});
+		let (llm_resp, body) = match resp {
+			Ok(resp) => resp,
 			Err(err) => {
 				let llm_resp = LLMResponse {
-					request: req,
-					input_tokens_from_response: None,
+					input_tokens: None,
 					output_tokens: None,
 					total_tokens: None,
 					provider_model: None,
@@ -547,6 +509,7 @@ impl AIProvider {
 				(llm_resp, body)
 			},
 		};
+
 		let body = if let Some(encoding) = encoding {
 			Body::from(
 				http::compression::encode_body(&body, encoding)
@@ -559,38 +522,56 @@ impl AIProvider {
 		parts.headers.remove(header::CONTENT_LENGTH);
 		let resp = Response::from_parts(parts, body);
 
+		let llm_info = LLMInfo::new(req, llm_resp);
 		// In the initial request, we subtracted the approximate request tokens.
 		// Now we should have the real request tokens and the response tokens
-		amend_tokens(rate_limit, &llm_resp);
-		log.store(Some(llm_resp));
+		amend_tokens(rate_limit, &llm_info);
+		log.store(Some(llm_info));
 		Ok(resp)
 	}
 
-	async fn process_response_status(
+	fn convert_error(err: AIError, bytes: &Bytes) -> ChatCompletionErrorResponse {
+		ChatCompletionErrorResponse {
+			event_id: None,
+			error: ChatCompletionError {
+				// Assume its due to the request being invalid, though we don't really know for sure
+				r#type: "invalid_request_error".to_string(),
+				message: format!(
+					"failed to process response body ({err}): {}",
+					std::str::from_utf8(&bytes).unwrap_or("invalid utf8")
+				),
+				param: None,
+				code: None,
+				event_id: None,
+			},
+		}
+	}
+
+	fn process_response_status(
 		&self,
 		req: &LLMRequest,
 		status: StatusCode,
 		bytes: &Bytes,
-	) -> Result<Result<universal::Response, ChatCompletionErrorResponse>, AIError> {
+	) -> Result<Result<Box<dyn ResponseType>, ChatCompletionErrorResponse>, AIError> {
 		if status.is_success() {
-			let openai_response = match self {
-				AIProvider::OpenAI(p) => p.process_response(bytes).await?,
-				AIProvider::Gemini(p) => p.process_response(bytes).await?,
-				AIProvider::Vertex(p) => p.process_response(bytes).await?,
-				AIProvider::Anthropic(p) => p.process_response(bytes).await?,
+			let resp = match self {
+				AIProvider::OpenAI(_) | AIProvider::Gemini(_) | AIProvider::Vertex(_) => {
+					universal::passthrough::process_response(bytes, req.input_format)?
+				},
+				AIProvider::Anthropic(p) => anthropic::process_response(bytes, req.input_format)?,
 				AIProvider::Bedrock(p) => {
-					p.process_response(req.request_model.as_str(), bytes)
-						.await?
+					todo!()
+					// Box::new(p.process_response(req.request_model.as_str(), bytes)?)
 				},
 			};
-			Ok(Ok(openai_response))
+			Ok(Ok(resp))
 		} else {
 			let openai_response = match self {
-				AIProvider::OpenAI(p) => p.process_error(bytes).await?,
-				AIProvider::Gemini(p) => p.process_error(bytes).await?,
-				AIProvider::Vertex(p) => p.process_error(bytes).await?,
-				AIProvider::Anthropic(p) => p.process_error(bytes).await?,
-				AIProvider::Bedrock(p) => p.process_error(bytes).await?,
+				AIProvider::OpenAI(p) => p.process_error(bytes)?,
+				AIProvider::Gemini(p) => p.process_error(bytes)?,
+				AIProvider::Vertex(p) => p.process_error(bytes)?,
+				AIProvider::Anthropic(p) => p.process_error(bytes)?,
+				AIProvider::Bedrock(p) => p.process_error(bytes)?,
 			};
 			Ok(Err(openai_response))
 		}
@@ -600,20 +581,15 @@ impl AIProvider {
 		&self,
 		req: LLMRequest,
 		rate_limit: LLMResponsePolicies,
-		log: AsyncLog<llm::LLMResponse>,
+		log: AsyncLog<llm::LLMInfo>,
 		include_completion_in_log: bool,
 		resp: Response,
 	) -> Result<Response, AIError> {
 		let model = req.request_model.clone();
 		// Store an empty response, as we stream in info we will parse into it
-		let llmresp = LLMResponse {
+		let llmresp = LLMInfo {
 			request: req,
-			input_tokens_from_response: Default::default(),
-			output_tokens: Default::default(),
-			total_tokens: Default::default(),
-			provider_model: Default::default(),
-			completion: Default::default(),
-			first_token: Default::default(),
+			response: LLMResponse::default(),
 		};
 		log.store(Some(llmresp));
 		let resp = match self {
@@ -630,7 +606,7 @@ impl AIProvider {
 
 	async fn default_process_streaming(
 		&self,
-		log: AsyncLog<llm::LLMResponse>,
+		log: AsyncLog<llm::LLMInfo>,
 		include_completion_in_log: bool,
 		rate_limit: LLMResponsePolicies,
 		resp: Response,
@@ -655,20 +631,20 @@ impl AIProvider {
 						if !saw_token {
 							saw_token = true;
 							log.non_atomic_mutate(|r| {
-								r.first_token = Some(Instant::now());
+								r.response.first_token = Some(Instant::now());
 							});
 						}
 						if !seen_provider {
 							seen_provider = true;
-							log.non_atomic_mutate(|r| r.provider_model = Some(strng::new(&f.model)));
+							log.non_atomic_mutate(|r| r.response.provider_model = Some(strng::new(&f.model)));
 						}
 						if let Some(u) = f.usage {
 							log.non_atomic_mutate(|r| {
-								r.input_tokens_from_response = Some(u.prompt_tokens as u64);
-								r.output_tokens = Some(u.completion_tokens as u64);
-								r.total_tokens = Some(u.total_tokens as u64);
+								r.response.input_tokens = Some(u.prompt_tokens as u64);
+								r.response.output_tokens = Some(u.completion_tokens as u64);
+								r.response.total_tokens = Some(u.total_tokens as u64);
 								if let Some(c) = completion.take() {
-									r.completion = Some(vec![c]);
+									r.response.completion = Some(vec![c]);
 								}
 
 								if let Some(rl) = rate_limit.take() {
@@ -685,7 +661,7 @@ impl AIProvider {
 						// This is useful in case we never see "usage"
 						log.non_atomic_mutate(|r| {
 							if let Some(c) = completion.take() {
-								r.completion = Some(vec![c]);
+								r.response.completion = Some(vec![c]);
 							}
 						});
 					},
@@ -693,50 +669,12 @@ impl AIProvider {
 			})
 		})
 	}
-
-	pub async fn to_llm_request(
-		&self,
-		req: &universal::Request,
-		input_format: InputFormat,
-		tokenize: bool,
-	) -> Result<LLMRequest, AIError> {
-		let input_tokens = if tokenize {
-			// TODO: avoid clone, we need it for spawn_blocking though
-			let msg = req.messages.clone();
-			let model = req.model.clone();
-			let tokens = tokio::task::spawn_blocking(move || {
-				let res = num_tokens_from_messages(&model.unwrap_or_default(), &msg)?;
-				Ok::<_, AIError>(res)
-			})
-			.await??;
-			Some(tokens)
-		} else {
-			None
-		};
-		// Pass the original body through
-		let llm = LLMRequest {
-			input_tokens,
-			input_format,
-			request_model: req.model.clone().unwrap_or_default().as_str().into(),
-			provider: self.provider(),
-			streaming: req.stream.unwrap_or_default(),
-			params: LLMRequestParams {
-				temperature: req.temperature.map(Into::into),
-				top_p: req.top_p.map(Into::into),
-				frequency_penalty: req.frequency_penalty.map(Into::into),
-				presence_penalty: req.presence_penalty.map(Into::into),
-				seed: req.seed,
-				max_tokens: universal::max_tokens_option(req),
-			},
-		};
-		Ok(llm)
-	}
 }
 
 // TODO: do we always want to spend cost of tokenizing, or just allow skipping and using the response?
 fn num_tokens_from_messages(
 	model: &str,
-	messages: &[universal::RequestMessage],
+	messages: &[universal::passthrough::RequestMessage],
 ) -> Result<u64, AIError> {
 	let tokenizer = get_tokenizer(model).unwrap_or(Tokenizer::Cl100kBase);
 	if tokenizer != Tokenizer::Cl100kBase && tokenizer != Tokenizer::O200kBase {
@@ -757,7 +695,7 @@ fn num_tokens_from_messages(
 		// 	message.role
 		// )
 		// .len() as u64;
-		if let Some(t) = universal::message_text(message) {
+		if let Some(t) = message.message_text() {
 			num_tokens += bpe
 				.encode_with_special_tokens(
 					// We filter non-text previously
@@ -765,7 +703,7 @@ fn num_tokens_from_messages(
 				)
 				.len() as u64;
 		}
-		if let Some(name) = universal::message_name(message) {
+		if let Some(name) = &message.name {
 			num_tokens += bpe.encode_with_special_tokens(name).len() as u64;
 			num_tokens += tokens_per_name;
 		}
@@ -809,6 +747,8 @@ pub enum AIError {
 	UnsupportedModel,
 	#[error("unsupported content")]
 	UnsupportedContent,
+	#[error("unsupported conversion to {0}")]
+	UnsupportedConversion(Strng),
 	#[error("request was too large")]
 	RequestTooLarge,
 	#[error("prompt guard failed")]
@@ -827,10 +767,10 @@ pub enum AIError {
 	JoinError(#[from] tokio::task::JoinError),
 }
 
-fn amend_tokens(rate_limit: store::LLMResponsePolicies, llm_resp: &LLMResponse) {
+fn amend_tokens(rate_limit: store::LLMResponsePolicies, llm_resp: &LLMInfo) {
 	let input_mismatch = match (
 		llm_resp.request.input_tokens,
-		llm_resp.input_tokens_from_response,
+		llm_resp.response.input_tokens,
 	) {
 		// Already counted 'req'
 		(Some(req), Some(resp)) => (resp as i64) - (req as i64),
@@ -839,7 +779,7 @@ fn amend_tokens(rate_limit: store::LLMResponsePolicies, llm_resp: &LLMResponse) 
 		// No request counted, so count the full response
 		(_, Some(resp)) => resp as i64,
 	};
-	let response = llm_resp.output_tokens.unwrap_or_default();
+	let response = llm_resp.response.output_tokens.unwrap_or_default();
 	let tokens_to_remove = input_mismatch + (response as i64);
 
 	for lrl in &rate_limit.local_rate_limit {
