@@ -138,10 +138,14 @@ pub(super) fn translate_response(
 	// Convert Bedrock content blocks to OpenAI message content
 	let mut tool_calls: Vec<universal::MessageToolCall> = Vec::new();
 	let mut content = None;
+	let mut reasoning_content = None;
 	for block in &message.content {
 		match block {
 			ContentBlock::Text(text) => {
 				content = Some(text.clone());
+			},
+			ContentBlock::ReasoningContent(reasoning) => {
+				reasoning_content = Some(reasoning.text.clone());
 			},
 			ContentBlock::Image { .. } => continue, // Skip images in response for now
 			ContentBlock::ToolResult(_) => {
@@ -160,7 +164,7 @@ pub(super) fn translate_response(
 						arguments: args,
 					},
 				});
-			}, // TODO: guard content, reasoning
+			},
 		};
 	}
 
@@ -177,7 +181,7 @@ pub(super) fn translate_response(
 		refusal: None,
 		audio: None,
 		extra: None,
-		reasoning_content: None,
+		reasoning_content,
 	};
 	let finish_reason = Some(translate_stop_reason(&resp.stop_reason));
 	// Only one choice for Bedrock
@@ -323,6 +327,39 @@ pub(super) fn translate_request(req: universal::Request, provider: &Provider) ->
 			.collect_vec()
 	});
 	let tool_config = tools.map(|tools| types::ToolConfiguration { tools, tool_choice });
+
+	// Handle thinking configuration similar to Anthropic
+	let thinking = if let Some(budget) = req.vendor_extensions.thinking_budget_tokens {
+		Some(serde_json::json!({
+			"thinking": {
+				"type": "enabled",
+				"budget_tokens": budget
+			}
+		}))
+	} else {
+		match &req.reasoning_effort {
+			Some(universal::ReasoningEffort::Low) => Some(serde_json::json!({
+				"thinking": {
+					"type": "enabled",
+					"budget_tokens": 1024
+				}
+			})),
+			Some(universal::ReasoningEffort::Medium) => Some(serde_json::json!({
+				"thinking": {
+					"type": "enabled",
+					"budget_tokens": 2048
+				}
+			})),
+			Some(universal::ReasoningEffort::High) => Some(serde_json::json!({
+				"thinking": {
+					"type": "enabled",
+					"budget_tokens": 4096
+				}
+			})),
+			None => None,
+		}
+	};
+
 	ConverseRequest {
 		model_id: req.model.unwrap_or_default(),
 		messages,
@@ -334,7 +371,7 @@ pub(super) fn translate_request(req: universal::Request, provider: &Provider) ->
 		inference_config: Some(inference_config),
 		tool_config,
 		guardrail_config,
-		additional_model_request_fields: None,
+		additional_model_request_fields: thinking,
 		prompt_variables: None,
 		additional_model_response_field_paths: None,
 		request_metadata: metadata,
@@ -488,6 +525,13 @@ pub(super) mod types {
 		},
 		ToolResult(ToolResultBlock),
 		ToolUse(ToolUseBlock),
+		ReasoningContent(ReasoningContentBlock),
+	}
+
+	#[derive(Clone, Deserialize, Serialize, Debug)]
+	#[serde(rename_all = "camelCase")]
+	pub struct ReasoningContentBlock {
+		pub text: String,
 	}
 	#[derive(Clone, Deserialize, Serialize, Debug)]
 	#[serde(rename_all = "camelCase")]
