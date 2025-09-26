@@ -113,9 +113,18 @@ impl Provider {
 			crate::llm::InputFormat::Messages => {
 				// NEW PATH: AWS EventStream → Anthropic SSE
 				resp.map(|body| {
-					parse::aws_sse::transform(body, move |aws_event| {
-						let event = types::ConverseStreamOutput::deserialize(aws_event).ok()?;
-						convert_bedrock_event_to_anthropic(event, &log)
+					use std::cell::RefCell;
+					// Track which block indices we've seen to synthesize content_block_start
+					let seen_blocks = RefCell::new(std::collections::HashSet::new());
+
+					parse::aws_sse::transform_multi(body, move |aws_event| {
+						match types::ConverseStreamOutput::deserialize(aws_event) {
+							Ok(event) => {
+								let mut blocks = seen_blocks.borrow_mut();
+								convert_bedrock_event_to_anthropic_with_synthesis(event, &log, &mut blocks)
+							},
+							Err(_) => Vec::new()
+						}
 					})
 				})
 			}
@@ -1042,7 +1051,66 @@ pub(super) fn translate_bedrock_error_to_anthropic(
 	})
 }
 
-/// Convert Bedrock streaming event to Anthropic SSE event
+/// Convert Bedrock streaming event to Anthropic SSE event with content_block_start synthesis
+fn convert_bedrock_event_to_anthropic_with_synthesis(
+	event: types::ConverseStreamOutput,
+	log: &AsyncLog<LLMInfo>,
+	seen_blocks: &mut std::collections::HashSet<i32>,
+) -> Vec<serde_json::Value> {
+	let mut results = Vec::new();
+
+	// Check if we need to synthesize a content_block_start
+	if let types::ConverseStreamOutput::ContentBlockDelta(ref delta) = event {
+		if !seen_blocks.contains(&delta.content_block_index) {
+			seen_blocks.insert(delta.content_block_index);
+
+			// Synthesize content_block_start based on the delta type
+			let block_type = if let Some(ref content_delta) = delta.delta {
+				match content_delta {
+					types::ContentBlockDelta::Text(_) => serde_json::json!({
+						"type": "text",
+						"text": ""
+					}),
+					types::ContentBlockDelta::ReasoningContent(_) => serde_json::json!({
+						"type": "thinking",
+						"thinking": ""
+					}),
+					types::ContentBlockDelta::ToolUse(_) => serde_json::json!({
+						"type": "tool_use",
+						"id": generate_anthropic_tool_id(),
+						"name": "unknown", // We don't have the name in delta
+						"input": {}
+					}),
+					_ => serde_json::json!({
+						"type": "text",
+						"text": ""
+					}),
+				}
+			} else {
+				serde_json::json!({
+					"type": "text",
+					"text": ""
+				})
+			};
+
+			// Add synthesized content_block_start
+			results.push(serde_json::json!({
+				"type": "content_block_start",
+				"index": delta.content_block_index,
+				"content_block": block_type
+			}));
+		}
+	}
+
+	// Now convert the actual event
+	if let Some(converted) = convert_bedrock_event_to_anthropic(event, log) {
+		results.push(converted);
+	}
+
+	results
+}
+
+/// Convert Bedrock streaming event to Anthropic SSE event (original, non-synthesizing version)
 fn convert_bedrock_event_to_anthropic(
 	event: types::ConverseStreamOutput,
 	log: &AsyncLog<LLMInfo>,
