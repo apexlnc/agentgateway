@@ -1261,6 +1261,8 @@ pub mod passthrough {
 				input_tokens: Some(self.usage.input_tokens),
 				output_tokens: Some(self.usage.output_tokens),
 				total_tokens: Some(self.usage.output_tokens + self.usage.input_tokens),
+				cache_read_input_tokens: self.usage.rest.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
+				cache_write_input_tokens: self.usage.rest.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
 				provider_model: Some(strng::new(&self.model)),
 				completion: if include_completion_in_log {
 					Some(

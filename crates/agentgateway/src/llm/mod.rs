@@ -186,6 +186,8 @@ pub struct LLMResponse {
 	pub input_tokens: Option<u64>,
 	pub output_tokens: Option<u64>,
 	pub total_tokens: Option<u64>,
+	pub cache_read_input_tokens: Option<u64>,
+	pub cache_write_input_tokens: Option<u64>,
 	pub provider_model: Option<Strng>,
 	pub completion: Option<Vec<String>>,
 	// Time to get the first token. Only used for streaming.
@@ -545,6 +547,8 @@ impl AIProvider {
 					input_tokens: None,
 					output_tokens: None,
 					total_tokens: None,
+					cache_read_input_tokens: None,
+					cache_write_input_tokens: None,
 					provider_model: None,
 					completion: None,
 					first_token: None,

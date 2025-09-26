@@ -581,8 +581,8 @@ fn map_usage_to_anthropic(bedrock_usage: Option<types::TokenUsage>) -> serde_jso
 		Some(usage) => serde_json::json!({
 			"input_tokens": usage.input_tokens,
 			"output_tokens": usage.output_tokens,
-			"cache_creation_input_tokens": null,
-			"cache_read_input_tokens": null,
+			"cache_creation_input_tokens": usage.cache_write_input_tokens,
+			"cache_read_input_tokens": usage.cache_read_input_tokens,
 			"cache_creation": null,
 			"server_tool_use": null,
 			"service_tier": null
@@ -1219,6 +1219,8 @@ fn convert_bedrock_event_to_anthropic(
 					r.response.input_tokens = Some(usage.input_tokens as u64);
 					r.response.output_tokens = Some(usage.output_tokens as u64);
 					r.response.total_tokens = Some(usage.total_tokens as u64);
+					r.response.cache_read_input_tokens = usage.cache_read_input_tokens.map(|v| v as u64);
+					r.response.cache_write_input_tokens = usage.cache_write_input_tokens.map(|v| v as u64);
 				});
 			}
 
@@ -1372,6 +1374,8 @@ pub(super) fn translate_stream(
 						r.response.output_tokens = Some(usage.output_tokens as u64);
 						r.response.input_tokens = Some(usage.input_tokens as u64);
 						r.response.total_tokens = Some(usage.total_tokens as u64);
+						r.response.cache_read_input_tokens = usage.cache_read_input_tokens.map(|v| v as u64);
+						r.response.cache_write_input_tokens = usage.cache_write_input_tokens.map(|v| v as u64);
 					});
 
 					mk(
@@ -1651,6 +1655,12 @@ pub(super) mod types {
 		/// The total number of tokens used
 		#[serde(rename = "totalTokens")]
 		pub total_tokens: usize,
+		/// The number of input tokens read from cache (optional)
+		#[serde(rename = "cacheReadInputTokens", skip_serializing_if = "Option::is_none")]
+		pub cache_read_input_tokens: Option<usize>,
+		/// The number of input tokens written to cache (optional)
+		#[serde(rename = "cacheWriteInputTokens", skip_serializing_if = "Option::is_none")]
+		pub cache_write_input_tokens: Option<usize>,
 	}
 
 	/// Metrics for the Converse call
