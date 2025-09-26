@@ -195,6 +195,10 @@ pub(super) fn translate_response(
 					},
 				});
 			},
+			ContentBlock::CachePoint(_) => {
+				// Cache points are metadata and don't contain user content - skip them
+				continue;
+			},
 		};
 	}
 
@@ -544,6 +548,7 @@ fn convert_bedrock_content_to_anthropic(block: &ContentBlock) -> Option<serde_js
 			}
 		})),
 		ContentBlock::ToolResult(_) => None, // Skip tool results in responses
+		ContentBlock::CachePoint(_) => None, // Skip cache points - they're metadata only
 	}
 }
 
@@ -596,41 +601,143 @@ fn map_stop_reason_to_anthropic(stop_reason: StopReason) -> &'static str {
 	}
 }
 
+/// Helper function to create a cache point block
+fn create_cache_point() -> types::CachePointBlock {
+	types::CachePointBlock {
+		r#type: types::CachePointType::Default,
+	}
+}
+
+/// Transform content blocks with cache_control into content + cache points
+/// Returns (transformed_content, cache_points_added)
+fn insert_cache_points_in_content(
+	content_blocks: &[crate::llm::anthropic::passthrough::ContentPart],
+	cache_points_used: &mut usize,
+) -> Result<Vec<types::ContentBlock>, AIError> {
+	let mut result = Vec::new();
+
+	for block in content_blocks {
+		let json_block = serde_json::to_value(block)
+			.map_err(|e| AIError::RequestParsing(e))?;
+
+		// Convert the content block
+		let bedrock_block = convert_anthropic_content_to_bedrock(&json_block)?;
+		result.push(bedrock_block);
+
+		// Check if this block has cache_control
+		if let Some(cache_control) = json_block.get("cache_control") {
+			if let Some(cache_type) = cache_control.get("type") {
+				if cache_type.as_str() == Some("ephemeral") && *cache_points_used < 4 {
+					// Insert cache point after this content block
+					result.push(types::ContentBlock::CachePoint(create_cache_point()));
+					*cache_points_used += 1;
+				}
+			}
+		}
+	}
+
+	Ok(result)
+}
+
+/// Transform system messages with cache_control into system content + cache points
+fn insert_cache_points_in_system(
+	messages: &[crate::llm::anthropic::passthrough::RequestMessage],
+	cache_points_used: &mut usize,
+) -> Vec<types::SystemContentBlock> {
+	let mut result = Vec::new();
+
+	for msg in messages {
+		if msg.role == "system" {
+			match &msg.content {
+				Some(crate::llm::anthropic::passthrough::RequestContent::Text(text)) => {
+					result.push(types::SystemContentBlock::Text { text: text.clone() });
+
+					// Check if this message has cache_control in rest fields
+					if let Some(cache_control) = msg.rest.get("cache_control") {
+						if let Some(cache_type) = cache_control.get("type") {
+							if cache_type.as_str() == Some("ephemeral") && *cache_points_used < 4 {
+								result.push(types::SystemContentBlock::CachePoint(create_cache_point()));
+								*cache_points_used += 1;
+							}
+						}
+					}
+				},
+				Some(crate::llm::anthropic::passthrough::RequestContent::Array(blocks)) => {
+					// Process array content blocks for cache control
+					for block in blocks {
+						if block.r#type == "text" {
+							if let Some(text) = &block.text {
+								result.push(types::SystemContentBlock::Text { text: text.clone() });
+
+								// Check for cache_control on this block
+								if let Some(cache_control) = block.rest.get("cache_control") {
+									if let Some(cache_type) = cache_control.get("type") {
+										if cache_type.as_str() == Some("ephemeral") && *cache_points_used < 4 {
+											result.push(types::SystemContentBlock::CachePoint(create_cache_point()));
+											*cache_points_used += 1;
+										}
+									}
+								}
+							}
+						}
+					}
+				},
+				None => {}
+			}
+		}
+	}
+
+	result
+}
+
+/// Transform tools with cache_control into tools + cache points
+fn insert_cache_points_in_tools(
+	tools_array: &serde_json::Value,
+	cache_points_used: &mut usize,
+) -> Vec<types::Tool> {
+	let mut result = Vec::new();
+
+	if let Some(tools) = tools_array.as_array() {
+		for tool in tools {
+			// Add the tool specification
+			if let (Some(name), input_schema) = (
+				tool.get("name").and_then(|n| n.as_str()),
+				tool.get("input_schema")
+			) {
+				let description = tool.get("description").and_then(|d| d.as_str()).map(|s| s.to_string());
+
+				result.push(types::Tool::ToolSpec(types::ToolSpecification {
+					name: name.to_string(),
+					description,
+					input_schema: input_schema.cloned().map(types::ToolInputSchema::Json),
+				}));
+
+				// Check for cache_control on this tool
+				if let Some(cache_control) = tool.get("cache_control") {
+					if let Some(cache_type) = cache_control.get("type") {
+						if cache_type.as_str() == Some("ephemeral") && *cache_points_used < 4 {
+							result.push(types::Tool::CachePoint(create_cache_point()));
+							*cache_points_used += 1;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	result
+}
+
 /// Translate Anthropic request to Bedrock ConverseRequest
 pub(super) fn translate_anthropic_to_bedrock(
 	req: &crate::llm::anthropic::passthrough::Request,
 	provider: &Provider,
 ) -> Result<ConverseRequest, AIError> {
-	// Extract system messages from the messages array and build system content
-	let system_messages: Vec<String> = req
-		.messages
-		.iter()
-		.filter_map(|msg| {
-			if msg.role == "system" {
-				match &msg.content {
-					Some(crate::llm::anthropic::passthrough::RequestContent::Text(s)) => Some(s.clone()),
-					Some(crate::llm::anthropic::passthrough::RequestContent::Array(blocks)) => {
-						// Extract text from content blocks
-						let text = blocks
-							.iter()
-							.filter_map(|block| {
-								if block.r#type == "text" {
-									block.text.as_ref().map(|s| s.clone())
-								} else {
-									None
-								}
-							})
-							.collect::<Vec<_>>()
-							.join("\n");
-						if text.is_empty() { None } else { Some(text) }
-					}
-					None => None,
-				}
-			} else {
-				None
-			}
-		})
-		.collect();
+	// Track cache points used (max 4 for Bedrock)
+	let mut cache_points_used = 0;
+
+	// Extract system messages with cache control awareness
+	let system_content = insert_cache_points_in_system(&req.messages, &mut cache_points_used);
 
 	// Convert non-system messages to Bedrock format
 	let messages: Result<Vec<types::Message>, AIError> = req
@@ -648,14 +755,7 @@ pub(super) fn translate_anthropic_to_bedrock(
 					Ok(vec![ContentBlock::Text(text.clone())])
 				},
 				Some(crate::llm::anthropic::passthrough::RequestContent::Array(blocks)) => {
-					blocks
-						.iter()
-						.map(|block| {
-							let json_block = serde_json::to_value(block)
-								.map_err(|e| AIError::RequestParsing(e))?;
-							convert_anthropic_content_to_bedrock(&json_block)
-						})
-						.collect()
+					insert_cache_points_in_content(blocks, &mut cache_points_used)
 				},
 				None => Ok(vec![]),
 			};
@@ -681,48 +781,31 @@ pub(super) fn translate_anthropic_to_bedrock(
 		anthropic_version: None, // Not used for Bedrock
 	};
 
-	// Handle tool configuration if present
+	// Handle tool configuration with cache control awareness
 	let tool_config = if let Some(tools_value) = req.rest.get("tools") {
-		if let Some(tools_array) = tools_value.as_array() {
-			let bedrock_tools: Vec<types::Tool> = tools_array
-				.iter()
-				.filter_map(|tool| {
-					let name = tool.get("name")?.as_str()?.to_string();
-					let description = tool.get("description").and_then(|d| d.as_str()).map(|s| s.to_string());
-					let input_schema = tool.get("input_schema").cloned();
+		let bedrock_tools = insert_cache_points_in_tools(tools_value, &mut cache_points_used);
 
-					Some(types::Tool::ToolSpec(types::ToolSpecification {
-						name,
-						description,
-						input_schema: input_schema.map(types::ToolInputSchema::Json),
-					}))
-				})
-				.collect();
-
-			let tool_choice = if let Some(choice_value) = req.rest.get("tool_choice") {
-				match choice_value.get("type").and_then(|t| t.as_str()) {
-					Some("auto") => Some(types::ToolChoice::Auto),
-					Some("any") => Some(types::ToolChoice::Any),
-					Some("tool") => {
-						if let Some(name) = choice_value.get("name").and_then(|n| n.as_str()) {
-							Some(types::ToolChoice::Tool { name: name.to_string() })
-						} else {
-							Some(types::ToolChoice::Auto)
-						}
-					},
-					_ => Some(types::ToolChoice::Auto),
-				}
-			} else {
-				None
-			};
-
-			Some(types::ToolConfiguration {
-				tools: bedrock_tools,
-				tool_choice,
-			})
+		let tool_choice = if let Some(choice_value) = req.rest.get("tool_choice") {
+			match choice_value.get("type").and_then(|t| t.as_str()) {
+				Some("auto") => Some(types::ToolChoice::Auto),
+				Some("any") => Some(types::ToolChoice::Any),
+				Some("tool") => {
+					if let Some(name) = choice_value.get("name").and_then(|n| n.as_str()) {
+						Some(types::ToolChoice::Tool { name: name.to_string() })
+					} else {
+						Some(types::ToolChoice::Auto)
+					}
+				},
+				_ => Some(types::ToolChoice::Auto),
+			}
 		} else {
 			None
-		}
+		};
+
+		Some(types::ToolConfiguration {
+			tools: bedrock_tools,
+			tool_choice,
+		})
 	} else {
 		None
 	};
@@ -763,12 +846,10 @@ pub(super) fn translate_anthropic_to_bedrock(
 	Ok(ConverseRequest {
 		model_id: req.model.clone().unwrap_or_default(),
 		messages,
-		system: if system_messages.is_empty() {
+		system: if system_content.is_empty() {
 			None
 		} else {
-			Some(system_messages.into_iter()
-				.map(|text| types::SystemContentBlock::Text { text })
-				.collect())
+			Some(system_content)
 		},
 		inference_config: Some(inference_config),
 		tool_config,
@@ -1151,6 +1232,7 @@ pub(super) mod types {
 		ToolResult(ToolResultBlock),
 		ToolUse(ToolUseBlock),
 		ReasoningContent(ReasoningContentBlock),
+		CachePoint(CachePointBlock),
 	}
 
 	#[derive(Clone, Deserialize, Serialize, Debug)]
@@ -1199,6 +1281,7 @@ pub(super) mod types {
 	#[serde(untagged)]
 	pub enum SystemContentBlock {
 		Text { text: String },
+		CachePoint(CachePointBlock),
 	}
 
 	#[derive(Clone, Deserialize, Serialize, Debug)]
