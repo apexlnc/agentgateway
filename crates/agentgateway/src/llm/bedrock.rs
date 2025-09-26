@@ -728,10 +728,98 @@ fn insert_cache_points_in_tools(
 	result
 }
 
+/// Extract beta headers from HTTP request headers and return them as an array
+/// Handles comma-separated and multiple header values for anthropic-beta
+fn extract_beta_headers(headers: &http::HeaderMap) -> Result<Option<Vec<serde_json::Value>>, AIError> {
+	let mut beta_features = Vec::new();
+
+	// Collect all anthropic-beta header values
+	for value in headers.get_all("anthropic-beta") {
+		let header_str = value.to_str().map_err(|_| AIError::MissingField("Invalid anthropic-beta header value".into()))?;
+
+		// Handle comma-separated values within a single header
+		for feature in header_str.split(',') {
+			let trimmed = feature.trim();
+			if !trimmed.is_empty() {
+				// Add each beta feature as a string value in the array
+				beta_features.push(serde_json::Value::String(trimmed.to_string()));
+			}
+		}
+	}
+
+	if beta_features.is_empty() {
+		Ok(None)
+	} else {
+		Ok(Some(beta_features))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use http::HeaderMap;
+
+	#[test]
+	fn test_extract_beta_headers_empty() {
+		let headers = HeaderMap::new();
+		let result = extract_beta_headers(&headers).unwrap();
+		assert!(result.is_none());
+	}
+
+	#[test]
+	fn test_extract_beta_headers_single() {
+		let mut headers = HeaderMap::new();
+		headers.insert("anthropic-beta", "prompt-caching-2024-07-31".parse().unwrap());
+		let result = extract_beta_headers(&headers).unwrap();
+		assert!(result.is_some());
+		let beta_array = result.unwrap();
+		assert_eq!(beta_array.len(), 1);
+		assert_eq!(beta_array[0], serde_json::Value::String("prompt-caching-2024-07-31".to_string()));
+	}
+
+	#[test]
+	fn test_extract_beta_headers_multiple_comma_separated() {
+		let mut headers = HeaderMap::new();
+		headers.insert("anthropic-beta", "cache-control-2024-08-15,computer-use-2024-10-22".parse().unwrap());
+		let result = extract_beta_headers(&headers).unwrap();
+		assert!(result.is_some());
+		let beta_array = result.unwrap();
+		assert_eq!(beta_array.len(), 2);
+		assert!(beta_array.contains(&serde_json::Value::String("cache-control-2024-08-15".to_string())));
+		assert!(beta_array.contains(&serde_json::Value::String("computer-use-2024-10-22".to_string())));
+	}
+
+	#[test]
+	fn test_extract_beta_headers_multiple_headers() {
+		let mut headers = HeaderMap::new();
+		headers.append("anthropic-beta", "cache-control-2024-08-15".parse().unwrap());
+		headers.append("anthropic-beta", "computer-use-2024-10-22".parse().unwrap());
+		let result = extract_beta_headers(&headers).unwrap();
+		assert!(result.is_some());
+		let beta_array = result.unwrap();
+		assert_eq!(beta_array.len(), 2);
+		assert!(beta_array.contains(&serde_json::Value::String("cache-control-2024-08-15".to_string())));
+		assert!(beta_array.contains(&serde_json::Value::String("computer-use-2024-10-22".to_string())));
+	}
+
+	#[test]
+	fn test_extract_beta_headers_with_spaces() {
+		let mut headers = HeaderMap::new();
+		headers.insert("anthropic-beta", " cache-control-2024-08-15 , computer-use-2024-10-22 ".parse().unwrap());
+		let result = extract_beta_headers(&headers).unwrap();
+		assert!(result.is_some());
+		let beta_array = result.unwrap();
+		assert_eq!(beta_array.len(), 2);
+		assert!(beta_array.contains(&serde_json::Value::String("cache-control-2024-08-15".to_string())));
+		assert!(beta_array.contains(&serde_json::Value::String("computer-use-2024-10-22".to_string())));
+	}
+}
+
 /// Translate Anthropic request to Bedrock ConverseRequest
 pub(super) fn translate_anthropic_to_bedrock(
 	req: &crate::llm::anthropic::passthrough::Request,
 	provider: &Provider,
+	headers: Option<&http::HeaderMap>,
 ) -> Result<ConverseRequest, AIError> {
 	// Track cache points used (max 4 for Bedrock)
 	let mut cache_points_used = 0;
@@ -811,7 +899,7 @@ pub(super) fn translate_anthropic_to_bedrock(
 	};
 
 	// Handle thinking/reasoning configuration
-	let thinking = if let Some(budget) = req.rest.get("thinking_budget_tokens").and_then(|v| v.as_u64()) {
+	let mut additional_fields = if let Some(budget) = req.rest.get("thinking_budget_tokens").and_then(|v| v.as_u64()) {
 		Some(serde_json::json!({
 			"thinking": {
 				"type": "enabled",
@@ -820,6 +908,27 @@ pub(super) fn translate_anthropic_to_bedrock(
 		}))
 	} else {
 		None
+	};
+
+	// Extract and handle beta headers
+	if let Some(headers) = headers {
+		if let Some(beta_array) = extract_beta_headers(headers)? {
+			// Add beta headers under the "anthropic_beta" key
+			match additional_fields {
+				Some(ref mut fields) => {
+					// Add anthropic_beta array to existing fields
+					if let Some(existing_obj) = fields.as_object_mut() {
+						existing_obj.insert("anthropic_beta".to_string(), serde_json::Value::Array(beta_array));
+					}
+				},
+				None => {
+					// Create new additionalModelRequestFields with anthropic_beta
+					let mut fields = serde_json::Map::new();
+					fields.insert("anthropic_beta".to_string(), serde_json::Value::Array(beta_array));
+					additional_fields = Some(serde_json::Value::Object(fields));
+				}
+			}
+		}
 	};
 
 	// Build guardrail configuration if provider has it configured
@@ -854,7 +963,7 @@ pub(super) fn translate_anthropic_to_bedrock(
 		inference_config: Some(inference_config),
 		tool_config,
 		guardrail_config,
-		additional_model_request_fields: thinking,
+		additional_model_request_fields: additional_fields,
 		prompt_variables: None,
 		additional_model_response_field_paths: None,
 		request_metadata: metadata,

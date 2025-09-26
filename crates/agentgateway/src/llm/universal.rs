@@ -48,6 +48,9 @@ pub trait RequestType {
 	fn to_llm_request(&self, provider: Strng, tokenize: bool) -> Result<LLMRequest, AIError>;
 	fn get_messages(&self) -> Vec<llm::SimpleChatCompletionMessage>;
 
+	/// Support dynamic casting for accessing underlying types
+	fn as_any(&self) -> &dyn std::any::Any;
+
 	fn to_openai(&self) -> Result<Vec<u8>, AIError> {
 		Err(AIError::UnsupportedConversion(strng::literal!("openai")))
 	}
@@ -202,6 +205,10 @@ pub mod passthrough {
 	impl super::RequestType for Request {
 		fn prepend_prompts(&mut self) {
 			todo!()
+		}
+
+		fn as_any(&self) -> &dyn std::any::Any {
+			self
 		}
 
 		fn to_anthropic(&self) -> Result<Vec<u8>, AIError> {

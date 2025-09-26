@@ -458,7 +458,24 @@ impl AIProvider {
 		let new_request = match self {
 			AIProvider::OpenAI(_) | AIProvider::Gemini(_) | AIProvider::Vertex(_) => req.to_openai()?,
 			AIProvider::Anthropic(p) => req.to_anthropic()?,
-			AIProvider::Bedrock(p) => req.to_bedrock(p)?,
+			AIProvider::Bedrock(p) => {
+				// For Bedrock, we need to pass headers for beta feature processing
+				match original_format {
+					InputFormat::Messages => {
+						// This is an Anthropic passthrough request - handle beta headers
+						let anthropic_req = req.as_any()
+							.downcast_ref::<crate::llm::anthropic::passthrough::Request>()
+							.ok_or_else(|| AIError::UnsupportedConversion("Expected Anthropic request".into()))?;
+						let bedrock_request = crate::llm::bedrock::translate_anthropic_to_bedrock(
+							anthropic_req,
+							p,
+							Some(&parts.headers)
+						)?;
+						serde_json::to_vec(&bedrock_request).map_err(AIError::RequestMarshal)?
+					},
+					_ => req.to_bedrock(p)?,
+				}
+			},
 		};
 		let resp = Body::from(new_request);
 		parts.headers.remove(header::CONTENT_LENGTH);

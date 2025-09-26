@@ -1183,6 +1183,10 @@ pub mod passthrough {
 			todo!()
 		}
 
+		fn as_any(&self) -> &dyn std::any::Any {
+			self
+		}
+
 		fn to_llm_request(&self, provider: Strng, tokenize: bool) -> Result<LLMRequest, AIError> {
 			let model = strng::new(self.model.as_deref().unwrap_or_default());
 			let input_tokens = if tokenize {
@@ -1245,7 +1249,8 @@ pub mod passthrough {
 
 		fn to_bedrock(&self, provider: &crate::llm::bedrock::Provider) -> Result<Vec<u8>, AIError> {
 			// Convert Anthropic request to Bedrock request
-			let bedrock_request = crate::llm::bedrock::translate_anthropic_to_bedrock(self, provider)?;
+			// Note: Headers are not available at this level, they're handled in the upper layer
+			let bedrock_request = crate::llm::bedrock::translate_anthropic_to_bedrock(self, provider, None)?;
 			serde_json::to_vec(&bedrock_request).map_err(AIError::RequestMarshal)
 		}
 	}
