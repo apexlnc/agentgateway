@@ -1171,6 +1171,14 @@ fn determine_content_block_type(start: &types::ContentBlockStartEvent) -> serde_
 				"name": tool_start.name,
 				"input": {}
 			}),
+			types::ContentBlockStart::ReasoningContent => serde_json::json!({
+				"type": "thinking",
+				"thinking": ""
+			}),
+			types::ContentBlockStart::Text => serde_json::json!({
+				"type": "text",
+				"text": ""
+			}),
 		}
 	} else {
 		// Default to text content block
@@ -1788,6 +1796,12 @@ pub(super) mod types {
 		/// Information about a tool that the model is requesting to use.
 		#[allow(dead_code)]
 		ToolUse(ToolUseBlockStart),
+		/// Reasoning/thinking content block start
+		#[allow(dead_code)]
+		ReasoningContent,
+		/// Text content block start
+		#[allow(dead_code)]
+		Text,
 	}
 
 	#[derive(Clone, Debug, Deserialize)]
