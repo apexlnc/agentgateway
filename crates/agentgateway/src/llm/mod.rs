@@ -615,6 +615,7 @@ impl AIProvider {
 		let input_format = req.input_format;
 		// Store an empty response, as we stream in info we will parse into it
 		let llmresp = llm::LLMInfo {
+		let llmresp = LLMResponse {
 			request: req,
 			response: LLMResponse::default(),
 		};
