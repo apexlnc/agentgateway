@@ -882,10 +882,7 @@ fn convert_bedrock_event_to_anthropic(
 			Some(serde_json::json!({
 				"type": "content_block_start",
 				"index": start.content_block_index,
-				"content_block": {
-					"type": "text", // Default to text, could be enhanced to detect tool use
-					"text": ""
-				}
+				"content_block": determine_content_block_type(&start)
 			}))
 		}
 		types::ConverseStreamOutput::ContentBlockDelta(delta) => {
@@ -899,16 +896,35 @@ fn convert_bedrock_event_to_anthropic(
 							"text": text
 						}
 					})),
-					types::ContentBlockDelta::ReasoningContent(
-						types::ReasoningContentBlockDelta::Text(thinking)
-					) => Some(serde_json::json!({
-						"type": "content_block_delta",
-						"index": delta.content_block_index,
-						"delta": {
-							"type": "thinking_delta",
-							"thinking": thinking
+					types::ContentBlockDelta::ReasoningContent(reasoning_delta) => {
+						match reasoning_delta {
+							types::ReasoningContentBlockDelta::Text(thinking) => Some(serde_json::json!({
+								"type": "content_block_delta",
+								"index": delta.content_block_index,
+								"delta": {
+									"type": "thinking_delta",
+									"thinking": thinking
+								}
+							})),
+							types::ReasoningContentBlockDelta::RedactedContent(_) => Some(serde_json::json!({
+								"type": "content_block_delta",
+								"index": delta.content_block_index,
+								"delta": {
+									"type": "thinking_delta",
+									"thinking": "[REDACTED]"
+								}
+							})),
+							types::ReasoningContentBlockDelta::Signature(signature) => Some(serde_json::json!({
+								"type": "content_block_delta",
+								"index": delta.content_block_index,
+								"delta": {
+									"type": "signature_delta",
+									"signature": signature
+								}
+							})),
+							types::ReasoningContentBlockDelta::Unknown => None,
 						}
-					})),
+					},
 					types::ContentBlockDelta::ToolUse(tool_delta) => Some(serde_json::json!({
 						"type": "content_block_delta",
 						"index": delta.content_block_index,
@@ -1010,16 +1026,29 @@ pub(super) fn translate_stream(
 				let delta = d.delta.map(|delta| {
 					let mut dr = universal::StreamResponseDelta::default();
 					match delta {
-						ContentBlockDelta::ReasoningContent(types::ReasoningContentBlockDelta::Text(t)) => {
-							dr.reasoning_content = Some(t);
+						ContentBlockDelta::ReasoningContent(reasoning_delta) => {
+							match reasoning_delta {
+								types::ReasoningContentBlockDelta::Text(t) => {
+									dr.reasoning_content = Some(t);
+								},
+								types::ReasoningContentBlockDelta::RedactedContent(_) => {
+									// Redacted content - include a placeholder
+									dr.reasoning_content = Some("[REDACTED]".to_string());
+								},
+								types::ReasoningContentBlockDelta::Signature(_) => {
+									// Signature content - skip as it's cryptographic verification
+								},
+								types::ReasoningContentBlockDelta::Unknown => {
+									// Unknown reasoning content type - skip
+								},
+							}
 						},
-						// TODO
-						ContentBlockDelta::ReasoningContent(_) => {},
 						ContentBlockDelta::Text(t) => {
 							dr.content = Some(t);
 						},
-						// TODO
-						ContentBlockDelta::ToolUse(_) => {},
+						ContentBlockDelta::ToolUse(_tool_delta) => {
+							// TODO: Implement tool use delta for universal format when needed
+						},
 					};
 					dr
 				});
@@ -1036,7 +1065,7 @@ pub(super) fn translate_stream(
 				}
 			},
 			ConverseStreamOutput::ContentBlockStart(_) => {
-				// TODO support tool calls
+				// TODO: Implement tool call support for universal format when needed
 				None
 			},
 			ConverseStreamOutput::ContentBlockStop(_) => {
