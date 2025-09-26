@@ -413,7 +413,7 @@ impl AIProvider {
 			.process_request(
 				client,
 				policies,
-				InputFormat::Completions,
+				InputFormat::Messages,
 				req,
 				parts,
 				tokenize,
@@ -458,7 +458,7 @@ impl AIProvider {
 		let new_request = match self {
 			AIProvider::OpenAI(_) | AIProvider::Gemini(_) | AIProvider::Vertex(_) => req.to_openai()?,
 			AIProvider::Anthropic(p) => req.to_anthropic()?,
-			AIProvider::Bedrock(p) => todo!(),
+			AIProvider::Bedrock(p) => req.to_bedrock(p)?,
 		};
 		let resp = Body::from(new_request);
 		parts.headers.remove(header::CONTENT_LENGTH);
@@ -587,8 +587,7 @@ impl AIProvider {
 				},
 				AIProvider::Anthropic(p) => anthropic::process_response(bytes, req.input_format)?,
 				AIProvider::Bedrock(p) => {
-					todo!()
-					// Box::new(p.process_response(req.request_model.as_str(), bytes)?)
+					p.process_response(req.request_model.as_str(), bytes, req.input_format)?
 				},
 			};
 			Ok(Ok(resp))
@@ -622,7 +621,7 @@ impl AIProvider {
 		log.store(Some(llmresp));
 		let resp = match self {
 			AIProvider::Anthropic(p) => p.process_streaming(log, resp, input_format).await,
-			AIProvider::Bedrock(p) => p.process_streaming(log, resp, model.as_str()).await,
+			AIProvider::Bedrock(p) => p.process_streaming(log, resp, model.as_str(), input_format).await,
 			_ => {
 				self
 					.default_process_streaming(log, include_completion_in_log, rate_limit, resp)

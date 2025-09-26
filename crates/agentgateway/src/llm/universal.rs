@@ -55,6 +55,10 @@ pub trait RequestType {
 	fn to_anthropic(&self) -> Result<Vec<u8>, AIError> {
 		Err(AIError::UnsupportedConversion(strng::literal!("anthropic")))
 	}
+
+	fn to_bedrock(&self, provider: &crate::llm::bedrock::Provider) -> Result<Vec<u8>, AIError> {
+		Err(AIError::UnsupportedConversion(strng::literal!("bedrock")))
+	}
 }
 
 pub mod passthrough {
@@ -208,6 +212,12 @@ pub mod passthrough {
 
 		fn to_openai(&self) -> Result<Vec<u8>, AIError> {
 			serde_json::to_vec(&self).map_err(AIError::RequestMarshal)
+		}
+
+		fn to_bedrock(&self, provider: &crate::llm::bedrock::Provider) -> Result<Vec<u8>, AIError> {
+			let typed = json::convert::<_, universal::Request>(self).map_err(AIError::RequestMarshal)?;
+			let bedrock_request = crate::llm::bedrock::translate_request(typed, provider);
+			serde_json::to_vec(&bedrock_request).map_err(AIError::RequestMarshal)
 		}
 
 		fn to_llm_request(&self, provider: Strng, tokenize: bool) -> Result<LLMRequest, AIError> {

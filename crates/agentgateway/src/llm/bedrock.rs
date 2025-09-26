@@ -58,13 +58,26 @@ impl Provider {
 		&self,
 		model: &str,
 		bytes: &Bytes,
-	) -> Result<universal::Response, AIError> {
+		input_format: crate::llm::InputFormat,
+	) -> Result<Box<dyn crate::llm::ResponseType>, AIError> {
 		let model = self.model.as_deref().unwrap_or(model);
 		let resp =
 			serde_json::from_slice::<ConverseResponse>(bytes).map_err(AIError::ResponseParsing)?;
 
-		// Bedrock response doesn't contain the model, so we pass through the model from the request into the response
-		translate_response(resp, model)
+		match input_format {
+			crate::llm::InputFormat::Completions => {
+				// EXISTING PATH: Bedrock → Universal OpenAI format
+				let openai_resp = translate_response(resp, model)?;
+				let passthrough = crate::json::convert::<_, universal::passthrough::Response>(&openai_resp)
+					.map_err(AIError::ResponseParsing)?;
+				Ok(Box::new(passthrough))
+			}
+			crate::llm::InputFormat::Messages => {
+				// NEW PATH: Bedrock → Anthropic Messages format
+				let anthropic_resp = translate_to_anthropic(resp, model)?;
+				Ok(Box::new(anthropic_resp))
+			}
+		}
 	}
 
 	pub fn process_error(
@@ -76,11 +89,13 @@ impl Provider {
 		translate_error(resp)
 	}
 
+
 	pub(super) async fn process_streaming(
 		&self,
 		log: AsyncLog<LLMInfo>,
 		resp: Response,
 		model: &str,
+		input_format: crate::llm::InputFormat,
 	) -> Response {
 		let model = self.model.as_deref().unwrap_or(model).to_string();
 		// Bedrock doesn't return an ID, so get one from the request... if we can
@@ -89,7 +104,22 @@ impl Provider {
 			.get(http::x_headers::X_AMZN_REQUESTID)
 			.and_then(|s| s.to_str().ok().map(|s| s.to_owned()))
 			.unwrap_or_else(|| format!("{:016x}", rand::rng().random::<u64>()));
-		resp.map(|b| translate_stream(b, log, model, message_id))
+
+		match input_format {
+			crate::llm::InputFormat::Completions => {
+				// EXISTING PATH: AWS EventStream → Universal SSE
+				resp.map(|b| translate_stream(b, log, model, message_id))
+			}
+			crate::llm::InputFormat::Messages => {
+				// NEW PATH: AWS EventStream → Anthropic SSE
+				resp.map(|body| {
+					parse::aws_sse::transform(body, move |aws_event| {
+						let event = types::ConverseStreamOutput::deserialize(aws_event).ok()?;
+						convert_bedrock_event_to_anthropic(event, &log)
+					})
+				})
+			}
+		}
 	}
 
 	pub fn get_path_for_model(&self, streaming: bool, model: &str) -> Strng {
@@ -376,6 +406,572 @@ pub(super) fn translate_request(req: universal::Request, provider: &Provider) ->
 		additional_model_response_field_paths: None,
 		request_metadata: metadata,
 		performance_config: None,
+	}
+}
+
+// ================================================================================================
+// CONTENT BLOCK CONVERSION FUNCTIONS FOR ANTHROPIC PASSTHROUGH
+// ================================================================================================
+
+/// Convert Anthropic content block to Bedrock content block (for requests)
+fn convert_anthropic_content_to_bedrock(
+	content: &serde_json::Value,
+) -> Result<ContentBlock, AIError> {
+	let content_type = content
+		.get("type")
+		.and_then(|t| t.as_str())
+		.ok_or_else(|| AIError::MissingField("content block type".into()))?;
+
+	match content_type {
+		"text" => {
+			let text = content
+				.get("text")
+				.and_then(|t| t.as_str())
+				.ok_or_else(|| AIError::MissingField("text content".into()))?;
+			Ok(ContentBlock::Text(text.to_string()))
+		},
+		"image" => {
+			let source = content
+				.get("source")
+				.ok_or_else(|| AIError::MissingField("image source".into()))?;
+
+			let source_type = source
+				.get("type")
+				.and_then(|t| t.as_str())
+				.unwrap_or("base64");
+
+			let media_type = source
+				.get("media_type")
+				.and_then(|t| t.as_str())
+				.ok_or_else(|| AIError::MissingField("image media_type".into()))?;
+
+			let data = source
+				.get("data")
+				.and_then(|d| d.as_str())
+				.ok_or_else(|| AIError::MissingField("image data".into()))?;
+
+			Ok(ContentBlock::Image {
+				source: source_type.to_string(),
+				media_type: media_type.to_string(),
+				data: data.to_string(),
+			})
+		},
+		"tool_use" => {
+			let id = content
+				.get("id")
+				.and_then(|i| i.as_str())
+				.ok_or_else(|| AIError::MissingField("tool_use id".into()))?;
+
+			let name = content
+				.get("name")
+				.and_then(|n| n.as_str())
+				.ok_or_else(|| AIError::MissingField("tool_use name".into()))?;
+
+			let input = content
+				.get("input")
+				.cloned()
+				.unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+			Ok(ContentBlock::ToolUse(types::ToolUseBlock {
+				tool_use_id: id.to_string(),
+				name: name.to_string(),
+				input,
+			}))
+		},
+		"tool_result" => {
+			let tool_use_id = content
+				.get("tool_use_id")
+				.and_then(|i| i.as_str())
+				.ok_or_else(|| AIError::MissingField("tool_result tool_use_id".into()))?;
+
+			let content_value = content
+				.get("content")
+				.and_then(|c| c.as_str())
+				.unwrap_or("");
+
+			let is_error = content
+				.get("is_error")
+				.and_then(|e| e.as_bool())
+				.unwrap_or(false);
+
+			Ok(ContentBlock::ToolResult(types::ToolResultBlock {
+				tool_use_id: tool_use_id.to_string(),
+				content: vec![types::ToolResultContentBlock::Text(content_value.to_string())],
+				status: if is_error {
+					Some(types::ToolResultStatus::Error)
+				} else {
+					Some(types::ToolResultStatus::Success)
+				},
+			}))
+		},
+		"thinking" => {
+			let thinking = content
+				.get("thinking")
+				.and_then(|t| t.as_str())
+				.ok_or_else(|| AIError::MissingField("thinking content".into()))?;
+
+			Ok(ContentBlock::ReasoningContent(types::ReasoningContentBlock {
+				text: thinking.to_string(),
+			}))
+		},
+		_ => Err(AIError::UnsupportedContent),
+	}
+}
+
+/// Convert Bedrock content block to Anthropic content block (for responses)
+fn convert_bedrock_content_to_anthropic(block: &ContentBlock) -> Option<serde_json::Value> {
+	match block {
+		ContentBlock::Text(text) => Some(serde_json::json!({
+			"type": "text",
+			"text": text
+		})),
+		ContentBlock::ReasoningContent(reasoning) => Some(serde_json::json!({
+			"type": "thinking",
+			"thinking": reasoning.text
+		})),
+		ContentBlock::ToolUse(tool_use) => Some(serde_json::json!({
+			"type": "tool_use",
+			"id": tool_use.tool_use_id,
+			"name": tool_use.name,
+			"input": tool_use.input
+		})),
+		ContentBlock::Image { source, media_type, data } => Some(serde_json::json!({
+			"type": "image",
+			"source": {
+				"type": if source == "base64" || data.starts_with("data:") { "base64" } else { "url" },
+				"media_type": media_type,
+				"data": data
+			}
+		})),
+		ContentBlock::ToolResult(_) => None, // Skip tool results in responses
+	}
+}
+
+/// Generate Anthropic-style message ID
+fn generate_anthropic_message_id() -> String {
+	let timestamp = chrono::Utc::now().timestamp_millis();
+	let random: u32 = rand::random();
+	format!("msg_{:x}{:08x}", timestamp, random)
+}
+
+/// Generate Anthropic-style tool use ID
+fn generate_anthropic_tool_id() -> String {
+	let timestamp = chrono::Utc::now().timestamp_millis();
+	let random: u32 = rand::random();
+	format!("toolu_{:x}{:08x}", timestamp, random)
+}
+
+/// Map Bedrock usage to Anthropic usage format
+fn map_usage_to_anthropic(bedrock_usage: Option<types::TokenUsage>) -> serde_json::Value {
+	match bedrock_usage {
+		Some(usage) => serde_json::json!({
+			"input_tokens": usage.input_tokens,
+			"output_tokens": usage.output_tokens,
+			"cache_creation_input_tokens": null,
+			"cache_read_input_tokens": null,
+			"cache_creation": null,
+			"server_tool_use": null,
+			"service_tier": null
+		}),
+		None => serde_json::json!({
+			"input_tokens": 0,
+			"output_tokens": 0,
+			"cache_creation_input_tokens": null,
+			"cache_read_input_tokens": null,
+			"cache_creation": null,
+			"server_tool_use": null,
+			"service_tier": null
+		})
+	}
+}
+
+/// Map Bedrock stop reason to Anthropic stop reason
+fn map_stop_reason_to_anthropic(stop_reason: StopReason) -> &'static str {
+	match stop_reason {
+		StopReason::EndTurn => "end_turn",
+		StopReason::MaxTokens => "max_tokens",
+		StopReason::StopSequence => "stop_sequence",
+		StopReason::ToolUse => "tool_use",
+		StopReason::ContentFiltered | StopReason::GuardrailIntervened => "refusal",
+	}
+}
+
+/// Translate Anthropic request to Bedrock ConverseRequest
+pub(super) fn translate_anthropic_to_bedrock(
+	req: &crate::llm::anthropic::passthrough::Request,
+	provider: &Provider,
+) -> Result<ConverseRequest, AIError> {
+	// Extract system messages from the messages array and build system content
+	let system_messages: Vec<String> = req
+		.messages
+		.iter()
+		.filter_map(|msg| {
+			if msg.role == "system" {
+				match &msg.content {
+					Some(crate::llm::anthropic::passthrough::RequestContent::Text(s)) => Some(s.clone()),
+					Some(crate::llm::anthropic::passthrough::RequestContent::Array(blocks)) => {
+						// Extract text from content blocks
+						let text = blocks
+							.iter()
+							.filter_map(|block| {
+								if block.r#type == "text" {
+									block.text.as_ref().map(|s| s.clone())
+								} else {
+									None
+								}
+							})
+							.collect::<Vec<_>>()
+							.join("\n");
+						if text.is_empty() { None } else { Some(text) }
+					}
+					None => None,
+				}
+			} else {
+				None
+			}
+		})
+		.collect();
+
+	// Convert non-system messages to Bedrock format
+	let messages: Result<Vec<types::Message>, AIError> = req
+		.messages
+		.iter()
+		.filter(|msg| msg.role != "system") // Skip system messages
+		.map(|msg| {
+			let role = match msg.role.as_str() {
+				"assistant" => types::Role::Assistant,
+				"user" | _ => types::Role::User, // Default to user
+			};
+
+			let content_blocks: Result<Vec<ContentBlock>, AIError> = match &msg.content {
+				Some(crate::llm::anthropic::passthrough::RequestContent::Text(text)) => {
+					Ok(vec![ContentBlock::Text(text.clone())])
+				},
+				Some(crate::llm::anthropic::passthrough::RequestContent::Array(blocks)) => {
+					blocks
+						.iter()
+						.map(|block| {
+							let json_block = serde_json::to_value(block)
+								.map_err(|e| AIError::RequestParsing(e))?;
+							convert_anthropic_content_to_bedrock(&json_block)
+						})
+						.collect()
+				},
+				None => Ok(vec![]),
+			};
+
+			Ok(types::Message {
+				role,
+				content: content_blocks?,
+			})
+		})
+		.collect();
+
+	let messages = messages?;
+
+	// Build inference configuration from Anthropic request parameters
+	let inference_config = types::InferenceConfiguration {
+		max_tokens: req.max_tokens.unwrap_or(1000) as usize,
+		temperature: req.temperature,
+		top_p: req.top_p,
+		stop_sequences: req.rest.get("stop_sequences")
+			.and_then(|v| v.as_array())
+			.map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+			.unwrap_or_default(),
+		anthropic_version: None, // Not used for Bedrock
+	};
+
+	// Handle tool configuration if present
+	let tool_config = if let Some(tools_value) = req.rest.get("tools") {
+		if let Some(tools_array) = tools_value.as_array() {
+			let bedrock_tools: Vec<types::Tool> = tools_array
+				.iter()
+				.filter_map(|tool| {
+					let name = tool.get("name")?.as_str()?.to_string();
+					let description = tool.get("description").and_then(|d| d.as_str()).map(|s| s.to_string());
+					let input_schema = tool.get("input_schema").cloned();
+
+					Some(types::Tool::ToolSpec(types::ToolSpecification {
+						name,
+						description,
+						input_schema: input_schema.map(types::ToolInputSchema::Json),
+					}))
+				})
+				.collect();
+
+			let tool_choice = if let Some(choice_value) = req.rest.get("tool_choice") {
+				match choice_value.get("type").and_then(|t| t.as_str()) {
+					Some("auto") => Some(types::ToolChoice::Auto),
+					Some("any") => Some(types::ToolChoice::Any),
+					Some("tool") => {
+						if let Some(name) = choice_value.get("name").and_then(|n| n.as_str()) {
+							Some(types::ToolChoice::Tool { name: name.to_string() })
+						} else {
+							Some(types::ToolChoice::Auto)
+						}
+					},
+					_ => Some(types::ToolChoice::Auto),
+				}
+			} else {
+				None
+			};
+
+			Some(types::ToolConfiguration {
+				tools: bedrock_tools,
+				tool_choice,
+			})
+		} else {
+			None
+		}
+	} else {
+		None
+	};
+
+	// Handle thinking/reasoning configuration
+	let thinking = if let Some(budget) = req.rest.get("thinking_budget_tokens").and_then(|v| v.as_u64()) {
+		Some(serde_json::json!({
+			"thinking": {
+				"type": "enabled",
+				"budget_tokens": budget
+			}
+		}))
+	} else {
+		None
+	};
+
+	// Build guardrail configuration if provider has it configured
+	let guardrail_config = if let (Some(identifier), Some(version)) =
+		(&provider.guardrail_identifier, &provider.guardrail_version)
+	{
+		Some(types::GuardrailConfiguration {
+			guardrail_identifier: identifier.to_string(),
+			guardrail_version: version.to_string(),
+			trace: Some("enabled".to_string()),
+		})
+	} else {
+		None
+	};
+
+	// Convert metadata if present
+	let metadata = req.rest.get("metadata")
+		.and_then(|m| m.get("user_id"))
+		.and_then(|user_id| user_id.as_str())
+		.map(|user_id| {
+			std::collections::HashMap::from([("user_id".to_string(), user_id.to_string())])
+		});
+
+	Ok(ConverseRequest {
+		model_id: req.model.clone().unwrap_or_default(),
+		messages,
+		system: if system_messages.is_empty() {
+			None
+		} else {
+			Some(system_messages.into_iter()
+				.map(|text| types::SystemContentBlock::Text { text })
+				.collect())
+		},
+		inference_config: Some(inference_config),
+		tool_config,
+		guardrail_config,
+		additional_model_request_fields: thinking,
+		prompt_variables: None,
+		additional_model_response_field_paths: None,
+		request_metadata: metadata,
+		performance_config: None,
+	})
+}
+
+/// Translate Bedrock ConverseResponse to Anthropic Messages response format
+pub(super) fn translate_to_anthropic(
+	bedrock_resp: ConverseResponse,
+	model: &str,
+) -> Result<crate::llm::anthropic::passthrough::Response, AIError> {
+	// Extract the message from the response
+	let output_msg = match bedrock_resp.output {
+		Some(types::ConverseOutput::Message(m)) => m,
+		Some(types::ConverseOutput::Unknown) => return Err(AIError::IncompleteResponse),
+		None => return Err(AIError::IncompleteResponse),
+	};
+
+	// Convert content blocks to Anthropic format
+	let content_blocks: Vec<serde_json::Value> = output_msg
+		.content
+		.iter()
+		.filter_map(|block| convert_bedrock_content_to_anthropic(block))
+		.collect();
+
+	// Map stop reason to Anthropic format
+	let stop_reason = map_stop_reason_to_anthropic(bedrock_resp.stop_reason);
+
+	// Generate Anthropic-style message ID
+	let id = generate_anthropic_message_id();
+
+	// Map usage information
+	let usage = map_usage_to_anthropic(bedrock_resp.usage);
+
+	// Build the complete Anthropic response
+	let anthropic_response = serde_json::json!({
+		"id": id,
+		"type": "message",
+		"role": "assistant",
+		"content": content_blocks,
+		"model": model,
+		"stop_reason": stop_reason,
+		"stop_sequence": null, // Bedrock doesn't provide the matched sequence
+		"usage": usage,
+		"container": null
+	});
+
+	// Convert to anthropic::passthrough::Response
+	serde_json::from_value::<crate::llm::anthropic::passthrough::Response>(anthropic_response)
+		.map_err(AIError::ResponseParsing)
+}
+
+/// Translate Bedrock error to Anthropic error format
+pub(super) fn translate_bedrock_error_to_anthropic(
+	error_msg: &str,
+) -> crate::llm::anthropic::passthrough::Response {
+	let error_response = serde_json::json!({
+		"type": "error",
+		"error": {
+			"type": "invalid_request_error",
+			"message": error_msg
+		}
+	});
+
+	// This should always succeed since we're creating a valid structure
+	serde_json::from_value(error_response).unwrap_or_else(|_| {
+		// Fallback in case of serialization issues
+		serde_json::from_value(serde_json::json!({
+			"type": "error",
+			"error": {
+				"type": "api_error",
+				"message": "Internal error during response translation"
+			}
+		})).unwrap()
+	})
+}
+
+/// Convert Bedrock streaming event to Anthropic SSE event
+fn convert_bedrock_event_to_anthropic(
+	event: types::ConverseStreamOutput,
+	log: &AsyncLog<LLMInfo>,
+) -> Option<serde_json::Value> {
+	match event {
+		types::ConverseStreamOutput::MessageStart(start) => {
+			Some(serde_json::json!({
+				"type": "message_start",
+				"message": {
+					"id": generate_anthropic_message_id(),
+					"type": "message",
+					"role": "assistant",
+					"content": [],
+					"model": "claude-3-5-sonnet-20241022", // We'll need to get the actual model
+					"stop_reason": null,
+					"stop_sequence": null,
+					"usage": {
+						"input_tokens": 0,
+						"output_tokens": 0,
+						"cache_creation_input_tokens": null,
+						"cache_read_input_tokens": null
+					}
+				}
+			}))
+		}
+		types::ConverseStreamOutput::ContentBlockStart(start) => {
+			Some(serde_json::json!({
+				"type": "content_block_start",
+				"index": start.content_block_index,
+				"content_block": {
+					"type": "text", // Default to text, could be enhanced to detect tool use
+					"text": ""
+				}
+			}))
+		}
+		types::ConverseStreamOutput::ContentBlockDelta(delta) => {
+			if let Some(content_delta) = delta.delta {
+				match content_delta {
+					types::ContentBlockDelta::Text(text) => Some(serde_json::json!({
+						"type": "content_block_delta",
+						"index": delta.content_block_index,
+						"delta": {
+							"type": "text_delta",
+							"text": text
+						}
+					})),
+					types::ContentBlockDelta::ReasoningContent(
+						types::ReasoningContentBlockDelta::Text(thinking)
+					) => Some(serde_json::json!({
+						"type": "content_block_delta",
+						"index": delta.content_block_index,
+						"delta": {
+							"type": "thinking_delta",
+							"thinking": thinking
+						}
+					})),
+					types::ContentBlockDelta::ToolUse(tool_delta) => Some(serde_json::json!({
+						"type": "content_block_delta",
+						"index": delta.content_block_index,
+						"delta": {
+							"type": "input_json_delta",
+							"partial_json": tool_delta.input
+						}
+					})),
+					_ => None, // Skip unknown delta types
+				}
+			} else {
+				None
+			}
+		}
+		types::ConverseStreamOutput::ContentBlockStop(stop) => {
+			Some(serde_json::json!({
+				"type": "content_block_stop",
+				"index": stop.content_block_index
+			}))
+		}
+		types::ConverseStreamOutput::MessageStop(stop) => {
+			Some(serde_json::json!({
+				"type": "message_delta",
+				"delta": {
+					"stop_reason": map_stop_reason_to_anthropic(stop.stop_reason),
+					"stop_sequence": null
+				}
+			}))
+		}
+		types::ConverseStreamOutput::Metadata(metadata) => {
+			// Update usage stats in logging
+			if let Some(usage) = metadata.usage {
+				log.non_atomic_mutate(|r| {
+					r.response.input_tokens = Some(usage.input_tokens as u64);
+					r.response.output_tokens = Some(usage.output_tokens as u64);
+					r.response.total_tokens = Some(usage.total_tokens as u64);
+				});
+			}
+
+			Some(serde_json::json!({
+				"type": "message_stop"
+			}))
+		}
+	}
+}
+
+/// Determine content block type from ContentBlockStartEvent
+fn determine_content_block_type(start: &types::ContentBlockStartEvent) -> serde_json::Value {
+	if let Some(block_start) = &start.start {
+		match block_start {
+			types::ContentBlockStart::ToolUse(tool_start) => serde_json::json!({
+				"type": "tool_use",
+				"id": tool_start.tool_use_id,
+				"name": tool_start.name,
+				"input": {}
+			}),
+		}
+	} else {
+		// Default to text content block
+		serde_json::json!({
+			"type": "text",
+			"text": ""
+		})
 	}
 }
 

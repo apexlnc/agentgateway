@@ -1242,6 +1242,12 @@ pub mod passthrough {
 		fn to_anthropic(&self) -> Result<Vec<u8>, AIError> {
 			serde_json::to_vec(&self).map_err(AIError::RequestMarshal)
 		}
+
+		fn to_bedrock(&self, provider: &crate::llm::bedrock::Provider) -> Result<Vec<u8>, AIError> {
+			// Convert Anthropic request to Bedrock request
+			let bedrock_request = crate::llm::bedrock::translate_anthropic_to_bedrock(self, provider)?;
+			serde_json::to_vec(&bedrock_request).map_err(AIError::RequestMarshal)
+		}
 	}
 
 	impl ResponseType for Response {
