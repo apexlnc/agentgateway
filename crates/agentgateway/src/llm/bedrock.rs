@@ -365,7 +365,7 @@ pub(super) fn translate_stream(
 				let mut results = Vec::new();
 				for ev in normalized_events {
 					for chunk in bridge.emit_universal(ev) {
-						results.push(serde_json::to_value(&chunk).unwrap());
+						results.push(chunk);
 					}
 				}
 				results
@@ -391,7 +391,7 @@ pub(super) fn translate_stream(
 					}],
 					usage: None,
 				};
-				vec![serde_json::to_value(&error_chunk).unwrap()]
+				vec![error_chunk]
 			},
 		},
 	)
@@ -886,14 +886,7 @@ fn translate_content_block_to_bedrock(
 			))
 		},
 		"document" => Err(AIError::UnsupportedContent),
-		"search_result" => {
-			// Search result content - convert to text representation
-			if let Ok(json_str) = serde_json::to_string_pretty(content) {
-				Ok(ContentBlock::Text(format!("Search Result: {}", json_str)))
-			} else {
-				Err(AIError::UnsupportedContent)
-			}
-		},
+		"search_result" => Err(AIError::UnsupportedContent),
 		_ => Err(AIError::UnsupportedContent),
 	}
 }
@@ -956,24 +949,20 @@ fn insert_cache_points_in_content(
 	content_blocks: &[crate::llm::anthropic::passthrough::ContentPart],
 	cache_points_used: &mut usize,
 ) -> Result<Vec<types::ContentBlock>, AIError> {
-	let mut result = Vec::new();
+	let mut result = Vec::with_capacity(content_blocks.len() * 2);
 
 	for block in content_blocks {
 		let json_block = serde_json::to_value(block).map_err(|e| AIError::RequestParsing(e))?;
-
-		// Convert the content block
 		let bedrock_block = translate_content_block_to_bedrock(&json_block)?;
 		result.push(bedrock_block);
 
-		// Check if this block has cache_control
-		if let Some(cache_control) = json_block.get("cache_control") {
-			if let Some(cache_type) = cache_control.get("type") {
-				if cache_type.as_str() == Some("ephemeral") && *cache_points_used < 4 {
-					// Insert cache point after this content block
-					result.push(types::ContentBlock::CachePoint(create_cache_point()));
-					*cache_points_used += 1;
-				}
-			}
+		if let Some(cache_control) = block.rest.get("cache_control")
+			&& let Some(cache_type) = cache_control.get("type")
+			&& cache_type.as_str() == Some("ephemeral")
+			&& *cache_points_used < 4
+		{
+			result.push(types::ContentBlock::CachePoint(create_cache_point()));
+			*cache_points_used += 1;
 		}
 	}
 
@@ -992,31 +981,28 @@ fn insert_cache_points_in_system(
 				Some(crate::llm::anthropic::passthrough::RequestContent::Text(text)) => {
 					result.push(types::SystemContentBlock::Text { text: text.clone() });
 
-					// Check if this message has cache_control in rest fields
-					if let Some(cache_control) = msg.rest.get("cache_control") {
-						if let Some(cache_type) = cache_control.get("type") {
-							if cache_type.as_str() == Some("ephemeral") && *cache_points_used < 4 {
-								result.push(types::SystemContentBlock::CachePoint(create_cache_point()));
-								*cache_points_used += 1;
-							}
-						}
+					if let Some(cache_control) = msg.rest.get("cache_control")
+						&& let Some(cache_type) = cache_control.get("type")
+						&& cache_type.as_str() == Some("ephemeral")
+						&& *cache_points_used < 4
+					{
+						result.push(types::SystemContentBlock::CachePoint(create_cache_point()));
+						*cache_points_used += 1;
 					}
 				},
 				Some(crate::llm::anthropic::passthrough::RequestContent::Array(blocks)) => {
-					// Process array content blocks for cache control
 					for block in blocks {
 						if block.r#type == "text" {
 							if let Some(text) = &block.text {
 								result.push(types::SystemContentBlock::Text { text: text.clone() });
 
-								// Check for cache_control on this block
-								if let Some(cache_control) = block.rest.get("cache_control") {
-									if let Some(cache_type) = cache_control.get("type") {
-										if cache_type.as_str() == Some("ephemeral") && *cache_points_used < 4 {
-											result.push(types::SystemContentBlock::CachePoint(create_cache_point()));
-											*cache_points_used += 1;
-										}
-									}
+								if let Some(cache_control) = block.rest.get("cache_control")
+									&& let Some(cache_type) = cache_control.get("type")
+									&& cache_type.as_str() == Some("ephemeral")
+									&& *cache_points_used < 4
+								{
+									result.push(types::SystemContentBlock::CachePoint(create_cache_point()));
+									*cache_points_used += 1;
 								}
 							}
 						}
@@ -1038,7 +1024,6 @@ fn insert_cache_points_in_tools(
 
 	if let Some(tools) = tools_array.as_array() {
 		for tool in tools {
-			// Add the tool specification
 			if let (Some(name), input_schema) = (
 				tool.get("name").and_then(|n| n.as_str()),
 				tool.get("input_schema"),
@@ -1054,14 +1039,13 @@ fn insert_cache_points_in_tools(
 					input_schema: input_schema.cloned().map(types::ToolInputSchema::Json),
 				}));
 
-				// Check for cache_control on this tool
-				if let Some(cache_control) = tool.get("cache_control") {
-					if let Some(cache_type) = cache_control.get("type") {
-						if cache_type.as_str() == Some("ephemeral") && *cache_points_used < 4 {
-							result.push(types::Tool::CachePoint(create_cache_point()));
-							*cache_points_used += 1;
-						}
-					}
+				if let Some(cache_control) = tool.get("cache_control")
+					&& let Some(cache_type) = cache_control.get("type")
+					&& cache_type.as_str() == Some("ephemeral")
+					&& *cache_points_used < 4
+				{
+					result.push(types::Tool::CachePoint(create_cache_point()));
+					*cache_points_used += 1;
 				}
 			}
 		}
