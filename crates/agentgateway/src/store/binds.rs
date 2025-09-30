@@ -53,7 +53,6 @@ pub struct BackendPolicies {
 	pub backend_auth: Option<BackendAuth>,
 	pub a2a: Option<A2aPolicy>,
 	pub llm_provider: Option<Arc<llm::NamedAIProvider>>,
-	pub llm: Option<Arc<llm::Policy>>,
 	pub inference_routing: Option<InferenceRouting>,
 }
 
@@ -65,7 +64,6 @@ impl BackendPolicies {
 			backend_auth: other.backend_auth.or(self.backend_auth),
 			a2a: other.a2a.or(self.a2a),
 			llm_provider: other.llm_provider.or(self.llm_provider),
-			llm: other.llm.or(self.llm),
 			inference_routing: other.inference_routing.or(self.inference_routing),
 		}
 	}
@@ -128,33 +126,6 @@ pub struct LLMRequestPolicies {
 	pub local_rate_limit: Vec<http::localratelimit::RateLimit>,
 	pub remote_rate_limit: Option<http::remoteratelimit::RemoteRateLimit>,
 	pub llm: Option<Arc<llm::Policy>>,
-}
-
-impl LLMRequestPolicies {
-	pub fn merge_backend_policies(
-		self: Arc<Self>,
-		be: Option<Arc<llm::Policy>>,
-	) -> Arc<LLMRequestPolicies> {
-		let Some(be) = be else { return self };
-		let mut route_policies = Arc::unwrap_or_clone(self);
-		let Some(re) = route_policies.llm.take() else {
-			route_policies.llm = Some(be);
-			return Arc::new(route_policies);
-		};
-
-		route_policies.llm = Some(Arc::new(llm::Policy {
-			prompt_guard: be.prompt_guard.clone().or_else(|| re.prompt_guard.clone()),
-			defaults: be.defaults.clone().or_else(|| re.defaults.clone()),
-			overrides: be.overrides.clone().or_else(|| re.overrides.clone()),
-			prompts: be.prompts.clone().or_else(|| re.prompts.clone()),
-			model_aliases: if be.model_aliases.is_empty() {
-				re.model_aliases.clone()
-			} else {
-				be.model_aliases.clone()
-			},
-		}));
-		Arc::new(route_policies)
-	}
 }
 
 #[derive(Debug, Default)]
@@ -296,7 +267,6 @@ impl Store {
 			inference_routing: None,
 			// These are not attached policies but are represented in this struct for code organization
 			llm_provider: None,
-			llm: None,
 		};
 		for rule in rules {
 			match &rule.policy {
@@ -311,9 +281,6 @@ impl Store {
 				},
 				Policy::InferenceRouting(p) => {
 					pol.inference_routing.get_or_insert_with(|| p.clone());
-				},
-				Policy::AI(p) => {
-					pol.llm.get_or_insert_with(|| p.clone());
 				},
 				_ => {},
 			}

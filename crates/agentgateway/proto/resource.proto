@@ -424,8 +424,6 @@ message PolicySpec {
     // Override JSON key-value pairs to set in the LLM request regardless of whether they are set in the request.
     map<string, string> overrides = 3;
     PromptEnrichment prompts = 4;
-    // Model aliases - map from alias name to actual model name
-    map<string, string> model_aliases = 5;
   }
   message ExternalAuth {
     enum FailureMode {

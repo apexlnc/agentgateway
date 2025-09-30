@@ -16,6 +16,3 @@ data: {"id":"request-id","choices":[{"index":0,"delta":{"content":". From that d
 
 event: 
 data: {"id":"request-id","choices":[{"index":0,"delta":{"content":null},"finish_reason":"stop"}],"created":123,"model":"model","service_tier":null,"system_fingerprint":null,"object":"chat.completion.chunk","usage":null}
-
-event: 
-data: {"id":"request-id","choices":[],"created":123,"model":"model","service_tier":null,"system_fingerprint":null,"object":"chat.completion.chunk","usage":{"prompt_tokens":15,"completion_tokens":142,"total_tokens":157}}

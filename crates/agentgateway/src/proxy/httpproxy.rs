@@ -744,7 +744,6 @@ async fn make_backend_call(
 						backend_auth: None,
 						a2a: None,
 						inference_routing: None,
-						llm: None,
 						// Attach LLM provider, but don't use default setup
 						llm_provider: Some(provider.clone()),
 					}),
@@ -862,8 +861,6 @@ async fn make_backend_call(
 		None => policies,
 	};
 
-	let route_policies = route_policies.merge_backend_policies(policies.llm.clone());
-
 	// Apply auth before LLM request setup, so the providers can assume auth is in standardized header
 	auth::apply_backend_auth(&client, policies.backend_auth.as_ref(), &mut req).await?;
 	let a2a_type = a2a::apply_to_request(policies.a2a.as_ref(), &mut req).await;
@@ -881,7 +878,7 @@ async fn make_backend_call(
 			RouteType::Completions => {
 				let r = llm
 					.provider
-					.process_request(
+					.process_completions_request(
 						&client,
 						route_policies.llm.as_deref(),
 						req,
@@ -915,7 +912,44 @@ async fn make_backend_call(
 				log.add(|l| l.llm_request = Some(llm_request.clone()));
 				(req, response_policies, Some(llm_request))
 			},
-			RouteType::Messages | RouteType::Models => {
+			RouteType::Messages => {
+				let r = llm
+					.provider
+					.process_messages_request(
+						&client,
+						route_policies.llm.as_deref(),
+						req,
+						llm.tokenize,
+						&mut log,
+					)
+					.await
+					.map_err(|e| ProxyError::Processing(e.into()))?;
+				let (mut req, llm_request) = match r {
+					RequestResult::Success(r, lr) => (r, lr),
+					RequestResult::Rejected(dr) => return Ok(Box::pin(async move { Ok(dr) })),
+				};
+				// If a user doesn't configure explicit overrides for connecting to a provider, setup default
+				// paths, TLS, etc.
+				if llm.use_default_policies() {
+					llm
+						.provider
+						.setup_request(&mut req, route_type, Some(&llm_request))
+						.map_err(ProxyError::Processing)?;
+				}
+				// Apply all policies (rate limits)
+				let response_policies = apply_llm_request_policies(
+					&route_policies,
+					policy_client,
+					&mut log,
+					&mut req,
+					&llm_request,
+					response_headers,
+				)
+				.await?;
+				log.add(|l| l.llm_request = Some(llm_request.clone()));
+				(req, response_policies, Some(llm_request))
+			},
+			RouteType::Models => {
 				return Ok(Box::pin(async move {
 					Ok(
 						::http::Response::builder()
