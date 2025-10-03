@@ -121,6 +121,44 @@ pub fn process_response(
 	}
 }
 
+/// Validate if a string meets Bedrock's requestMetadata constraint
+fn is_valid_bedrock_string(s: &str) -> bool {
+	s.len() <= 256 && s.chars().all(|c| c.is_ascii_alphanumeric() || " :_@$#=/+,-.".contains(c))
+}
+
+/// Recursively extract leaf key-value pairs from nested JSON for Bedrock requestMetadata
+/// Only includes primitive values (strings, numbers, bools) that match Bedrock's pattern constraint
+/// Uses the leaf key name (not full path) to avoid namespacing conflicts
+fn flatten_json_for_bedrock(value: &serde_json::Value, output: &mut HashMap<String, String>) {
+	// Guard clause: early return if not an object
+	let serde_json::Value::Object(obj) = value else {
+		return;
+	};
+
+	// Recursively extract leaf values from nested objects
+	for (key, val) in obj {
+		match val {
+			// Match guard: only process strings that meet Bedrock's constraints
+			serde_json::Value::String(s) if is_valid_bedrock_string(s) => {
+				output.insert(key.clone(), s.clone());
+			},
+			serde_json::Value::Number(n) => {
+				output.insert(key.clone(), n.to_string());
+			},
+			serde_json::Value::Bool(b) => {
+				output.insert(key.clone(), b.to_string());
+			},
+			serde_json::Value::Object(_) => {
+				// Recursively flatten nested objects
+				flatten_json_for_bedrock(val, output);
+			},
+			_ => {
+				// Skip arrays, nulls, and invalid strings
+			},
+		}
+	}
+}
+
 pub(super) fn translate_error(
 	resp: ConverseErrorResponse,
 ) -> Result<universal::ChatCompletionErrorResponse, AIError> {
@@ -218,38 +256,14 @@ pub(super) fn translate_request_completions(
 		.map(|user| HashMap::from([("user_id".to_string(), user)]))
 		.unwrap_or_default();
 
-	// Merge extauthz metadata if present
+	// Merge extauthz metadata if present - extract leaf key-value pairs from nested structures
 	if let Some(ext) = extensions
 		&& let Some(extauthz) = ext.get::<Arc<http::ext_authz::ExtAuthzDynamicMetadata>>()
 	{
-		for (key, value) in &extauthz.metadata {
-			// Convert JsonValue to String representation
-			// Per Envoy spec, extauthz services return flat keys; we add the namespace prefix here
-			// Bedrock constraint: values must match [a-zA-Z0-9\s:_@$#=/+,-.]{0,256}
-			let string_value = match value {
-				serde_json::Value::String(s) => {
-					// Validate string doesn't contain disallowed characters
-					if s.len() <= 256 && s.chars().all(|c| {
-						c.is_ascii_alphanumeric() || " :_@$#=/+,-.".contains(c)
-					}) {
-						Some(s.clone())
-					} else {
-						// Skip values with disallowed characters or too long
-						None
-					}
-				},
-				serde_json::Value::Number(n) => Some(n.to_string()),
-				serde_json::Value::Bool(b) => Some(b.to_string()),
-				// Skip null, objects, and arrays - they either contain no useful data
-				// or contain characters that violate Bedrock's pattern constraint
-				_ => None,
-			};
-
-			if let Some(val) = string_value {
-				// Always add extauthz prefix to namespace the metadata in Bedrock
-				// Keys from ExtAuthzDynamicMetadata are flat per Envoy spec (e.g., "user_id", "role")
-				metadata.insert(format!("extauthz.{}", key), val);
-			}
+		for (_key, value) in &extauthz.metadata {
+			// Recursively flatten nested JSON objects into simple key-value pairs
+			// e.g., {"extauthz.jwt": {"sub": "user123"}} becomes {"sub": "user123"}
+			flatten_json_for_bedrock(value, &mut metadata);
 		}
 	}
 
@@ -846,38 +860,14 @@ pub(super) fn translate_request_messages(
 	// Extract metadata from typed field
 	let mut metadata = req.metadata.map(|m| m.fields).unwrap_or_default();
 
-	// Merge extauthz metadata if present
+	// Merge extauthz metadata if present - extract leaf key-value pairs from nested structures
 	if let Some(ext) = extensions
 		&& let Some(extauthz) = ext.get::<Arc<http::ext_authz::ExtAuthzDynamicMetadata>>()
 	{
-		for (key, value) in &extauthz.metadata {
-			// Convert JsonValue to String representation
-			// Per Envoy spec, extauthz services return flat keys; we add the namespace prefix here
-			// Bedrock constraint: values must match [a-zA-Z0-9\s:_@$#=/+,-.]{0,256}
-			let string_value = match value {
-				serde_json::Value::String(s) => {
-					// Validate string doesn't contain disallowed characters
-					if s.len() <= 256 && s.chars().all(|c| {
-						c.is_ascii_alphanumeric() || " :_@$#=/+,-.".contains(c)
-					}) {
-						Some(s.clone())
-					} else {
-						// Skip values with disallowed characters or too long
-						None
-					}
-				},
-				serde_json::Value::Number(n) => Some(n.to_string()),
-				serde_json::Value::Bool(b) => Some(b.to_string()),
-				// Skip null, objects, and arrays - they either contain no useful data
-				// or contain characters that violate Bedrock's pattern constraint
-				_ => None,
-			};
-
-			if let Some(val) = string_value {
-				// Always add extauthz prefix to namespace the metadata in Bedrock
-				// Keys from ExtAuthzDynamicMetadata are flat per Envoy spec (e.g., "user_id", "role")
-				metadata.insert(format!("extauthz.{}", key), val);
-			}
+		for (_key, value) in &extauthz.metadata {
+			// Recursively flatten nested JSON objects into simple key-value pairs
+			// e.g., {"extauthz.jwt": {"sub": "user123"}} becomes {"sub": "user123"}
+			flatten_json_for_bedrock(value, &mut metadata);
 		}
 	}
 
@@ -1409,24 +1399,37 @@ mod tests {
 			guardrail_version: None,
 		};
 
-		// Create extauthz metadata as per Envoy spec
-		// ExtAuthz services return flat keys (e.g., "user_id", "role")
+		// Create extauthz metadata mimicking real extauthz service response
+		// ExtAuthz services return nested objects that need to be flattened
 		let mut extauthz_metadata = HashMap::new();
-		extauthz_metadata.insert("user_id".to_string(), json!("user123"));
-		extauthz_metadata.insert("email".to_string(), json!("user@example.com"));
-		extauthz_metadata.insert("role".to_string(), json!("admin"));
-		extauthz_metadata.insert("org_id".to_string(), json!("org456"));
-		extauthz_metadata.insert("quota".to_string(), json!(100));
-		// Nested objects will be skipped due to Bedrock's constraint
+
+		// Simulate nested JWT claims
 		extauthz_metadata.insert(
-			"jwt_claims".to_string(),
+			"extauthz.jwt".to_string(),
 			json!({
-				"iss": "auth-service",
-				"exp": 1234567890
+				"sub": "user123",
+				"email": "user@example.com"
 			}),
 		);
-		// String with disallowed characters (contains brackets) will be skipped
-		extauthz_metadata.insert("invalid_chars".to_string(), json!("value[with]brackets"));
+
+		// Simulate nested PAT metadata
+		extauthz_metadata.insert(
+			"extauthz.pat".to_string(),
+			json!({
+				"org": "org456",
+				"role": "admin",
+				"quota": 100
+			}),
+		);
+
+		// Test that strings with invalid characters are skipped
+		extauthz_metadata.insert(
+			"extauthz.test".to_string(),
+			json!({
+				"valid_field": "allowed-value",
+				"invalid_field": "value[with]brackets"
+			}),
+		);
 
 		let extauthz = Arc::new(crate::http::ext_authz::ExtAuthzDynamicMetadata {
 			metadata: extauthz_metadata,
@@ -1470,24 +1473,21 @@ mod tests {
 			Some(&"custom_value".to_string())
 		);
 
-		// Check all extauthz keys get prefixed
-		assert_eq!(
-			metadata.get("extauthz.user_id"),
-			Some(&"user123".to_string())
-		);
-		assert_eq!(
-			metadata.get("extauthz.email"),
-			Some(&"user@example.com".to_string())
-		);
-		assert_eq!(metadata.get("extauthz.role"), Some(&"admin".to_string()));
-		assert_eq!(metadata.get("extauthz.org_id"), Some(&"org456".to_string()));
-		assert_eq!(metadata.get("extauthz.quota"), Some(&"100".to_string()));
+		// Check flattened extauthz metadata - leaf keys extracted from nested objects
+		assert_eq!(metadata.get("sub"), Some(&"user123".to_string()));
+		assert_eq!(metadata.get("email"), Some(&"user@example.com".to_string()));
+		assert_eq!(metadata.get("role"), Some(&"admin".to_string()));
+		assert_eq!(metadata.get("org"), Some(&"org456".to_string()));
+		assert_eq!(metadata.get("quota"), Some(&"100".to_string()));
 
-		// Check nested object is skipped (violates Bedrock's pattern constraint)
-		assert!(!metadata.contains_key("extauthz.jwt_claims"));
+		// Check valid field is extracted
+		assert_eq!(
+			metadata.get("valid_field"),
+			Some(&"allowed-value".to_string())
+		);
 
 		// Check string with invalid characters is skipped
-		assert!(!metadata.contains_key("extauthz.invalid_chars"));
+		assert!(!metadata.contains_key("invalid_field"));
 	}
 
 	#[test]
