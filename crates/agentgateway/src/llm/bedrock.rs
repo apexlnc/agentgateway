@@ -225,17 +225,31 @@ pub(super) fn translate_request_completions(
 		for (key, value) in &extauthz.metadata {
 			// Convert JsonValue to String representation
 			// Per Envoy spec, extauthz services return flat keys; we add the namespace prefix here
+			// Bedrock constraint: values must match [a-zA-Z0-9\s:_@$#=/+,-.]{0,256}
 			let string_value = match value {
-				serde_json::Value::String(s) => s.clone(),
-				serde_json::Value::Number(n) => n.to_string(),
-				serde_json::Value::Bool(b) => b.to_string(),
-				serde_json::Value::Null => "null".to_string(),
-				// For objects/arrays, serialize to JSON string
-				_ => serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()),
+				serde_json::Value::String(s) => {
+					// Validate string doesn't contain disallowed characters
+					if s.len() <= 256 && s.chars().all(|c| {
+						c.is_ascii_alphanumeric() || " :_@$#=/+,-.".contains(c)
+					}) {
+						Some(s.clone())
+					} else {
+						// Skip values with disallowed characters or too long
+						None
+					}
+				},
+				serde_json::Value::Number(n) => Some(n.to_string()),
+				serde_json::Value::Bool(b) => Some(b.to_string()),
+				// Skip null, objects, and arrays - they either contain no useful data
+				// or contain characters that violate Bedrock's pattern constraint
+				_ => None,
 			};
-			// Always add extauthz prefix to namespace the metadata in Bedrock
-			// Keys from ExtAuthzDynamicMetadata are flat per Envoy spec (e.g., "user_id", "role")
-			metadata.insert(format!("extauthz.{}", key), string_value);
+
+			if let Some(val) = string_value {
+				// Always add extauthz prefix to namespace the metadata in Bedrock
+				// Keys from ExtAuthzDynamicMetadata are flat per Envoy spec (e.g., "user_id", "role")
+				metadata.insert(format!("extauthz.{}", key), val);
+			}
 		}
 	}
 
@@ -839,17 +853,31 @@ pub(super) fn translate_request_messages(
 		for (key, value) in &extauthz.metadata {
 			// Convert JsonValue to String representation
 			// Per Envoy spec, extauthz services return flat keys; we add the namespace prefix here
+			// Bedrock constraint: values must match [a-zA-Z0-9\s:_@$#=/+,-.]{0,256}
 			let string_value = match value {
-				serde_json::Value::String(s) => s.clone(),
-				serde_json::Value::Number(n) => n.to_string(),
-				serde_json::Value::Bool(b) => b.to_string(),
-				serde_json::Value::Null => "null".to_string(),
-				// For objects/arrays, serialize to JSON string
-				_ => serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()),
+				serde_json::Value::String(s) => {
+					// Validate string doesn't contain disallowed characters
+					if s.len() <= 256 && s.chars().all(|c| {
+						c.is_ascii_alphanumeric() || " :_@$#=/+,-.".contains(c)
+					}) {
+						Some(s.clone())
+					} else {
+						// Skip values with disallowed characters or too long
+						None
+					}
+				},
+				serde_json::Value::Number(n) => Some(n.to_string()),
+				serde_json::Value::Bool(b) => Some(b.to_string()),
+				// Skip null, objects, and arrays - they either contain no useful data
+				// or contain characters that violate Bedrock's pattern constraint
+				_ => None,
 			};
-			// Always add extauthz prefix to namespace the metadata in Bedrock
-			// Keys from ExtAuthzDynamicMetadata are flat per Envoy spec (e.g., "user_id", "role")
-			metadata.insert(format!("extauthz.{}", key), string_value);
+
+			if let Some(val) = string_value {
+				// Always add extauthz prefix to namespace the metadata in Bedrock
+				// Keys from ExtAuthzDynamicMetadata are flat per Envoy spec (e.g., "user_id", "role")
+				metadata.insert(format!("extauthz.{}", key), val);
+			}
 		}
 	}
 
@@ -1389,7 +1417,7 @@ mod tests {
 		extauthz_metadata.insert("role".to_string(), json!("admin"));
 		extauthz_metadata.insert("org_id".to_string(), json!("org456"));
 		extauthz_metadata.insert("quota".to_string(), json!(100));
-		// Nested object values are also valid
+		// Nested objects will be skipped due to Bedrock's constraint
 		extauthz_metadata.insert(
 			"jwt_claims".to_string(),
 			json!({
@@ -1397,6 +1425,8 @@ mod tests {
 				"exp": 1234567890
 			}),
 		);
+		// String with disallowed characters (contains brackets) will be skipped
+		extauthz_metadata.insert("invalid_chars".to_string(), json!("value[with]brackets"));
 
 		let extauthz = Arc::new(crate::http::ext_authz::ExtAuthzDynamicMetadata {
 			metadata: extauthz_metadata,
@@ -1453,12 +1483,11 @@ mod tests {
 		assert_eq!(metadata.get("extauthz.org_id"), Some(&"org456".to_string()));
 		assert_eq!(metadata.get("extauthz.quota"), Some(&"100".to_string()));
 
-		// Check nested object is serialized to JSON string
-		assert!(metadata.contains_key("extauthz.jwt_claims"));
-		let jwt_claims_value = metadata.get("extauthz.jwt_claims").unwrap();
-		let jwt_claims: serde_json::Value = serde_json::from_str(jwt_claims_value).unwrap();
-		assert_eq!(jwt_claims["iss"], "auth-service");
-		assert_eq!(jwt_claims["exp"], 1234567890);
+		// Check nested object is skipped (violates Bedrock's pattern constraint)
+		assert!(!metadata.contains_key("extauthz.jwt_claims"));
+
+		// Check string with invalid characters is skipped
+		assert!(!metadata.contains_key("extauthz.invalid_chars"));
 	}
 
 	#[test]
