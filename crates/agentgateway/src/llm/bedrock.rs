@@ -6,6 +6,7 @@ use chrono;
 use itertools::Itertools;
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::trace;
 
@@ -157,6 +158,7 @@ fn translate_stop_reason(resp: &StopReason) -> universal::FinishReason {
 pub(super) fn translate_request_completions(
 	req: universal::Request,
 	provider: &Provider,
+	extensions: Option<&::http::Extensions>,
 ) -> ConverseRequest {
 	// Extract and join system prompts from universal format
 	let system_text = req
@@ -211,9 +213,37 @@ pub(super) fn translate_request_completions(
 		None
 	};
 
-	let metadata = req
+	let mut metadata = req
 		.user
-		.map(|user| HashMap::from([("user_id".to_string(), user)]));
+		.map(|user| HashMap::from([("user_id".to_string(), user)]))
+		.unwrap_or_default();
+
+	// Merge extauthz metadata if present
+	if let Some(ext) = extensions
+		&& let Some(extauthz) = ext.get::<Arc<http::ext_authz::ExtAuthzDynamicMetadata>>()
+	{
+		for (key, value) in &extauthz.metadata {
+			// Convert JsonValue to String representation
+			// Per Envoy spec, extauthz services return flat keys; we add the namespace prefix here
+			let string_value = match value {
+				serde_json::Value::String(s) => s.clone(),
+				serde_json::Value::Number(n) => n.to_string(),
+				serde_json::Value::Bool(b) => b.to_string(),
+				serde_json::Value::Null => "null".to_string(),
+				// For objects/arrays, serialize to JSON string
+				_ => serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()),
+			};
+			// Always add extauthz prefix to namespace the metadata in Bedrock
+			// Keys from ExtAuthzDynamicMetadata are flat per Envoy spec (e.g., "user_id", "role")
+			metadata.insert(format!("extauthz.{}", key), string_value);
+		}
+	}
+
+	let request_metadata = if metadata.is_empty() {
+		None
+	} else {
+		Some(metadata)
+	};
 
 	let tool_choice = match req.tool_choice {
 		Some(universal::ToolChoiceOption::Named(universal::NamedToolChoice {
@@ -289,7 +319,7 @@ pub(super) fn translate_request_completions(
 		additional_model_request_fields: thinking,
 		prompt_variables: None,
 		additional_model_response_field_paths: None,
-		request_metadata: metadata,
+		request_metadata,
 		performance_config: None,
 	}
 }
@@ -473,6 +503,7 @@ pub(super) fn translate_request_messages(
 	req: anthropic::MessagesRequest,
 	provider: &Provider,
 	headers: Option<&http::HeaderMap>,
+	extensions: Option<&::http::Extensions>,
 ) -> Result<ConverseRequest, AIError> {
 	let mut cache_points_used = 0;
 
@@ -799,7 +830,34 @@ pub(super) fn translate_request_messages(
 	};
 
 	// Extract metadata from typed field
-	let metadata = req.metadata.map(|m| m.fields);
+	let mut metadata = req.metadata.map(|m| m.fields).unwrap_or_default();
+
+	// Merge extauthz metadata if present
+	if let Some(ext) = extensions
+		&& let Some(extauthz) = ext.get::<Arc<http::ext_authz::ExtAuthzDynamicMetadata>>()
+	{
+		for (key, value) in &extauthz.metadata {
+			// Convert JsonValue to String representation
+			// Per Envoy spec, extauthz services return flat keys; we add the namespace prefix here
+			let string_value = match value {
+				serde_json::Value::String(s) => s.clone(),
+				serde_json::Value::Number(n) => n.to_string(),
+				serde_json::Value::Bool(b) => b.to_string(),
+				serde_json::Value::Null => "null".to_string(),
+				// For objects/arrays, serialize to JSON string
+				_ => serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()),
+			};
+			// Always add extauthz prefix to namespace the metadata in Bedrock
+			// Keys from ExtAuthzDynamicMetadata are flat per Envoy spec (e.g., "user_id", "role")
+			metadata.insert(format!("extauthz.{}", key), string_value);
+		}
+	}
+
+	let request_metadata = if metadata.is_empty() {
+		None
+	} else {
+		Some(metadata)
+	};
 
 	let bedrock_request = ConverseRequest {
 		model_id: req.model,
@@ -811,7 +869,7 @@ pub(super) fn translate_request_messages(
 		additional_model_request_fields: additional_fields,
 		prompt_variables: None,
 		additional_model_response_field_paths: None,
-		request_metadata: metadata,
+		request_metadata,
 		performance_config: None,
 	};
 
@@ -1313,6 +1371,97 @@ mod tests {
 	use serde_json::json;
 
 	#[test]
+	fn test_extauthz_metadata_passthrough() {
+		use std::sync::Arc;
+
+		let provider = Provider {
+			model: None,
+			region: strng::new("us-east-1"),
+			guardrail_identifier: None,
+			guardrail_version: None,
+		};
+
+		// Create extauthz metadata as per Envoy spec
+		// ExtAuthz services return flat keys (e.g., "user_id", "role")
+		let mut extauthz_metadata = HashMap::new();
+		extauthz_metadata.insert("user_id".to_string(), json!("user123"));
+		extauthz_metadata.insert("email".to_string(), json!("user@example.com"));
+		extauthz_metadata.insert("role".to_string(), json!("admin"));
+		extauthz_metadata.insert("org_id".to_string(), json!("org456"));
+		extauthz_metadata.insert("quota".to_string(), json!(100));
+		// Nested object values are also valid
+		extauthz_metadata.insert(
+			"jwt_claims".to_string(),
+			json!({
+				"iss": "auth-service",
+				"exp": 1234567890
+			}),
+		);
+
+		let extauthz = Arc::new(crate::http::ext_authz::ExtAuthzDynamicMetadata {
+			metadata: extauthz_metadata,
+		});
+
+		let mut extensions = ::http::Extensions::new();
+		extensions.insert(extauthz);
+
+		// Test with Messages API (Anthropic format)
+		let req = anthropic::MessagesRequest {
+			model: "anthropic.claude-3-sonnet".to_string(),
+			messages: vec![anthropic::Message {
+				role: anthropic::Role::User,
+				content: vec![anthropic::ContentBlock::Text(anthropic::ContentTextBlock {
+					text: "Hello".to_string(),
+					citations: None,
+					cache_control: None,
+				})],
+			}],
+			max_tokens: 100,
+			metadata: Some(anthropic::Metadata {
+				fields: HashMap::from([("custom_field".to_string(), "custom_value".to_string())]),
+			}),
+			system: None,
+			stop_sequences: vec![],
+			stream: false,
+			temperature: None,
+			top_k: None,
+			top_p: None,
+			tools: None,
+			tool_choice: None,
+			thinking: None,
+		};
+
+		let out = translate_request_messages(req, &provider, None, Some(&extensions)).unwrap();
+		let metadata = out.request_metadata.unwrap();
+
+		// Check original metadata preserved
+		assert_eq!(
+			metadata.get("custom_field"),
+			Some(&"custom_value".to_string())
+		);
+
+		// Check all extauthz keys get prefixed
+		assert_eq!(
+			metadata.get("extauthz.user_id"),
+			Some(&"user123".to_string())
+		);
+		assert_eq!(
+			metadata.get("extauthz.email"),
+			Some(&"user@example.com".to_string())
+		);
+		assert_eq!(metadata.get("extauthz.role"), Some(&"admin".to_string()));
+		assert_eq!(metadata.get("extauthz.org_id"), Some(&"org456".to_string()));
+		assert_eq!(metadata.get("extauthz.quota"), Some(&"100".to_string()));
+
+		// Check nested object is serialized to JSON string
+		assert!(metadata.contains_key("extauthz.jwt_claims"));
+		let jwt_claims_value = metadata.get("extauthz.jwt_claims").unwrap();
+		let jwt_claims: serde_json::Value = serde_json::from_str(jwt_claims_value).unwrap();
+		assert_eq!(jwt_claims["iss"], "auth-service");
+		assert_eq!(jwt_claims["exp"], 1234567890);
+	}
+
+	#[test]
 	fn test_translate_request_messages_maps_top_k_from_typed() {
 		let provider = Provider {
 			model: Some(strng::new("anthropic.claude-3")),
@@ -1344,7 +1493,7 @@ mod tests {
 			thinking: None,
 		};
 
-		let out = translate_request_messages(req, &provider, None).unwrap();
+		let out = translate_request_messages(req, &provider, None, None).unwrap();
 		let inf = out.inference_config.unwrap();
 		assert_eq!(inf.top_k, Some(7));
 	}
