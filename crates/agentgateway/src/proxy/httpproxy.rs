@@ -945,6 +945,73 @@ async fn make_backend_call(
 		// and parsing the request to build the LLMRequest for logging/etc, and applying LLM policies like
 		// prompt enrichment, prompt guard, etc.
 		match route_type {
+			RouteType::CountTokens => {
+				// Count tokens: translate body, set path/host, apply model aliases
+				let mut req = llm
+					.provider
+					.process_count_tokens_request(req, route_policies.llm.as_deref())
+					.await
+					.map_err(|e| ProxyError::Processing(e.into()))?;
+
+				// Apply late backend auth (AWS SigV4, etc.)
+				auth::apply_late_backend_auth(policies.backend_auth.as_ref(), &mut req).await?;
+
+				// Build transport and make the call
+				let transport = build_transport(&inputs, &backend_call, policies.backend_tls.clone()).await?;
+				let call = client::Call {
+					req,
+					target: backend_call.target.clone(),
+					transport,
+				};
+
+				// For Bedrock, we need to translate the response back to Anthropic format
+				let provider = llm.provider.clone();
+				return Ok(Box::pin(async move {
+					let resp = inputs.upstream.call(call).await?;
+
+					// If Bedrock, translate response
+					if matches!(provider, crate::llm::AIProvider::Bedrock(_)) {
+						let (parts, body) = resp.into_parts();
+						let bytes = http::read_body_with_limit(body, 2_097_152)
+							.await
+							.map_err(|e| ProxyError::Processing(e.into()))?;
+
+						if parts.status.is_success() {
+							// Map Bedrock {"inputTokens": N} to Anthropic {"input_tokens": N}
+							#[derive(serde::Deserialize)]
+							#[serde(rename_all = "camelCase")]
+							struct BedrockCountTokensResponse {
+								input_tokens: i32,
+							}
+
+							let bedrock_resp: BedrockCountTokensResponse =
+								serde_json::from_slice(&bytes).map_err(|e| ProxyError::Processing(e.into()))?;
+
+							let anthropic_resp = serde_json::json!({
+								"input_tokens": bedrock_resp.input_tokens
+							});
+
+							let response_bytes = serde_json::to_vec(&anthropic_resp)
+								.map_err(|e| ProxyError::Processing(e.into()))?;
+
+							// Update Content-Length header for translated response
+							let mut parts = parts;
+							parts.headers.insert(
+								http::header::CONTENT_LENGTH,
+								http::HeaderValue::from(response_bytes.len())
+							);
+
+							Ok(Response::from_parts(parts, response_bytes.into()))
+						} else {
+							// Return error response as-is
+							Ok(Response::from_parts(parts, bytes.into()))
+						}
+					} else {
+						// Anthropic or other - return as-is
+						Ok(resp)
+					}
+				}));
+			},
 			RouteType::Completions | RouteType::Messages => {
 				let r = if route_type == RouteType::Completions {
 					llm
