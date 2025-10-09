@@ -1,0 +1,99 @@
+# Comprehensive Bedrock Observability Configuration
+# Optimized for production observability with performance focus
+
+config:
+  # OpenTelemetry tracing to generic OTLP endpoint
+  tracing:
+    otlpEndpoint: http://jaeger:4317  # Or your OTLP collector
+    otlpProtocol: grpc
+
+    # Sampling: 10% of new requests, 100% of client-initiated
+    randomSampling: "0.1"
+    clientSampling: "true"
+
+    # Standard OpenTelemetry GenAI semantic conventions
+    fields:
+      add:
+        # Core fields (lightweight, always include)
+        gen_ai.operation.name: '"chat"'
+        gen_ai.system: '"aws.bedrock"'
+        gen_ai.request.model: 'llm.request_model'
+        gen_ai.response.model: 'llm.response_model'
+        gen_ai.usage.input_tokens: 'llm.input_tokens'
+        gen_ai.usage.output_tokens: 'llm.output_tokens'
+
+        # Cache tracking (NEW)
+        gen_ai.usage.cache_read_input_tokens: 'llm.cache_read_tokens'
+        gen_ai.usage.cache_write_input_tokens: 'llm.cache_write_tokens'
+        cache.hit_rate: 'llm.cache_read_tokens > 0 ? llm.cache_read_tokens / llm.input_tokens : 0.0'
+
+        # Provider latency (NEW)
+        gen_ai.provider.latency_ms: 'llm.provider_latency_ms'
+        latency.gateway_overhead_ms: 'duration - llm.provider_latency_ms'
+
+        # Bedrock-specific (NEW)
+        gen_ai.bedrock.request_id: 'llm.provider_request_id'
+        gen_ai.bedrock.region: 'llm.provider_region'
+
+        # Guardrail tracking (NEW) - requires guardrails configured
+        gen_ai.bedrock.guardrail.intervened: 'llm.provider_metadata.guardrail_trace.intervened'
+        gen_ai.bedrock.guardrail.action: 'llm.provider_metadata.guardrail_trace.action'
+
+  # Prometheus metrics
+  statsAddr: "0.0.0.0:15020"
+
+  # Metric labels (optional dimensions for deeper analysis)
+  metricFields:
+    add:
+      # Cache effectiveness dimension
+      cache_status: 'llm.cache_read_tokens > 0 ? "hit" : "miss"'
+
+      # Guardrail dimension (if guardrails enabled)
+      guardrail_status: 'llm.provider_metadata.guardrail_trace.intervened ? "blocked" : "passed"'
+
+  # Structured logging
+  logging:
+    level: info
+    format: json
+
+    # Only log errors and guardrail interventions by default (performance optimization)
+    filter: 'response.code >= 400 || llm.provider_metadata.guardrail_trace.intervened'
+
+    fields:
+      add:
+        # Include trace ID for correlation
+        trace_id: 'trace.id'
+
+        # AWS Request ID for CloudWatch correlation
+        aws_request_id: 'llm.provider_request_id'
+
+        # Cache effectiveness
+        cache_hit_rate: 'llm.cache_read_tokens > 0 ? llm.cache_read_tokens / llm.input_tokens : null'
+
+        # Latency breakdown
+        provider_latency_ms: 'llm.provider_latency_ms'
+        gateway_overhead_ms: 'duration - llm.provider_latency_ms'
+
+        # Guardrail details (only if intervened)
+        guardrail_triggered_policies: 'llm.provider_metadata.guardrail_trace.triggered_policies'
+
+        # Expensive fields - only for errors (CEL-gated for performance)
+        prompt: 'response.code >= 400 ? llm.prompt : null'
+        completion: 'response.code >= 400 ? llm.completion : null'
+
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - backends:
+              - ai:
+                  name: bedrock
+                  provider:
+                    aws.bedrock:
+                      region: us-east-1
+                      model: anthropic.claude-3-sonnet-20240229-v1:0
+                      # Optional: guardrails for content filtering
+                      # guardrailIdentifier: gr-123abc
+                      # guardrailVersion: "1"
+            policies:
+              ai: {}  # Mark as AI traffic for LLM telemetry

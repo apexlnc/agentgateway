@@ -102,6 +102,15 @@ pub struct Metrics {
 	pub gen_ai_request_duration: Histogram<GenAILabels>,
 	pub gen_ai_time_per_output_token: Histogram<GenAILabels>,
 	pub gen_ai_time_to_first_token: Histogram<GenAILabels>,
+
+	// Cache effectiveness metrics (Custom - not in OTel spec, but useful for cost optimization)
+	// Sparse metrics - only recorded when cache is used
+	pub gen_ai_cache_read_tokens: Histogram<GenAILabels>,
+	pub gen_ai_cache_write_tokens: Histogram<GenAILabels>,
+
+	// Provider latency tracking (Custom - enables gateway overhead analysis)
+	// Sparse metric - only recorded when provider reports latency (e.g., Bedrock)
+	pub gen_ai_provider_latency: Histogram<GenAILabels>,
 }
 
 impl Metrics {
@@ -151,6 +160,36 @@ impl Metrics {
 			gen_ai_time_to_first_token.clone(),
 		);
 
+		// Cache read tokens histogram (Custom metric - not in OTel spec)
+		let gen_ai_cache_read_tokens = Family::<GenAILabels, _>::new_with_constructor(move || {
+			PromHistogram::new(TOKEN_USAGE_BUCKET)
+		});
+		registry.register(
+			"gen_ai_server_cache_read_tokens",
+			"Number of tokens read from cache per request (sparse - only when cache used)",
+			gen_ai_cache_read_tokens.clone(),
+		);
+
+		// Cache write tokens histogram (Custom metric - not in OTel spec)
+		let gen_ai_cache_write_tokens = Family::<GenAILabels, _>::new_with_constructor(move || {
+			PromHistogram::new(TOKEN_USAGE_BUCKET)
+		});
+		registry.register(
+			"gen_ai_server_cache_write_tokens",
+			"Number of tokens written to cache per request (sparse - only when cache used)",
+			gen_ai_cache_write_tokens.clone(),
+		);
+
+		// Provider latency histogram (Custom metric - not in OTel spec)
+		let gen_ai_provider_latency = Family::<GenAILabels, _>::new_with_constructor(move || {
+			PromHistogram::new(REQUEST_DURATION_BUCKET)
+		});
+		registry.register(
+			"gen_ai_server_provider_latency",
+			"Provider-reported latency in seconds (sparse - only when provider reports it)",
+			gen_ai_provider_latency.clone(),
+		);
+
 		Metrics {
 			requests: build(
 				registry,
@@ -169,6 +208,9 @@ impl Metrics {
 			gen_ai_request_duration,
 			gen_ai_time_per_output_token,
 			gen_ai_time_to_first_token,
+			gen_ai_cache_read_tokens,
+			gen_ai_cache_write_tokens,
+			gen_ai_provider_latency,
 		}
 	}
 }

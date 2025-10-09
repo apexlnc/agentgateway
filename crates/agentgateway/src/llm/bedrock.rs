@@ -59,12 +59,27 @@ impl Provider {
 	) -> Response {
 		let model = self.model.as_deref().unwrap_or(model).to_string();
 
-		// Bedrock doesn't return an ID, so get one from the request... if we can
-		let message_id = resp
+		// Extract AWS Request ID for CloudWatch correlation
+		let request_id = resp
 			.headers()
 			.get(http::x_headers::X_AMZN_REQUESTID)
-			.and_then(|s| s.to_str().ok().map(|s| s.to_owned()))
+			.and_then(|s| s.to_str().ok().map(|s| s.to_owned()));
+
+		let message_id = request_id
+			.clone()
 			.unwrap_or_else(|| format!("{:016x}", rand::rng().random::<u64>()));
+
+		let region = self.region.clone();
+		let guardrail_id = self.guardrail_identifier.clone();
+		if let Some(req_id) = request_id.clone() {
+			log.non_atomic_mutate(|info| {
+				info.provider_metadata.request_id = Some(req_id.clone().into());
+				info.provider_metadata.region = Some(region.clone());
+				if let Some(id) = guardrail_id {
+					info.provider_metadata.guardrail_id = Some(id);
+				}
+			});
+		}
 
 		match input_format {
 			crate::llm::InputFormat::Completions => {
@@ -484,6 +499,9 @@ pub(super) fn translate_stream_to_completions(
 				mk(vec![choice], None)
 			},
 			types::ConverseStreamOutput::MessageStop(stop) => {
+				log.non_atomic_mutate(|r| {
+					r.response.provider_stop_reason = Some(format!("{:?}", stop.stop_reason).into());
+				});
 				let finish_reason = Some(translate_stop_reason(&stop.stop_reason));
 
 				// Just send a blob with the finish reason
@@ -496,11 +514,19 @@ pub(super) fn translate_stream_to_completions(
 				mk(vec![choice], None)
 			},
 			types::ConverseStreamOutput::Metadata(metadata) => {
+				if let Some(metrics) = metadata.metrics {
+					log.non_atomic_mutate(|r| {
+						r.response.provider_latency_ms = Some(metrics.latency_ms);
+					});
+				}
+
 				if let Some(usage) = metadata.usage {
 					log.non_atomic_mutate(|r| {
 						r.response.output_tokens = Some(usage.output_tokens as u64);
 						r.response.input_tokens = Some(usage.input_tokens as u64);
 						r.response.total_tokens = Some(usage.total_tokens as u64);
+						r.response.cache_read_input_tokens = usage.cache_read_input_tokens.map(|v| v as u64);
+						r.response.cache_write_input_tokens = usage.cache_write_input_tokens.map(|v| v as u64);
 					});
 
 					mk(
@@ -1064,15 +1090,26 @@ fn translate_stream_to_messages(
 			},
 			types::ConverseStreamOutput::MessageStop(stop) => {
 				pending_stop_reason = Some(stop.stop_reason);
+				log.non_atomic_mutate(|r| {
+					r.response.provider_stop_reason = Some(format!("{:?}", stop.stop_reason).into());
+				});
 				vec![]
 			},
 			types::ConverseStreamOutput::Metadata(meta) => {
+				if let Some(metrics) = meta.metrics {
+					log.non_atomic_mutate(|r| {
+						r.response.provider_latency_ms = Some(metrics.latency_ms);
+					});
+				}
+
 				if let Some(usage) = meta.usage {
 					pending_usage = Some(usage);
 					log.non_atomic_mutate(|r| {
 						r.response.output_tokens = Some(usage.output_tokens as u64);
 						r.response.input_tokens = Some(usage.input_tokens as u64);
 						r.response.total_tokens = Some(usage.total_tokens as u64);
+						r.response.cache_read_input_tokens = usage.cache_read_input_tokens.map(|v| v as u64);
+						r.response.cache_write_input_tokens = usage.cache_write_input_tokens.map(|v| v as u64);
 					});
 				}
 
@@ -1211,11 +1248,45 @@ pub(super) fn extract_beta_headers(
 	}
 }
 
+pub(super) fn parse_guardrail_trace_public(trace_value: &serde_json::Value) -> Option<super::GuardrailTrace> {
+	let action = trace_value
+		.get("action")
+		.and_then(|v| v.as_str())
+		.map(String::from);
+
+	let intervened = action.as_deref() == Some("INTERVENED");
+
+	let mut failed_policies = 0;
+	let mut triggered_policies = Vec::new();
+
+	if let Some(assessments) = trace_value.get("policyAssessments").and_then(|v| v.as_array()) {
+		for assessment in assessments {
+			if let Some("FAIL") = assessment.get("policyAssessment").and_then(|v| v.as_str()) {
+				failed_policies += 1;
+				if let Some(name) = assessment.get("policyName").and_then(|v| v.as_str()) {
+					triggered_policies.push(name.to_string());
+				}
+			}
+		}
+	}
+
+	Some(super::GuardrailTrace {
+		intervened,
+		action,
+		failed_policies,
+		triggered_policies,
+	})
+}
+
 struct ConverseResponseAdapter {
 	model: String,
 	stop_reason: StopReason,
 	usage: Option<types::TokenUsage>,
 	message: types::Message,
+	#[allow(dead_code)]
+	metrics: Option<types::ConverseMetrics>,
+	#[allow(dead_code)]
+	trace: Option<types::ConverseTrace>,
 }
 
 impl ConverseResponseAdapter {
@@ -1224,7 +1295,7 @@ impl ConverseResponseAdapter {
 			output,
 			stop_reason,
 			usage,
-			metrics: _,
+			metrics,
 			trace,
 			additional_model_response_fields: _,
 			performance_config: _,
@@ -1246,6 +1317,8 @@ impl ConverseResponseAdapter {
 			stop_reason,
 			usage,
 			message,
+			metrics,
+			trace,
 		})
 	}
 
@@ -1366,6 +1439,28 @@ impl ConverseResponseAdapter {
 			stop_sequence: None,
 			usage,
 		})
+	}
+
+	#[allow(dead_code)]
+	fn to_llm_info(&self) -> super::LLMResponse {
+		let mut response = super::LLMResponse::default();
+
+		if let Some(usage) = &self.usage {
+			response.input_tokens = Some(usage.input_tokens as u64);
+			response.output_tokens = Some(usage.output_tokens as u64);
+			response.total_tokens = Some(usage.total_tokens as u64);
+			response.cache_read_input_tokens = usage.cache_read_input_tokens.map(|v| v as u64);
+			response.cache_write_input_tokens = usage.cache_write_input_tokens.map(|v| v as u64);
+		}
+
+		if let Some(metrics) = &self.metrics {
+			response.provider_latency_ms = Some(metrics.latency_ms);
+		}
+
+		response.provider_stop_reason = Some(format!("{:?}", self.stop_reason).into());
+		response.provider_model = Some(self.model.clone().into());
+
+		response
 	}
 }
 

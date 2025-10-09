@@ -191,6 +191,10 @@ pub mod passthrough {
 				input_tokens: self.usage.as_ref().map(|u| u.prompt_tokens as u64),
 				output_tokens: self.usage.as_ref().map(|u| u.completion_tokens as u64),
 				total_tokens: self.usage.as_ref().map(|u| u.total_tokens as u64),
+				cache_read_input_tokens: None,
+				cache_write_input_tokens: None,
+				provider_latency_ms: None,
+				provider_stop_reason: None,
 				provider_model: Some(strng::new(&self.model)),
 				completion: if include_completion_in_log {
 					Some(

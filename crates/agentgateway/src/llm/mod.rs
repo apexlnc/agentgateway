@@ -167,6 +167,7 @@ pub struct LLMRequestParams {
 pub struct LLMInfo {
 	pub request: LLMRequest,
 	pub response: LLMResponse,
+	pub provider_metadata: ProviderMetadata,
 }
 
 impl LLMInfo {
@@ -174,6 +175,7 @@ impl LLMInfo {
 		Self {
 			request: req,
 			response: resp,
+			provider_metadata: ProviderMetadata::default(),
 		}
 	}
 	pub fn input_tokens(&self) -> Option<u64> {
@@ -186,10 +188,47 @@ pub struct LLMResponse {
 	pub input_tokens: Option<u64>,
 	pub output_tokens: Option<u64>,
 	pub total_tokens: Option<u64>,
+	pub cache_read_input_tokens: Option<u64>,
+	pub cache_write_input_tokens: Option<u64>,
+	pub provider_latency_ms: Option<u64>,
+	pub provider_stop_reason: Option<Strng>,
 	pub provider_model: Option<Strng>,
 	pub completion: Option<Vec<String>>,
 	// Time to get the first token. Only used for streaming.
 	pub first_token: Option<Instant>,
+}
+
+/// Provider-specific metadata that doesn't fit generic LLM schema.
+#[derive(Debug, Default, Clone)]
+pub struct ProviderMetadata {
+	/// AWS Request ID for CloudWatch correlation
+	pub request_id: Option<Strng>,
+
+	/// AWS Region for Bedrock requests
+	pub region: Option<Strng>,
+
+	/// Guardrail configuration ID (if used)
+	pub guardrail_id: Option<Strng>,
+
+	/// Structured guardrail trace data (key metrics only, not full JSON)
+	pub guardrail_trace: Option<GuardrailTrace>,
+
+	pub extra: Option<std::collections::HashMap<String, String>>,
+}
+
+/// Structured guardrail trace data (Bedrock-specific, but pattern for others)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GuardrailTrace {
+	/// Whether guardrail intervened (true) or passed (false)
+	pub intervened: bool,
+
+	/// Action taken: "BLOCKED", "ALLOWED", "NONE"
+	pub action: Option<String>,
+
+	/// Count of policy assessments that failed
+	pub failed_policies: usize,
+
+	pub triggered_policies: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -542,6 +581,43 @@ impl AIProvider {
 
 		let resp = resp.and_then(|resp| {
 			let llm_resp = resp.to_llm_response(include_completion_in_log);
+
+			if let AIProvider::Bedrock(provider) = self {
+				if let Some(req_id) = parts.headers
+					.get(http::x_headers::X_AMZN_REQUESTID)
+					.and_then(|v| v.to_str().ok())
+				{
+					log.non_atomic_mutate(|info| {
+						info.provider_metadata.request_id = Some(req_id.into());
+						info.provider_metadata.region = Some(provider.region.clone());
+						if let Some(id) = &provider.guardrail_identifier {
+							info.provider_metadata.guardrail_id = Some(id.clone());
+						}
+					});
+				}
+
+				if let Ok(bedrock_resp) = serde_json::from_slice::<bedrock::types::ConverseResponse>(&bytes) {
+					if let Some(metrics) = bedrock_resp.metrics {
+						log.non_atomic_mutate(|info| {
+							info.response.provider_latency_ms = Some(metrics.latency_ms);
+						});
+					}
+
+					if let Some(trace) = bedrock_resp.trace
+						&& let Some(guardrail_value) = trace.guardrail
+						&& let Some(gt) = bedrock::parse_guardrail_trace_public(&guardrail_value)
+					{
+						log.non_atomic_mutate(|info| {
+							info.provider_metadata.guardrail_trace = Some(gt);
+						});
+					}
+
+					log.non_atomic_mutate(|info| {
+						info.response.provider_stop_reason = Some(format!("{:?}", bedrock_resp.stop_reason).into());
+					});
+				}
+			}
+
 			let body = resp
 				.serialize()
 				.map_err(AIError::ResponseParsing)
@@ -555,6 +631,10 @@ impl AIProvider {
 					input_tokens: None,
 					output_tokens: None,
 					total_tokens: None,
+					cache_read_input_tokens: None,
+					cache_write_input_tokens: None,
+					provider_latency_ms: None,
+					provider_stop_reason: None,
 					provider_model: None,
 					completion: None,
 					first_token: None,
@@ -644,6 +724,7 @@ impl AIProvider {
 		let llmresp = llm::LLMInfo {
 			request: req,
 			response: LLMResponse::default(),
+			provider_metadata: ProviderMetadata::default(),
 		};
 		log.store(Some(llmresp));
 		let resp = match self {

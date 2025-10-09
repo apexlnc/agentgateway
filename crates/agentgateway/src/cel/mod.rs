@@ -49,6 +49,8 @@ pub const REQUEST_BODY_ATTRIBUTE: &str = "request.body";
 pub const LLM_ATTRIBUTE: &str = "llm";
 pub const LLM_PROMPT_ATTRIBUTE: &str = "llm.prompt";
 pub const LLM_COMPLETION_ATTRIBUTE: &str = "llm.completion";
+pub const LLM_CACHE_ATTRIBUTE: &str = "llm.cache";
+pub const LLM_PROVIDER_METADATA_ATTRIBUTE: &str = "llm.provider_metadata";
 pub const RESPONSE_ATTRIBUTE: &str = "response";
 pub const JWT_ATTRIBUTE: &str = "jwt";
 pub const MCP_ATTRIBUTE: &str = "mcp";
@@ -222,12 +224,18 @@ impl ContextBuilder {
 			provider: info.provider.clone(),
 			input_tokens: info.input_tokens,
 			params: info.params.clone(),
-
 			response_model: None,
 			output_tokens: None,
 			total_tokens: None,
 			prompt: None,
 			completion: None,
+			cache_read_tokens: None,
+			cache_write_tokens: None,
+			cache_hit_rate: None,
+			provider_latency_ms: None,
+			provider_stop_reason: None,
+			provider_request_id: None,
+			provider_region: None,
 		});
 		self.attributes.contains(LLM_PROMPT_ATTRIBUTE)
 	}
@@ -254,6 +262,23 @@ impl ContextBuilder {
 			o.response_model = resp.provider_model.clone();
 			// Not always set
 			o.completion = resp.completion.clone();
+
+			if self.attributes.contains(LLM_CACHE_ATTRIBUTE) {
+				o.cache_read_tokens = resp.cache_read_input_tokens;
+				o.cache_write_tokens = resp.cache_write_input_tokens;
+				if let (Some(cache_read), Some(input_total)) = (resp.cache_read_input_tokens, resp.input_tokens)
+					&& input_total > 0
+				{
+					o.cache_hit_rate = Some((cache_read as f64) / (input_total as f64));
+				}
+			}
+
+			if self.attributes.contains(LLM_PROVIDER_METADATA_ATTRIBUTE) {
+				o.provider_latency_ms = resp.provider_latency_ms;
+				o.provider_stop_reason = resp.provider_stop_reason.clone();
+				o.provider_request_id = info.provider_metadata.request_id.clone();
+				o.provider_region = info.provider_metadata.region.clone();
+			}
 		}
 	}
 
@@ -504,6 +529,20 @@ pub struct LLMContext {
 	completion: Option<Vec<String>>,
 	/// The parameters for the LLM request.
 	params: llm::LLMRequestParams,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	cache_read_tokens: Option<u64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	cache_write_tokens: Option<u64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	cache_hit_rate: Option<f64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	provider_latency_ms: Option<u64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	provider_stop_reason: Option<Strng>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	provider_request_id: Option<Strng>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	provider_region: Option<Strng>,
 }
 
 fn properties<'e>(

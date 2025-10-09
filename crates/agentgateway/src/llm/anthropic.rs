@@ -333,7 +333,9 @@ pub(super) fn translate_stream(b: Body, buffer_limit: usize, log: AsyncLog<LLMIn
 					log.non_atomic_mutate(|r| {
 						r.response.output_tokens = Some(message.usage.output_tokens as u64);
 						r.response.input_tokens = Some(message.usage.input_tokens as u64);
-						r.response.provider_model = Some(strng::new(&message.model))
+						r.response.provider_model = Some(strng::new(&message.model));
+						r.response.cache_read_input_tokens = message.usage.cache_read_input_tokens.map(|v| v as u64);
+						r.response.cache_write_input_tokens = message.usage.cache_creation_input_tokens.map(|v| v as u64);
 					});
 					// no need to respond with anything yet
 					None
@@ -1383,6 +1385,10 @@ pub mod passthrough {
 				input_tokens: Some(self.usage.input_tokens),
 				output_tokens: Some(self.usage.output_tokens),
 				total_tokens: Some(self.usage.output_tokens + self.usage.input_tokens),
+				cache_read_input_tokens: None,
+				cache_write_input_tokens: None,
+				provider_latency_ms: None,
+				provider_stop_reason: None,
 				provider_model: Some(strng::new(&self.model)),
 				completion: if include_completion_in_log {
 					Some(

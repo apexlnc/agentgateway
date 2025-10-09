@@ -411,6 +411,31 @@ impl DropOnLog {
 				.gen_ai_request_duration
 				.get_or_create(&gen_ai_labels)
 				.observe(duration.as_secs_f64());
+
+			if let Some(cache_read) = llm_response.response.cache_read_input_tokens {
+				log
+					.metrics
+					.gen_ai_cache_read_tokens
+					.get_or_create(&gen_ai_labels)
+					.observe(cache_read as f64);
+			}
+
+			if let Some(cache_write) = llm_response.response.cache_write_input_tokens {
+				log
+					.metrics
+					.gen_ai_cache_write_tokens
+					.get_or_create(&gen_ai_labels)
+					.observe(cache_write as f64);
+			}
+
+			if let Some(provider_ms) = llm_response.response.provider_latency_ms {
+				log
+					.metrics
+					.gen_ai_provider_latency
+					.get_or_create(&gen_ai_labels)
+					.observe(provider_ms as f64 / 1000.0);
+			}
+
 			if let Some(ft) = llm_response.response.first_token {
 				let ttft = ft - log.start;
 				// Duration from start of request to first token
@@ -808,6 +833,76 @@ impl Drop for DropOnLog {
 					.as_ref()
 					.and_then(|l| l.params.seed)
 					.map(Into::into),
+			),
+			(
+				"gen_ai.usage.cache_read_input_tokens",
+				llm_response
+					.as_ref()
+					.and_then(|l| l.response.cache_read_input_tokens)
+					.map(Into::into),
+			),
+			(
+				"gen_ai.usage.cache_write_input_tokens",
+				llm_response
+					.as_ref()
+					.and_then(|l| l.response.cache_write_input_tokens)
+					.map(Into::into),
+			),
+			(
+				"gen_ai.provider.latency_ms",
+				llm_response
+					.as_ref()
+					.and_then(|l| l.response.provider_latency_ms)
+					.map(Into::into),
+			),
+			(
+				"gen_ai.provider.stop_reason",
+				llm_response
+					.as_ref()
+					.and_then(|l| l.response.provider_stop_reason.as_ref())
+					.map(|s| display(s)),
+			),
+			(
+				"gen_ai.bedrock.request_id",
+				llm_response
+					.as_ref()
+					.and_then(|l| l.provider_metadata.request_id.as_ref())
+					.map(|s| display(s)),
+			),
+			(
+				"gen_ai.bedrock.region",
+				llm_response
+					.as_ref()
+					.and_then(|l| l.provider_metadata.region.as_ref())
+					.map(|s| display(s)),
+			),
+			(
+				"gen_ai.bedrock.guardrail_id",
+				llm_response
+					.as_ref()
+					.and_then(|l| l.provider_metadata.guardrail_id.as_ref())
+					.map(|s| display(s)),
+			),
+			(
+				"gen_ai.bedrock.guardrail.intervened",
+				llm_response
+					.as_ref()
+					.and_then(|l| l.provider_metadata.guardrail_trace.as_ref().map(|g| g.intervened.into())),
+			),
+			(
+				"gen_ai.bedrock.guardrail.action",
+				llm_response
+					.as_ref()
+					.and_then(|l| l.provider_metadata.guardrail_trace.as_ref())
+					.and_then(|g| g.action.as_ref())
+					.map(|a| display(a)),
+			),
+			(
+				"gen_ai.bedrock.guardrail.failed_policies",
+				llm_response
+					.as_ref()
+					.and_then(|l| l.provider_metadata.guardrail_trace.as_ref())
+					.map(|g| (g.failed_policies as i64).into()),
 			),
 			("retry.attempt", log.retry_attempt.display()),
 			("error", log.error.quoted()),
