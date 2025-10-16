@@ -98,6 +98,23 @@ impl NamedAIProvider {
 				return *rt;
 			}
 		}
+		// If no routes configured, use path-based heuristics for Bedrock
+		// This is a temporary stopgap until XDS supports route configuration
+		if self.routes.is_empty() && matches!(self.provider, AIProvider::Bedrock(_)) {
+			if path.ends_with("/count_tokens") {
+				return RouteType::Passthrough;
+			}
+			if path.contains("/v1/messages") || path.ends_with("/messages") {
+				return RouteType::Messages;
+			}
+			if path.contains("/v1/chat/completions") || path.ends_with("/completions") {
+				return RouteType::Completions;
+			}
+		}
+		// Check for count_tokens on all providers - treat as passthrough
+		if path.ends_with("/count_tokens") {
+			return RouteType::Passthrough;
+		}
 		// If there is no match, there is an implicit default to Completions
 		RouteType::Completions
 	}
