@@ -98,6 +98,23 @@ impl NamedAIProvider {
 				return *rt;
 			}
 		}
+		// If no routes configured, use path-based heuristics for Bedrock
+		// This is a temporary stopgap until XDS supports route configuration
+		if self.routes.is_empty() && matches!(self.provider, AIProvider::Bedrock(_)) {
+			if path.ends_with("/count_tokens") {
+				return RouteType::CountTokens;
+			}
+			if path.contains("/v1/messages") || path.ends_with("/messages") {
+				return RouteType::Messages;
+			}
+			if path.contains("/v1/chat/completions") || path.ends_with("/completions") {
+				return RouteType::Completions;
+			}
+		}
+		// Check for count_tokens on all providers
+		if path.ends_with("/count_tokens") {
+			return RouteType::CountTokens;
+		}
 		// If there is no match, there is an implicit default to Completions
 		RouteType::Completions
 	}
@@ -110,6 +127,8 @@ pub enum RouteType {
 	Completions,
 	/// Anthropic /v1/messages
 	Messages,
+	/// Anthropic /v1/messages/count_tokens
+	CountTokens,
 	/// OpenAI /v1/models
 	Models,
 	/// Send the request to the upstream LLM provider as-is
@@ -369,11 +388,6 @@ impl AIProvider {
 				include_usage: true,
 			});
 		}
-		if let Some(provider_model) = &self.override_model() {
-			req.model = Some(provider_model.to_string());
-		} else if req.model.is_none() {
-			return Err(AIError::MissingField("model not specified".into()));
-		}
 
 		self
 			.process_request(
@@ -401,17 +415,11 @@ impl AIProvider {
 		let Ok(bytes) = axum::body::to_bytes(body, 2_097_152).await else {
 			return Err(AIError::RequestTooLarge);
 		};
-		let mut req: anthropic::passthrough::Request = if let Some(p) = policies {
+		let req: anthropic::passthrough::Request = if let Some(p) = policies {
 			p.unmarshal_request(&bytes)?
 		} else {
 			serde_json::from_slice(bytes.as_ref()).map_err(AIError::RequestParsing)?
 		};
-
-		if let Some(provider_model) = &self.override_model() {
-			req.model = Some(provider_model.to_string());
-		} else if req.model.is_none() {
-			return Err(AIError::MissingField("model not specified".into()));
-		}
 
 		self
 			.process_request(
@@ -424,6 +432,88 @@ impl AIProvider {
 				log,
 			)
 			.await
+	}
+
+	pub async fn process_count_tokens_request(
+		&self,
+		req: Request,
+		policies: Option<&Policy>,
+	) -> Result<Request, AIError> {
+		// Buffer the body with configured limit (from request extensions)
+		let buffer_limit = http::buffer_limit(&req);
+		let (parts, body) = req.into_parts();
+		let Ok(bytes) = http::read_body_with_limit(body, buffer_limit).await else {
+			return Err(AIError::RequestTooLarge);
+		};
+
+		// Parse as Anthropic CountTokensRequest
+		let mut count_req: anthropic::types::CountTokensRequest =
+			serde_json::from_slice(bytes.as_ref()).map_err(AIError::RequestParsing)?;
+
+		// Apply model alias resolution (same as messages/completions)
+		if let Some(p) = policies {
+			if let Some(aliased) = p.model_aliases.get(count_req.model.as_str()) {
+				count_req.model = aliased.to_string();
+			}
+		}
+
+		// Save model after alias resolution
+		let model = count_req.model.clone();
+
+		// Translate body based on provider
+		let new_body = match self {
+			AIProvider::Anthropic(_) => {
+				// Forward Anthropic format as-is
+				bytes
+			},
+			AIProvider::Bedrock(_provider) => {
+				// Translate to Bedrock format
+				let bedrock_req = bedrock::translate_count_tokens_request(count_req)?;
+				serde_json::to_vec(&bedrock_req)
+					.map_err(AIError::RequestMarshal)?
+					.into()
+			},
+			_ => {
+				return Err(AIError::UnsupportedConversion(strng::format!(
+					"count_tokens not supported for provider {}",
+					self.provider()
+				)))
+			},
+		};
+
+		// Rebuild request with translated body
+		let mut req = Request::from_parts(parts, new_body.into());
+
+		// Set path based on provider
+		http::modify_req(&mut req, |req| {
+			http::modify_uri(req, |uri| {
+				let path_str = match self {
+					AIProvider::Anthropic(_) => "/v1/messages/count_tokens",
+					AIProvider::Bedrock(provider) => {
+						return {
+							let path = provider.get_count_tokens_path(&model);
+							uri.path_and_query = Some(PathAndQuery::from_str(&path)?);
+							Ok(())
+						};
+					},
+					_ => return Ok(()),
+				};
+				uri.path_and_query = Some(PathAndQuery::from_static(path_str));
+				Ok(())
+			})
+		})
+		.map_err(|e: anyhow::Error| {
+			AIError::UnsupportedConversion(strng::format!("failed to set path: {}", e))
+		})?;
+
+		// Apply provider-specific hostname, auth headers, region (for AWS signing)
+		// Pass RouteType::Passthrough to skip path override since we already set it
+		self.setup_request(&mut req, RouteType::Passthrough, None)
+			.map_err(|e: anyhow::Error| {
+				AIError::UnsupportedConversion(strng::format!("failed to setup request: {}", e))
+			})?;
+
+		Ok(req)
 	}
 
 	#[allow(clippy::too_many_arguments)]

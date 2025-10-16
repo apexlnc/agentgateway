@@ -967,6 +967,34 @@ pub(super) mod types {
 		Disabled {},
 	}
 
+	/// Request body for the Count Tokens API
+	#[derive(Clone, Serialize, Deserialize, Debug)]
+	pub struct CountTokensRequest {
+		/// The model to use for token counting
+		pub model: String,
+		/// The messages to count tokens for
+		pub messages: Vec<Message>,
+		/// System prompt (optional)
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub system: Option<SystemPrompt>,
+		/// Tools definitions (optional)
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub tools: Option<Vec<Tool>>,
+		/// How the model should use tools (optional)
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub tool_choice: Option<ToolChoice>,
+		/// Extended thinking configuration (optional)
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub thinking: Option<ThinkingInput>,
+	}
+
+	/// Response body for the Count Tokens API
+	#[derive(Clone, Serialize, Deserialize, Debug)]
+	pub struct CountTokensResponse {
+		/// The total number of tokens across the provided list of messages, system prompt, and tools
+		pub input_tokens: usize,
+	}
+
 	/// Response body for the Messages API.
 	#[derive(Debug, Serialize, Deserialize, Clone)]
 	pub struct MessagesResponse {
@@ -1150,7 +1178,7 @@ pub(super) mod types {
 	}
 
 	/// Tool definition
-	#[derive(Debug, Serialize, Deserialize)]
+	#[derive(Clone, Debug, Serialize, Deserialize)]
 	pub struct Tool {
 		/// Name of the tool
 		pub name: String,
@@ -1165,7 +1193,7 @@ pub(super) mod types {
 	}
 
 	/// Tool choice configuration
-	#[derive(Debug, Serialize, Deserialize)]
+	#[derive(Clone, Debug, Serialize, Deserialize)]
 	#[serde(tag = "type")]
 	pub enum ToolChoice {
 		/// Let model choose whether to use tools
