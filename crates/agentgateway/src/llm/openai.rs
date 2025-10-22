@@ -273,19 +273,14 @@ pub mod responses {
 								.output
 								.iter()
 								.filter_map(|o| match o {
-									OutputContent::Message(msg) => msg
-										.content
-										.iter()
-										.filter_map(|c| match c {
-											async_openai::types::responses::Content::OutputText(t) => {
-												Some(t.text.clone())
-											},
-											_ => None,
-										})
-										.collect::<Vec<_>>()
-										.first()
-										.cloned(),
+									OutputContent::Message(msg) => Some(msg),
 									_ => None,
+								})
+								.flat_map(|msg| {
+									msg.content.iter().filter_map(|c| match c {
+										async_openai::types::responses::Content::OutputText(t) => Some(t.text.clone()),
+										_ => None,
+									})
 								})
 								.collect(),
 						)
