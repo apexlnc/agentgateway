@@ -18,6 +18,50 @@ else
 	$(DOCKER_BUILDER) build $(DOCKER_BUILD_ARGS) -t $(IMAGE_FULL_NAME) . --progress=plain
 endif
 
+# docker-fast - optimized for development with dependency caching
+.PHONY: docker-fast
+docker-fast:
+ifeq ($(OS),Windows_NT)
+	$(DOCKER_BUILDER) build $(DOCKER_BUILD_ARGS) -f Dockerfile.windows -t $(IMAGE_FULL_NAME) .
+else
+	@echo "Setting up optimized Docker build..."
+	@if docker buildx inspect fast-builder >/dev/null 2>&1; then \
+		echo "Using existing buildx builder: fast-builder"; \
+	else \
+		echo "Creating buildx builder with registry cache support..."; \
+		docker buildx create --name fast-builder --driver docker-container --use >/dev/null 2>&1 || true; \
+	fi
+	@if docker buildx inspect fast-builder >/dev/null 2>&1; then \
+		echo "Building with registry cache support..."; \
+		DOCKER_BUILDKIT=1 docker buildx build $(DOCKER_BUILD_ARGS) \
+			-f Dockerfile.fast \
+			--builder fast-builder \
+			--build-arg PROFILE=quick-release \
+			--cache-from type=registry,ref=$(DOCKER_REGISTRY)/$(DOCKER_REPO)/$(IMAGE_NAME):buildcache \
+			--cache-to type=registry,ref=$(DOCKER_REGISTRY)/$(DOCKER_REPO)/$(IMAGE_NAME):buildcache,mode=max \
+			-t $(IMAGE_FULL_NAME) --load . --progress=plain; \
+	else \
+		echo "Buildx not available, falling back to local cache build..."; \
+		DOCKER_BUILDKIT=1 $(DOCKER_BUILDER) build $(DOCKER_BUILD_ARGS) \
+			-f Dockerfile.fast \
+			--build-arg PROFILE=quick-release \
+			-t $(IMAGE_FULL_NAME) . --progress=plain; \
+	fi
+endif
+
+# docker-fast-local - optimized build without registry caching (always works)
+.PHONY: docker-fast-local  
+docker-fast-local:
+ifeq ($(OS),Windows_NT)
+	$(DOCKER_BUILDER) build $(DOCKER_BUILD_ARGS) -f Dockerfile.windows -t $(IMAGE_FULL_NAME) .
+else
+	@echo "Building with local optimization (no registry cache)..."
+	DOCKER_BUILDKIT=1 $(DOCKER_BUILDER) build $(DOCKER_BUILD_ARGS) \
+		-f Dockerfile.fast \
+		--build-arg PROFILE=quick-release \
+		-t $(IMAGE_FULL_NAME) . --progress=plain
+endif
+
 .PHONY: docker-musl
 docker-musl:
 	$(DOCKER_BUILDER) build $(DOCKER_BUILD_ARGS) -t $(IMAGE_FULL_NAME)-musl --build-arg=BUILDER=musl . --progress=plain
@@ -37,7 +81,6 @@ lint:
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
 
-.PHONY: fix-lint
 fix-lint:
 	cargo clippy --fix --allow-staged --allow-dirty --workspace
 	cargo fmt
@@ -77,7 +120,7 @@ generate-apis:
 ifeq ($(OS),Windows_NT)
 	@powershell -ExecutionPolicy Bypass -Command common/tools/buf.ps1 generate --path crates/agentgateway/proto/resource.proto --path crates/agentgateway/proto/workload.proto
 else
-	@PATH="./common/tools:$(PATH)" buf generate --path crates/agentgateway/proto/resource.proto --path crates/agentgateway/proto/workload.proto
+	@PATH=./common/tools:$(PATH) buf generate --path crates/agentgateway/proto/resource.proto --path crates/agentgateway/proto/workload.proto
 endif
 
 .PHONY: run-validation-deps
