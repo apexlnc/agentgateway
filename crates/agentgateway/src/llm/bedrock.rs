@@ -581,18 +581,6 @@ pub(super) fn translate_request_messages(
 		result
 	});
 
-	// Check if messages contain ToolUse or ToolResult blocks (determines if toolConfig is required)
-	let has_tool_blocks = req.messages.iter().any(|msg| {
-		msg.content.iter().any(|block| {
-			matches!(
-				block,
-				anthropic::ContentBlock::ToolUse { .. }
-					| anthropic::ContentBlock::ToolResult { .. }
-					| anthropic::ContentBlock::ServerToolUse { .. }
-			)
-		})
-	});
-
 	// Convert typed Anthropic messages to Bedrock messages
 	let messages: Vec<types::Message> = req
 		.messages
@@ -749,8 +737,7 @@ pub(super) fn translate_request_messages(
 	};
 
 	// Convert typed tools to Bedrock tool config
-	// NOTE: Bedrock requires toolConfig to be present if messages contain ToolUse/ToolResult blocks,
-	// even if tools array is empty in the current request
+	// NOTE: Only send toolConfig if we have at least one tool. Bedrock rejects empty tools arrays.
 	let tool_config = if let Some(tools) = req.tools {
 		let bedrock_tools: Vec<types::Tool> = {
 			let mut result = Vec::with_capacity(tools.len() * 2);
@@ -771,47 +758,42 @@ pub(super) fn translate_request_messages(
 			result
 		};
 
-		let tool_choice = match req.tool_choice {
-			Some(anthropic::ToolChoice::Auto) => {
-				if thinking_enabled {
-					Some(types::ToolChoice::Any)
-				} else {
-					Some(types::ToolChoice::Auto)
-				}
-			},
-			Some(anthropic::ToolChoice::Any) => Some(types::ToolChoice::Any),
-			Some(anthropic::ToolChoice::Tool { name }) => {
-				if thinking_enabled {
-					Some(types::ToolChoice::Any)
-				} else {
-					Some(types::ToolChoice::Tool { name })
-				}
-			},
-			Some(anthropic::ToolChoice::None) | None => {
-				if thinking_enabled {
-					Some(types::ToolChoice::Any)
-				} else {
-					None
-				}
-			},
-		};
+		// Only send toolConfig if we have at least one tool (Bedrock requires non-empty tools array)
+		if bedrock_tools.is_empty() {
+			None
+		} else {
+			let tool_choice = match req.tool_choice {
+				Some(anthropic::ToolChoice::Auto) => {
+					if thinking_enabled {
+						Some(types::ToolChoice::Any)
+					} else {
+						Some(types::ToolChoice::Auto)
+					}
+				},
+				Some(anthropic::ToolChoice::Any) => Some(types::ToolChoice::Any),
+				Some(anthropic::ToolChoice::Tool { name }) => {
+					if thinking_enabled {
+						Some(types::ToolChoice::Any)
+					} else {
+						Some(types::ToolChoice::Tool { name })
+					}
+				},
+				Some(anthropic::ToolChoice::None) | None => {
+					if thinking_enabled {
+						Some(types::ToolChoice::Any)
+					} else {
+						None
+					}
+				},
+			};
 
-		Some(types::ToolConfiguration {
-			tools: bedrock_tools,
-			tool_choice,
-		})
-	} else if has_tool_blocks {
-		// Messages contain tool use/result blocks but no tools array provided
-		// Bedrock requires toolConfig with empty tools array in this case
-		Some(types::ToolConfiguration {
-			tools: vec![],
-			tool_choice: if thinking_enabled {
-				Some(types::ToolChoice::Any)
-			} else {
-				None
-			},
-		})
+			Some(types::ToolConfiguration {
+				tools: bedrock_tools,
+				tool_choice,
+			})
+		}
 	} else {
+		// No tools provided => omit toolConfig entirely
 		None
 	};
 
@@ -1860,6 +1842,7 @@ pub(super) mod types {
 		/// An array of tools that you want to pass to a model.
 		pub tools: Vec<Tool>,
 		/// If supported by model, forces the model to request a tool.
+		#[serde(skip_serializing_if = "Option::is_none")]
 		pub tool_choice: Option<ToolChoice>,
 	}
 
