@@ -47,7 +47,15 @@ impl Provider {
 		bytes: &Bytes,
 	) -> Result<universal::ChatCompletionErrorResponse, AIError> {
 		let resp =
-			serde_json::from_slice::<ConverseErrorResponse>(bytes).map_err(AIError::ResponseParsing)?;
+			serde_json::from_slice::<ConverseErrorResponse>(bytes).map_err(|e| {
+				tracing::warn!(
+					"Failed to parse Bedrock error response: {}. Raw response: {}",
+					e,
+					std::str::from_utf8(bytes).unwrap_or("<invalid utf8>")
+				);
+				AIError::ResponseParsing(e)
+			})?;
+		tracing::debug!("Bedrock error response: {:?}", resp);
 		translate_error(resp)
 	}
 
@@ -887,6 +895,8 @@ pub(super) fn translate_request_messages(
 		request_metadata: metadata,
 		performance_config: None,
 	};
+
+	trace!("Translated Anthropic Messages request to Bedrock Converse format: {:?}", bedrock_request);
 
 	Ok(bedrock_request)
 }
