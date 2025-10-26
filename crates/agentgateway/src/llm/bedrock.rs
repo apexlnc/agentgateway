@@ -89,6 +89,21 @@ impl Provider {
 		}
 	}
 
+	pub fn get_count_tokens_path(&self, model: &str) -> Strng {
+		// CountTokens only works with region-specific model IDs (anthropic. prefix),
+		// not cross-region inference profiles (us. prefix). Strip the region prefix.
+		let model = model.strip_prefix("us.").unwrap_or(model);
+
+		// Ensure the model has the anthropic. prefix
+		let model = if model.starts_with("anthropic.") {
+			model
+		} else {
+			&strng::format!("anthropic.{model}")
+		};
+
+		strng::format!("/model/{model}/count-tokens")
+	}
+
 	pub fn get_host(&self) -> Strng {
 		strng::format!("bedrock-runtime.{}.amazonaws.com", self.region)
 	}
@@ -879,6 +894,134 @@ pub(super) fn translate_request_messages(
 	};
 
 	Ok(bedrock_request)
+}
+
+/// Translate Anthropic CountTokensRequest to Bedrock CountTokensRequest
+pub(super) fn translate_count_tokens_request(
+	req: anthropic::CountTokensRequest,
+) -> Result<types::CountTokensRequest, AIError> {
+	// Convert system prompt to Bedrock format (simple, no cache points for count_tokens)
+	let system_content = req.system.as_ref().map(|sys| {
+		let mut result = Vec::new();
+		match sys {
+			anthropic::SystemPrompt::Text(text) => {
+				result.push(types::SystemContentBlock::Text { text: text.clone() });
+			},
+			anthropic::SystemPrompt::Blocks(blocks) => {
+				for block in blocks {
+					match block {
+						anthropic::SystemContentBlock::Text { text, .. } => {
+							result.push(types::SystemContentBlock::Text { text: text.clone() });
+						},
+					}
+				}
+			},
+		}
+		result
+	});
+
+	// Convert messages (tools already embedded as tool_use/tool_result blocks)
+	let messages: Vec<types::Message> = req
+		.messages
+		.into_iter()
+		.map(|msg| {
+			let role = match msg.role {
+				anthropic::Role::Assistant => types::Role::Assistant,
+				anthropic::Role::User => types::Role::User,
+			};
+
+			let content: Vec<ContentBlock> = msg
+				.content
+				.into_iter()
+				.filter_map(|block| match block {
+					anthropic::ContentBlock::Text(anthropic::ContentTextBlock { text, .. }) => {
+						Some(ContentBlock::Text(text))
+					},
+					anthropic::ContentBlock::Image(anthropic::ContentImageBlock { source, .. }) => {
+						if let Some(media_type) = source.get("media_type").and_then(|v| v.as_str())
+							&& let Some(data) = source.get("data").and_then(|v| v.as_str())
+						{
+							let format = media_type.strip_prefix("image/").unwrap_or(media_type).to_string();
+							Some(ContentBlock::Image(types::ImageBlock {
+								format,
+								source: types::ImageSource {
+									bytes: data.to_string(),
+								},
+							}))
+						} else {
+							None
+						}
+					},
+					anthropic::ContentBlock::ToolUse { id, name, input, .. } => {
+						Some(ContentBlock::ToolUse(types::ToolUseBlock {
+							tool_use_id: id,
+							name,
+							input,
+						}))
+					},
+					anthropic::ContentBlock::ToolResult {
+						tool_use_id,
+						content: tool_content,
+						is_error,
+						..
+					} => {
+						let bedrock_content = match tool_content {
+							anthropic::ToolResultContent::Text(text) => {
+								vec![types::ToolResultContentBlock::Text(text)]
+							},
+							anthropic::ToolResultContent::Array(parts) => parts
+								.into_iter()
+								.filter_map(|part| match part {
+									anthropic::ToolResultContentPart::Text { text, .. } => {
+										Some(types::ToolResultContentBlock::Text(text))
+									},
+									anthropic::ToolResultContentPart::Image { source, .. } => {
+										if let Some(media_type) = source.get("media_type").and_then(|v| v.as_str())
+											&& let Some(data) = source.get("data").and_then(|v| v.as_str())
+										{
+											let format = media_type
+												.strip_prefix("image/")
+												.unwrap_or(media_type)
+												.to_string();
+											Some(types::ToolResultContentBlock::Image(types::ImageBlock {
+												format,
+												source: types::ImageSource {
+													bytes: data.to_string(),
+												},
+											}))
+										} else {
+											None
+										}
+									},
+									_ => None,
+								})
+								.collect(),
+						};
+						Some(ContentBlock::ToolResult(types::ToolResultBlock {
+							tool_use_id,
+							content: bedrock_content,
+							status: is_error
+								.filter(|&e| e)
+								.map(|_| types::ToolResultStatus::Error),
+						}))
+					},
+					// Skip blocks not relevant to token counting
+					_ => None,
+				})
+				.collect();
+
+			types::Message { role, content }
+		})
+		.collect();
+
+	Ok(types::CountTokensRequest {
+		input: types::CountTokensInputConverse {
+			converse: types::ConverseTokensRequest {
+				messages: Some(messages),
+				system: system_content,
+			},
+		},
+	})
 }
 
 pub(super) fn translate_response_to_messages(
@@ -1707,6 +1850,31 @@ pub(super) mod types {
 		/// Performance configuration.
 		#[serde(rename = "performanceConfig", skip_serializing_if = "Option::is_none")]
 		pub performance_config: Option<PerformanceConfiguration>,
+	}
+
+	/// Request body for Bedrock CountTokens API
+	#[derive(Clone, Serialize, Deserialize, Debug)]
+	pub struct CountTokensRequest {
+		/// The input for which to count tokens
+		pub input: CountTokensInputConverse,
+	}
+
+	/// Input field for CountTokens - Converse format
+	#[derive(Clone, Serialize, Deserialize, Debug)]
+	pub struct CountTokensInputConverse {
+		/// Converse-style input (messages + system)
+		pub converse: ConverseTokensRequest,
+	}
+
+	/// Converse-style input for CountTokens
+	#[derive(Clone, Serialize, Deserialize, Debug)]
+	pub struct ConverseTokensRequest {
+		/// The messages to count tokens for
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub messages: Option<Vec<Message>>,
+		/// System content blocks
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub system: Option<Vec<SystemContentBlock>>,
 	}
 
 	#[derive(Clone, Serialize, Debug)]
