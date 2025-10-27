@@ -55,7 +55,6 @@ impl Provider {
 				);
 				AIError::ResponseParsing(e)
 			})?;
-		tracing::debug!("Bedrock error response: {:?}", resp);
 		translate_error(resp)
 	}
 
@@ -877,8 +876,6 @@ pub(super) fn translate_request_messages(
 		request_metadata: metadata,
 		performance_config: None,
 	};
-
-	trace!("Translated Anthropic Messages request to Bedrock Converse format: {:?}", bedrock_request);
 
 	Ok(bedrock_request)
 }

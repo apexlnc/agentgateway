@@ -259,12 +259,7 @@ pub mod passthrough {
 		) -> Result<Vec<u8>, AIError> {
 			let typed = json::convert::<_, universal::Request>(self).map_err(AIError::RequestMarshal)?;
 			let xlated = llm::bedrock::translate_request_completions(typed, provider, headers);
-			let serialized = serde_json::to_vec(&xlated).map_err(AIError::RequestMarshal)?;
-			tracing::trace!(
-				"Serialized Bedrock request body (completions): {}",
-				std::str::from_utf8(&serialized).unwrap_or("<invalid utf8>")
-			);
-			Ok(serialized)
+			serde_json::to_vec(&xlated).map_err(AIError::RequestMarshal)
 		}
 
 		fn to_openai(&self) -> Result<Vec<u8>, AIError> {
