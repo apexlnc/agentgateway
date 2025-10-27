@@ -1,6 +1,6 @@
 ARG BUILDER=base
 
-FROM docker.io/library/node:23.11.0-bookworm AS node
+FROM docker.io/library/node:23-bookworm AS node
 
 WORKDIR /app
 
@@ -72,6 +72,13 @@ RUN find crates -name Cargo.toml -exec dirname {} \; | xargs -I {} mkdir -p {}/s
     echo 'fn main() {}' > crates/mock-server/src/main.rs && \
     mkdir -p crates/agentgateway/benches && \
     echo 'fn main() {}' > crates/agentgateway/benches/bench_tests.rs
+
+# Install git and configure for SSL issues
+RUN apt-get update && apt-get install -y git ca-certificates && rm -rf /var/lib/apt/lists/* && \
+    git config --global http.sslVerify false && \
+    mkdir -p /usr/local/cargo && \
+    echo '[net]' >> /usr/local/cargo/config.toml && \
+    echo 'git-fetch-with-cli = true' >> /usr/local/cargo/config.toml
 
 # OPTIMIZATION: Build dependencies only (this layer gets cached!)
 RUN --mount=type=cache,id=cargo-deps,target=/usr/local/cargo/registry \

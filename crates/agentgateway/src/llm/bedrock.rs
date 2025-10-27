@@ -1354,12 +1354,12 @@ impl ConverseResponseAdapter {
 
 	fn to_universal(&self) -> universal::Response {
 		let mut tool_calls: Vec<universal::MessageToolCall> = Vec::new();
-		let mut content = None;
+		let mut content_parts: Vec<String> = Vec::new();
 		let mut reasoning_content = None;
 		for block in &self.message.content {
 			match block {
 				ContentBlock::Text(text) => {
-					content = Some(text.clone());
+					content_parts.push(text.clone());
 				},
 				ContentBlock::ReasoningContent(reasoning) => {
 					// Extract text from either format
@@ -1389,6 +1389,12 @@ impl ConverseResponseAdapter {
 				},
 			}
 		}
+
+		let content = if content_parts.is_empty() {
+			None
+		} else {
+			Some(content_parts.join(""))
+		};
 
 		let message = universal::ResponseMessage {
 			role: universal::Role::Assistant,
