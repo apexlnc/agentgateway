@@ -372,8 +372,8 @@ pub(super) fn translate_stream_to_completions(
 	// This is static for all chunks!
 	let created = chrono::Utc::now().timestamp() as u32;
 	let mut saw_token = false;
-	// Track tool calls across events: (tool_id, tool_name, json_buffer)
-	let mut tool_calls: HashMap<i32, (String, String, String)> = HashMap::new();
+	// Track tool calls across events: (tool_id, tool_name, json_buffer, content_block_index)
+	let mut tool_calls: HashMap<i32, (String, String, String, i32)> = HashMap::new();
 
 	parse::aws_sse::transform(b, move |f| {
 		let res = types::ConverseStreamOutput::deserialize(f).ok()?;
@@ -396,12 +396,12 @@ pub(super) fn translate_stream_to_completions(
 				if let Some(types::ContentBlockStart::ToolUse(tu)) = start.start {
 					tool_calls.insert(
 						start.content_block_index,
-						(tu.tool_use_id.clone(), tu.name.clone(), String::new()),
+						(tu.tool_use_id.clone(), tu.name.clone(), String::new(), start.content_block_index),
 					);
 					// Emit the start of a tool call
 					let d = universal::StreamResponseDelta {
 						tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
-							index: 0,
+							index: start.content_block_index as u32,
 							id: Some(tu.tool_use_id),
 							r#type: Some(universal::ToolType::Function),
 							function: Some(FunctionCallStream {
@@ -450,10 +450,10 @@ pub(super) fn translate_stream_to_completions(
 						},
 						types::ContentBlockDelta::ToolUse(tu) => {
 							// Accumulate tool call JSON and emit deltas
-							if let Some((_id, _name, buffer)) = tool_calls.get_mut(&d.content_block_index) {
+							if let Some((_id, _name, buffer, index)) = tool_calls.get_mut(&d.content_block_index) {
 								buffer.push_str(&tu.input);
 								dr.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
-									index: 0,
+									index: *index as u32,
 									id: None, // Only sent in the first chunk
 									r#type: None,
 									function: Some(FunctionCallStream {
