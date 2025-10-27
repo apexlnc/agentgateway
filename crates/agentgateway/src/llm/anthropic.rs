@@ -1372,7 +1372,12 @@ pub mod passthrough {
 				.map_err(AIError::RequestMarshal)?;
 			let bedrock_request =
 				crate::llm::bedrock::translate_request_messages(typed, provider, headers)?;
-			serde_json::to_vec(&bedrock_request).map_err(AIError::RequestMarshal)
+			let serialized = serde_json::to_vec(&bedrock_request).map_err(AIError::RequestMarshal)?;
+			tracing::trace!(
+				"Serialized Bedrock request body: {}",
+				std::str::from_utf8(&serialized).unwrap_or("<invalid utf8>")
+			);
+			Ok(serialized)
 		}
 	}
 
