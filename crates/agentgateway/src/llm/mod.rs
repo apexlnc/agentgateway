@@ -145,11 +145,12 @@ pub struct LLMRequest {
 	pub params: LLMRequestParams,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InputFormat {
 	Completions,
 	Messages,
 	Responses,
+	CountTokens,
 }
 
 #[derive(Default, Clone, Debug, Serialize)]
@@ -513,58 +514,57 @@ impl AIProvider {
 		&self,
 		req: Request,
 		policies: Option<&Policy>,
-	) -> Result<(Request, LLMRequest), AIError> {
+	) -> Result<RequestResult, AIError> {
 		use crate::http;
 
-		match self {
-			AIProvider::Bedrock(_) => {
-				// Buffer and parse request body
-				let buffer_limit = http::buffer_limit(&req);
-				let (parts, body) = req.into_parts();
-				let Ok(bytes) = http::read_body_with_limit(body, buffer_limit).await else {
-					return Err(AIError::RequestTooLarge);
-				};
-
-				let anthropic_version = parts
-					.headers
-					.get("anthropic-version")
-					.and_then(|v| v.to_str().ok())
-					.unwrap_or("2023-06-01");
-
-				let mut count_req: crate::llm::anthropic::types::CountTokensRequest =
-					serde_json::from_slice(bytes.as_ref()).map_err(AIError::RequestParsing)?;
-
-				// Apply model alias resolution (consistent with other routes)
-				if let Some(p) = policies
-					&& let Some(aliased) = p.model_aliases.get(count_req.model.as_str())
-				{
-					count_req.model = aliased.to_string();
-				}
-
-				let model = count_req.model.clone();
-
-				// Translate to Bedrock format
-				let new_body = bedrock::process_count_tokens_request(count_req, anthropic_version)?;
-
-				let req = Request::from_parts(parts, new_body.into());
-
-				// Create LLMRequest for logging and path setup
-				let llm_request = LLMRequest {
-					input_tokens: None,
-					input_format: InputFormat::Messages,
-					request_model: model.into(),
-					provider: self.provider(),
-					streaming: false,
-					params: LLMRequestParams::default(),
-				};
-
-				Ok((req, llm_request))
-			},
-			_ => Err(AIError::UnsupportedConversion(strng::format!(
-				"Provider {} does not support Anthropic count_tokens API",
+		if !matches!(self, AIProvider::Bedrock(_)) {
+			return Err(AIError::UnsupportedConversion(strng::format!(
+				"InputFormat::CountTokens not supported by provider {}",
 				self.provider()
-			))),
+			)));
 		}
+
+		// Buffer and parse request body
+		let buffer_limit = http::buffer_limit(&req);
+		let (parts, body) = req.into_parts();
+		let Ok(bytes) = http::read_body_with_limit(body, buffer_limit).await else {
+			return Err(AIError::RequestTooLarge);
+		};
+
+		let anthropic_version = parts
+			.headers
+			.get("anthropic-version")
+			.and_then(|v| v.to_str().ok())
+			.unwrap_or("2023-06-01");
+
+		let mut count_req: crate::llm::anthropic::types::CountTokensRequest =
+			serde_json::from_slice(bytes.as_ref()).map_err(AIError::RequestParsing)?;
+
+		// Apply model alias resolution (consistent with other routes)
+		if let Some(p) = policies
+			&& let Some(aliased) = p.model_aliases.get(count_req.model.as_str())
+		{
+			count_req.model = aliased.to_string();
+		}
+
+		let model = count_req.model.clone();
+
+		// Translate to Bedrock format
+		let new_body = bedrock::process_count_tokens_request(count_req, anthropic_version)?;
+
+		let req = Request::from_parts(parts, new_body.into());
+
+		// Create LLMRequest for logging and path setup
+		let llm_request = LLMRequest {
+			input_tokens: None,
+			input_format: InputFormat::CountTokens,
+			request_model: model.into(),
+			provider: self.provider(),
+			streaming: false,
+			params: LLMRequestParams::default(),
+		};
+
+		Ok(RequestResult::Success(req, llm_request))
 	}
 
 	#[allow(clippy::too_many_arguments)]
@@ -662,6 +662,21 @@ impl AIProvider {
 		include_completion_in_log: bool,
 		resp: Response,
 	) -> Result<Response, AIError> {
+		// count_tokens has simplified response handling (just format translation)
+		if req.input_format == InputFormat::CountTokens {
+			return match self {
+				AIProvider::Bedrock(_) => bedrock::process_count_tokens_response(resp)
+					.await
+					.map_err(|e| {
+						AIError::UnsupportedConversion(strng::format!(
+							"Failed to process count_tokens response: {}",
+							e
+						))
+					}),
+				_ => unreachable!("CountTokens already validated at request time"),
+			};
+		}
+
 		if req.streaming {
 			return self
 				.process_streaming(req, rate_limit, log, include_completion_in_log, resp)
