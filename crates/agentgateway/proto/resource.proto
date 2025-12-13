@@ -133,6 +133,8 @@ enum Protocol {
   TLS = 3;
   TCP = 4;
   HBONE = 5;
+  // PROXY protocol v2 header followed by HTTP - used for Istio sandwich waypoint mode
+  PROXY_HTTP = 6;
 }
 
 message Timeout {

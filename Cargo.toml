@@ -115,6 +115,7 @@ pprof = { version = "0.15", features = [
     "protobuf-codec",
     "criterion",
 ] }
+ppp = "2.3"
 pretty_env_logger = "0.5"
 prometheus-client = "0.24"
 prost = "0.14"

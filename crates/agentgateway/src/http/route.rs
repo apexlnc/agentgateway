@@ -46,7 +46,11 @@ pub fn select_best_route(
 
 	let host = http::get_host(request).ok()?;
 	// TODO: ensure we actually serve this service
-	let (default_response, host) = if matches!(listener.protocol, ListenerProtocol::HBONE) {
+	// Waypoint modes (HBONE and ProxyHTTP/sandwich) need VIP-to-service lookup
+	let (default_response, host) = if matches!(
+		listener.protocol,
+		ListenerProtocol::HBONE | ListenerProtocol::ProxyHTTP
+	) {
 		let Some(self_addr) = self_addr else {
 			warn!("waypoint requires self address");
 			return None;

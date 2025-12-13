@@ -32,6 +32,8 @@ const (
 	Protocol_TLS     Protocol = 3
 	Protocol_TCP     Protocol = 4
 	Protocol_HBONE   Protocol = 5
+	// PROXY protocol v2 header followed by HTTP - used for Istio sandwich waypoint mode
+	Protocol_PROXY_HTTP Protocol = 6
 )
 
 // Enum value maps for Protocol.
@@ -43,14 +45,16 @@ var (
 		3: "TLS",
 		4: "TCP",
 		5: "HBONE",
+		6: "PROXY_HTTP",
 	}
 	Protocol_value = map[string]int32{
-		"UNKNOWN": 0,
-		"HTTP":    1,
-		"HTTPS":   2,
-		"TLS":     3,
-		"TCP":     4,
-		"HBONE":   5,
+		"UNKNOWN":    0,
+		"HTTP":       1,
+		"HTTPS":      2,
+		"TLS":        3,
+		"TCP":        4,
+		"HBONE":      5,
+		"PROXY_HTTP": 6,
 	}
 )
 
@@ -9969,14 +9973,16 @@ const file_resource_proto_rawDesc = "" +
 	"\bhostname\x18\x02 \x01(\tR\bhostnameB\x06\n" +
 	"\x04kind\"$\n" +
 	"\x04Alpn\x12\x1c\n" +
-	"\tprotocols\x18\x01 \x03(\tR\tprotocols*I\n" +
+	"\tprotocols\x18\x01 \x03(\tR\tprotocols*Y\n" +
 	"\bProtocol\x12\v\n" +
 	"\aUNKNOWN\x10\x00\x12\b\n" +
 	"\x04HTTP\x10\x01\x12\t\n" +
 	"\x05HTTPS\x10\x02\x12\a\n" +
 	"\x03TLS\x10\x03\x12\a\n" +
 	"\x03TCP\x10\x04\x12\t\n" +
-	"\x05HBONE\x10\x05B1Z/github.com/agentgateway/agentgateway/go/api;apib\x06proto3"
+	"\x05HBONE\x10\x05\x12\x0e\n" +
+	"\n" +
+	"PROXY_HTTP\x10\x06B1Z/github.com/agentgateway/agentgateway/go/api;apib\x06proto3"
 
 var (
 	file_resource_proto_rawDescOnce sync.Once

@@ -359,6 +359,32 @@ impl Gateway {
 			BindProtocol::hbone => {
 				let _ = Self::terminate_hbone(bind_name, inputs, raw_stream, policies, drain).await;
 			},
+			BindProtocol::proxy_http => {
+				match Self::handle_proxy_protocol(
+					bind_name.clone(),
+					inputs.clone(),
+					raw_stream,
+					policies,
+					drain,
+				)
+				.await
+				{
+					Ok(()) => {},
+					Err(e) => {
+						event!(
+							target: "downstream connection",
+							parent: None,
+							tracing::Level::WARN,
+
+							src.addr = %peer_addr,
+							protocol = ?bind_protocol,
+							error = ?e.to_string(),
+
+							"failed to handle PROXY protocol",
+						);
+					},
+				}
+			},
 		}
 	}
 
@@ -664,6 +690,64 @@ impl Gateway {
 		)
 		.await;
 	}
+
+	/// Handle incoming connection with PROXY protocol v2 header.
+	///
+	/// Used for Istio sandwich waypoint mode where ztunnel handles mTLS termination
+	/// and forwards traffic to agentgateway using PROXY protocol. The PROXY header
+	/// contains the original client addresses and peer identity (TLV 0xD0).
+	async fn handle_proxy_protocol(
+		bind_name: BindKey,
+		inputs: Arc<ProxyInputs>,
+		mut raw_stream: Socket,
+		policies: FrontendPolices,
+		drain: DrainWatcher,
+	) -> anyhow::Result<()> {
+		use super::proxy_protocol::parse_proxy_protocol;
+		use crate::transport::stream::{TCPConnectionInfo, TLSConnectionInfo};
+		use crate::transport::tls::TlsInfo;
+		use std::time::Instant;
+
+		// Parse PROXY protocol header from the stream
+		let pp_info = parse_proxy_protocol(&mut raw_stream).await?;
+
+		// Update TCPConnectionInfo with real source/dest from PROXY header
+		// This overwrites ztunnel's loopback address with the actual client address
+		raw_stream.ext_mut().insert(TCPConnectionInfo {
+			peer_addr: pp_info.src_addr,
+			local_addr: pp_info.dst_addr,
+			start: Instant::now(),
+		});
+
+		// Insert TLSConnectionInfo with identity from TLV 0xD0
+		// Even though there's no TLS on this connection, we use this struct
+		// to carry the peer identity that ztunnel extracted from mTLS
+		if let Some(identity) = pp_info.peer_identity {
+			raw_stream.ext_mut().insert(TLSConnectionInfo {
+				src_identity: Some(TlsInfo {
+					identity: Some(identity),
+					subject_alt_names: vec![],
+					issuer: crate::strng::EMPTY,
+					subject: crate::strng::EMPTY,
+					subject_cn: None,
+				}),
+				server_name: None,
+				negotiated_alpn: None,
+			});
+		}
+
+		// Continue as HTTP - the identity is now in the socket extensions
+		// and will flow through to CEL authorization via with_source()
+		Self::proxy(
+			bind_name,
+			inputs,
+			None,
+			raw_stream,
+			Arc::new(policies),
+			drain,
+		)
+		.await
+	}
 }
 
 fn tls_looks_like_http(d: Bytes) -> bool {
@@ -682,6 +766,12 @@ fn bind_protocol(inp: Arc<ProxyInputs>, bind: BindKey) -> BindProtocol {
 		.any(|l| matches!(l.protocol, ListenerProtocol::HBONE))
 	{
 		return BindProtocol::hbone;
+	}
+	if listeners
+		.iter()
+		.any(|l| matches!(l.protocol, ListenerProtocol::ProxyHTTP))
+	{
+		return BindProtocol::proxy_http;
 	}
 	if listeners
 		.iter()

@@ -536,6 +536,18 @@ pub struct IstioIdentity {
 	service_account: Strng,
 }
 
+impl IstioIdentity {
+	/// Create a new IstioIdentity from its components.
+	/// Used when parsing identity from PROXY protocol TLV.
+	pub fn new(trust_domain: Strng, namespace: Strng, service_account: Strng) -> Self {
+		Self {
+			trust_domain,
+			namespace,
+			service_account,
+		}
+	}
+}
+
 impl fmt::Display for IstioIdentity {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		write!(

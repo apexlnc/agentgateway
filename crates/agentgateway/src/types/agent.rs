@@ -150,6 +150,8 @@ pub enum ListenerProtocol {
 	/// Opaque TCP
 	TCP,
 	HBONE,
+	/// PROXY protocol v2 header followed by HTTP - used for Istio sandwich waypoint mode
+	ProxyHTTP,
 }
 
 impl ListenerProtocol {
@@ -180,6 +182,7 @@ pub enum BindProtocol {
 	hbone,
 	tcp,
 	tls,
+	proxy_http,
 }
 
 pub type ListenerKey = Strng;

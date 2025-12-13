@@ -238,6 +238,12 @@ impl Socket {
 		self.ext.get::<T>()
 	}
 
+	/// Returns a mutable reference to the extension container.
+	/// Used for adding connection metadata like identity from PROXY protocol.
+	pub fn ext_mut(&mut self) -> &mut Extension {
+		&mut self.ext
+	}
+
 	pub fn must_ext<T: Send + Sync + 'static>(&self) -> &T {
 		self.ext().expect("expected required extension")
 	}

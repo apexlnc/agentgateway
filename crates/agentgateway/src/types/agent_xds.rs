@@ -396,6 +396,7 @@ impl TryFrom<(proto::agent::Protocol, Option<&proto::agent::TlsConfig>)> for Lis
 			(Protocol::Tls, None) => Ok(ListenerProtocol::TLS(None)),
 			(Protocol::Tcp, None) => Ok(ListenerProtocol::TCP),
 			(Protocol::Hbone, None) => Ok(ListenerProtocol::HBONE),
+			(Protocol::ProxyHttp, None) => Ok(ListenerProtocol::ProxyHTTP),
 			(proto, tls) => Err(ProtoError::Generic(format!(
 				"protocol {:?} is incompatible with {}",
 				proto,
