@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
+
+need kubectl
+need helm
+need kind
+need tilt
+need docker
+need curl
+
+load_local_env
+
+# Paths to harness scripts + Tiltfile
+KIND_UP="${KIND_UP:-${AGW_DEV_ROOT}/.dev/scripts/kind-up.sh}"
+KGW_BOOTSTRAP="${KGW_BOOTSTRAP:-${AGW_DEV_ROOT}/.dev/scripts/bootstrap-kgateway.sh}"
+TILTFILE="${TILTFILE:-${AGW_DEV_ROOT}/.dev/Tiltfile}"
+
+log "K8s mode using:"
+log "  KIND_UP=${KIND_UP}"
+log "  KGW_BOOTSTRAP=${KGW_BOOTSTRAP}"
+log "  TILTFILE=${TILTFILE}"
+log "  Port-forward base: http://127.0.0.1:${AGW_K8S_PORT}"
+
+# ---- 1) Start kind cluster (idempotent) ----
+if [[ -x "${KIND_UP}" ]]; then
+  "${KIND_UP}"
+else
+  err "Missing kind-up script at ${KIND_UP}"
+  exit 1
+fi
+
+# ---- 2) Install/ensure kgateway (idempotent) ----
+if [[ -x "${KGW_BOOTSTRAP}" ]]; then
+  "${KGW_BOOTSTRAP}"
+else
+  err "Missing kgateway bootstrap script at ${KGW_BOOTSTRAP}"
+  exit 1
+fi
+
+# ---- 3) Run Tilt ----
+log "Starting Tilt..."
+# This runs Tilt in the foreground so you can see logs.
+# If you prefer background, you can run: tilt up ... & and then smoke.
+tilt up -f "${TILTFILE}" &
+TILT_PID=$!
+
+cleanup() {
+  warn "Stopping Tilt (pid=${TILT_PID})"
+  kill "${TILT_PID}" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+# Wait for port-forward to come up (Tilt handles it)
+BASE="http://127.0.0.1:${AGW_K8S_PORT}"
+log "Waiting for Gateway port-forward to respond..."
+for _ in $(seq 1 120); do
+  if curl -s "${BASE}/v1/messages" -H 'content-type: application/json' \
+      -d '{"model":"mock","max_tokens":4,"messages":[{"role":"user","content":"ping"}]}' >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
+
+# ---- 4) Smoke tests through kgateway->xDS->agentgateway ----
+smoke_messages "${BASE}"
+smoke_messages_stream "${BASE}"
+smoke_chat_completions "${BASE}"
+
+log "✅ test-k8s complete (Tilt still running; Ctrl+C to stop or let cleanup run)"
+wait "${TILT_PID}"

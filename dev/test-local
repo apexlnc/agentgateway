@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
+
+need curl
+need cargo
+
+load_local_env
+
+# ---- Configure mocks (adjust as needed) ----
+# Default mock endpoints; you can override via .dev/local.env
+export MOCK_LLM_URL="${MOCK_LLM_URL:-http://127.0.0.1:18080}"      # /v1/messages + /v1/chat/completions
+export MOCK_BEDROCK_URL="${MOCK_BEDROCK_URL:-http://127.0.0.1:18081}" # /model/*/converse-stream (eventstream)
+export AGW_LISTEN_ADDR="${AGW_LISTEN_ADDR:-127.0.0.1:${AGW_LOCAL_PORT}}"
+
+# ---- 1) Fast Rust checks ----
+run_pr_tests
+
+# ---- 2) Start mocks ----
+log "Starting local mocks..."
+# Preferred: docker compose (if you set it up)
+if [[ -f "${AGW_DEV_ROOT}/.dev/compose.yaml" ]] || [[ -f "${AGW_DEV_ROOT}/.dev/docker-compose.yml" ]]; then
+  need docker
+  if [[ -f "${AGW_DEV_ROOT}/.dev/compose.yaml" ]]; then
+    docker compose -f "${AGW_DEV_ROOT}/.dev/compose.yaml" up -d
+  else
+    docker compose -f "${AGW_DEV_ROOT}/.dev/docker-compose.yml" up -d
+  fi
+  log "Mocks started via docker compose."
+else
+  warn "No docker compose file found. If you run mocks manually, ensure:"
+  warn "  MOCK_LLM_URL=${MOCK_LLM_URL}"
+  warn "  MOCK_BEDROCK_URL=${MOCK_BEDROCK_URL}"
+fi
+
+# ---- 3) Run agentgateway locally ----
+# This is necessarily repo-specific; provide a default + override hook.
+log "Starting agentgateway locally from PR worktree..."
+
+pushd "${AGW_PR_ROOT}" >/dev/null
+
+# You must ensure agentgateway uses these env vars / config flags.
+# If the repo uses different names, set them in .dev/local.env and adjust your run command there.
+export PROVIDER_OPENAI_BASE_URL="${PROVIDER_OPENAI_BASE_URL:-${MOCK_LLM_URL}}"
+export PROVIDER_ANTHROPIC_BASE_URL="${PROVIDER_ANTHROPIC_BASE_URL:-${MOCK_LLM_URL}}"
+export PROVIDER_BEDROCK_BASE_URL="${PROVIDER_BEDROCK_BASE_URL:-${MOCK_BEDROCK_URL}}"
+
+# Let you override the exact run command without editing this script.
+RUN_CMD="${AGW_RUN_CMD:-cargo run --quiet --bin agentgateway}"
+
+# Start in background so we can smoke test.
+# shellcheck disable=SC2086
+${RUN_CMD} &
+AGW_PID=$!
+
+popd >/dev/null
+
+cleanup() {
+  log "Stopping agentgateway (pid=${AGW_PID})"
+  kill "${AGW_PID}" >/dev/null 2>&1 || true
+
+  if [[ -f "${AGW_DEV_ROOT}/.dev/compose.yaml" ]]; then
+    docker compose -f "${AGW_DEV_ROOT}/.dev/compose.yaml" down >/dev/null 2>&1 || true
+  elif [[ -f "${AGW_DEV_ROOT}/.dev/docker-compose.yml" ]]; then
+    docker compose -f "${AGW_DEV_ROOT}/.dev/docker-compose.yml" down >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+# Wait briefly for the server
+AGW_READY_URL="${AGW_READY_URL:-http://${AGW_LISTEN_ADDR}/healthz}"
+AGW_READY_SLEEP="${AGW_READY_SLEEP:-4}"
+log "Waiting for agentgateway readiness at ${AGW_READY_URL} (fallback sleep ${AGW_READY_SLEEP}s)..."
+READY_OK=0
+for _ in $(seq 1 40); do
+  if curl -s "${AGW_READY_URL}" >/dev/null 2>&1; then
+    READY_OK=1
+    break
+  fi
+  sleep 0.1
+done
+if [[ "${READY_OK}" != "1" ]]; then
+  warn "Readiness check failed; sleeping ${AGW_READY_SLEEP}s before smoke tests."
+  sleep "${AGW_READY_SLEEP}"
+fi
+
+BASE="http://${AGW_LISTEN_ADDR}"
+
+# ---- 4) Smoke tests ----
+smoke_messages "${BASE}"
+smoke_messages_stream "${BASE}"
+smoke_chat_completions "${BASE}"
+
+log "✅ test-local complete"

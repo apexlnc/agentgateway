@@ -4,4 +4,5 @@
 .DS_Store
 .venv
 *.local
+.dev/local.env
 var/
