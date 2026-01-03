@@ -1,0 +1,7 @@
+[
+  {"event_type":"messageStart","payload":{"role":"assistant"}},
+  {"event_type":"contentBlockDelta","payload":{"contentBlockIndex":0,"delta":{"toolUse":{"toolUseId":"t1","name":"search","input":"{\"q\":\"hel"}}}},
+  {"event_type":"contentBlockDelta","payload":{"contentBlockIndex":0,"delta":{"toolUse":{"toolUseId":"t1","name":"search","input":"lo\"}"}}}},
+  {"event_type":"messageStop","payload":{"stopReason":"tool_use"}},
+  {"event_type":"metadata","payload":{"usage":{"inputTokens":10,"outputTokens":5}}}
+]

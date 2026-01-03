@@ -1,0 +1,93 @@
+s = read_yaml("tilt-settings.yaml")
+CTX = s.get("context", "kind-agw-dev")
+NS = s.get("namespace", "kgateway-system")
+AGW_SRC = os.path.realpath(s.get("agentgateway_src", "../agentgateway-pr"))
+IMG = s.get("image", "localhost:5001/agentgateway:dev")
+PF_LOCAL = s.get("port_forward", {}).get("local", 8080)
+PF_REMOTE = s.get("port_forward", {}).get("remote", 80)
+PF_BEDROCK = s.get("mock_bedrock_port_forward", 18081)
+
+allow_k8s_contexts(CTX)
+k8s_kind("Service")
+
+local_resource("bootstrap:kind-up", "bash scripts/kind-up.sh", trigger_mode=TRIGGER_MODE_MANUAL)
+local_resource(
+    "bootstrap:kgateway",
+    "bash scripts/bootstrap-kgateway.sh",
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    resource_deps=["bootstrap:kind-up"],
+)
+
+# Apply k8s resources (include mock-bedrock if created)
+k8s_yaml(
+    [
+        "k8s/10-gateway.yaml",
+        "k8s/15-agentgateway-service.yaml",
+        "k8s/20-mock-llm.yaml",
+        "k8s/25-mock-bedrock.yaml",
+        "k8s/30-backends-and-routes.yaml",
+    ]
+)
+
+# Build/push agentgateway image from PR worktree on changes
+deps = [os.path.join(AGW_SRC, "Cargo.toml"), os.path.join(AGW_SRC, "Cargo.lock")]
+src_dir = os.path.join(AGW_SRC, "src")
+if os.path.exists(src_dir):
+    deps.append(src_dir)
+crates_dir = os.path.join(AGW_SRC, "crates")
+if os.path.exists(crates_dir):
+    deps.append(crates_dir)
+
+local_resource(
+    "build:agentgateway",
+    cmd="AGW_SRC=%s IMG=%s bash scripts/build-push-agentgateway.sh" % (AGW_SRC, IMG),
+    deps=deps,
+    resource_deps=["bootstrap:kgateway"],
+)
+
+local_resource(
+    "deploy:restart-agentgateway",
+    cmd="bash scripts/restart-agentgateway-proxy.sh",
+    resource_deps=["build:agentgateway"],
+)
+
+k8s_resource(
+    "agentgateway-dev",
+    extra_pod_selectors=[{"app": "agentgateway"}],
+    port_forwards=["%d:%d" % (PF_LOCAL, PF_REMOTE)],
+    resource_deps=["deploy:restart-agentgateway"],
+)
+
+k8s_resource("mock-llm:service", port_forwards=["18080:8080"])
+k8s_resource("mock-bedrock:service", port_forwards=["%d:8081" % PF_BEDROCK])
+
+local_resource(
+    "smoke",
+    "bash scripts/smoke.sh http://127.0.0.1:%d" % PF_LOCAL,
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    resource_deps=["agentgateway-dev"],
+)
+local_resource(
+    "smoke:stream",
+    "bash scripts/smoke_stream.sh http://127.0.0.1:%d" % PF_LOCAL,
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    resource_deps=["agentgateway-dev"],
+)
+local_resource(
+    "smoke:bedrock-basic",
+    "bash scripts/smoke_bedrock_stream.sh http://127.0.0.1:%d basic_text" % PF_BEDROCK,
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    resource_deps=["mock-bedrock:service"],
+)
+local_resource(
+    "smoke:bedrock-tool-split",
+    "bash scripts/smoke_bedrock_stream.sh http://127.0.0.1:%d tool_use_split" % PF_BEDROCK,
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    resource_deps=["mock-bedrock:service"],
+)
+local_resource(
+    "smoke:bedrock-error",
+    "bash scripts/smoke_bedrock_stream.sh http://127.0.0.1:%d error_midstream" % PF_BEDROCK,
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    resource_deps=["mock-bedrock:service"],
+)

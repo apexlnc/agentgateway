@@ -1,0 +1,102 @@
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: Backend
+metadata:
+  name: mock-openai
+  namespace: kgateway-system
+spec:
+  type: AI
+  ai:
+    llm:
+      openai:
+        model: "mock"
+      host: mock-llm.kgateway-system.svc.cluster.local
+      port: 8080
+---
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: Backend
+metadata:
+  name: mock-anthropic
+  namespace: kgateway-system
+spec:
+  type: AI
+  ai:
+    llm:
+      anthropic:
+        model: "mock"
+      host: mock-llm.kgateway-system.svc.cluster.local
+      port: 8080
+---
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: Backend
+metadata:
+  name: mock-bedrock
+  namespace: kgateway-system
+spec:
+  type: AI
+  ai:
+    llm:
+      bedrock:
+        model: "mock"
+        region: "us-east-1"
+      host: mock-bedrock.kgateway-system.svc.cluster.local
+      port: 8081
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: route-openai
+  namespace: kgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway
+      namespace: kgateway-system
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1/chat/completions
+      backendRefs:
+        - name: mock-openai
+          namespace: kgateway-system
+          group: gateway.kgateway.dev
+          kind: Backend
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: route-anthropic
+  namespace: kgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway
+      namespace: kgateway-system
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1/messages
+      backendRefs:
+        - name: mock-anthropic
+          namespace: kgateway-system
+          group: gateway.kgateway.dev
+          kind: Backend
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: route-bedrock
+  namespace: kgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway
+      namespace: kgateway-system
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /bedrock
+      backendRefs:
+        - name: mock-bedrock
+          namespace: kgateway-system
+          group: gateway.kgateway.dev
+          kind: Backend

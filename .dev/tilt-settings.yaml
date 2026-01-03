@@ -1,0 +1,8 @@
+context: kind-agw-dev
+namespace: kgateway-system
+agentgateway_src: ../../agentgateway-pr
+image: localhost:5001/agentgateway:dev
+port_forward:
+  local: 8080
+  remote: 80
+mock_bedrock_port_forward: 18081

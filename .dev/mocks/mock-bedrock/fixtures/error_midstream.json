@@ -1,0 +1,5 @@
+[
+  {"event_type":"messageStart","payload":{"role":"assistant"}},
+  {"event_type":"contentBlockDelta","payload":{"contentBlockIndex":0,"delta":{"text":"partial"}}},
+  {"event_type":"internalServerException","payload":{"message":"boom"}}
+]

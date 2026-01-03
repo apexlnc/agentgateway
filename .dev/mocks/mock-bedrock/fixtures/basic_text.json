@@ -1,0 +1,7 @@
+[
+  {"event_type":"messageStart","payload":{"role":"assistant"}},
+  {"event_type":"contentBlockDelta","payload":{"contentBlockIndex":0,"delta":{"text":"hello "}}},
+  {"event_type":"contentBlockDelta","payload":{"contentBlockIndex":0,"delta":{"text":"world"}}},
+  {"event_type":"messageStop","payload":{"stopReason":"end_turn"}},
+  {"event_type":"metadata","payload":{"usage":{"inputTokens":3,"outputTokens":2}}}
+]
