@@ -4,6 +4,7 @@ set -euo pipefail
 # Common locations (override by exporting env vars)
 export AGW_DEV_ROOT="${AGW_DEV_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export AGW_PR_ROOT="${AGW_PR_ROOT:-$(cd "${AGW_DEV_ROOT}/.." && pwd)/agentgateway-pr}"
+export KGW_DEV_ROOT="${KGW_DEV_ROOT:-$(cd "${AGW_DEV_ROOT}/.." && pwd)/kgateway-localdev}"
 
 # Ports
 export AGW_LOCAL_PORT="${AGW_LOCAL_PORT:-18000}"  # agentgateway local mode
@@ -44,6 +45,10 @@ load_local_env() {
     log "Loading ${AGW_DEV_ROOT}/.dev/local.env"
     # shellcheck disable=SC1090
     source "${AGW_DEV_ROOT}/.dev/local.env"
+  elif [[ -f "${KGW_DEV_ROOT}/.dev/local.env" ]]; then
+    log "Loading ${KGW_DEV_ROOT}/.dev/local.env"
+    # shellcheck disable=SC1090
+    source "${KGW_DEV_ROOT}/.dev/local.env"
   fi
 }
 

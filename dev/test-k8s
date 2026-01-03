@@ -11,6 +11,11 @@ need curl
 
 load_local_env
 
+# Prefer kgateway-localdev .dev harness if present
+if [[ ! -d "${AGW_DEV_ROOT}/.dev" ]] && [[ -d "${KGW_DEV_ROOT}/.dev" ]]; then
+  AGW_DEV_ROOT="${KGW_DEV_ROOT}"
+fi
+
 # Paths to harness scripts + Tiltfile
 KIND_UP="${KIND_UP:-${AGW_DEV_ROOT}/.dev/scripts/kind-up.sh}"
 KGW_BOOTSTRAP="${KGW_BOOTSTRAP:-${AGW_DEV_ROOT}/.dev/scripts/bootstrap-kgateway.sh}"
