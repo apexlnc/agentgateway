@@ -49,4 +49,8 @@ impl RequestType for Request {
 	fn to_bedrock_token_count(&self, headers: &::http::HeaderMap) -> Result<Vec<u8>, AIError> {
 		conversion::bedrock::from_anthropic_token_count::translate(self, headers)
 	}
+
+	fn to_anthropic(&self) -> Result<Vec<u8>, AIError> {
+		serde_json::to_vec(&self).map_err(AIError::RequestMarshal)
+	}
 }

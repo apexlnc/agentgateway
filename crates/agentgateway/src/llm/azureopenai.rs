@@ -19,26 +19,31 @@ impl super::Provider for Provider {
 
 impl Provider {
 	pub fn get_path_for_model(&self, route: RouteType, model: &str) -> Strng {
-		let t = if route == RouteType::Embeddings {
-			strng::literal!("embeddings")
-		} else {
-			strng::literal!("chat/completions")
-		};
+		match route {
+			RouteType::Messages => strng::literal!("/anthropic/v1/messages"),
+			RouteType::AnthropicTokenCount => strng::literal!("/anthropic/v1/messages/count_tokens"),
+			RouteType::Embeddings => self.get_openai_path("embeddings", model),
+			_ => self.get_openai_path("chat/completions", model),
+		}
+	}
+
+	fn get_openai_path(&self, operation: &str, model: &str) -> Strng {
 		let api_version = self.api_version();
 		if api_version == "v1" {
-			strng::format!("/openai/v1/{t}")
-		} else if api_version == "preview" {
-			// v1 preview API
-			strng::format!("/openai/v1/{t}?api-version=preview")
+			strng::format!("/openai/v1/{operation}")
+		} else if api_version == "preview" && operation == "chat/completions" {
+			// v1 preview API logic (only seen for chat/completions in original code)
+			strng::format!("/openai/v1/{operation}?api-version=preview")
 		} else {
 			let model = self.model.as_deref().unwrap_or(model);
 			strng::format!(
-				"/openai/deployments/{}/{t}?api-version={}",
+				"/openai/deployments/{}/{operation}?api-version={}",
 				model,
 				api_version
 			)
 		}
 	}
+
 	pub fn get_host(&self) -> Strng {
 		self.host.clone()
 	}
