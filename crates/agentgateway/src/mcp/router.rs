@@ -15,9 +15,9 @@ use crate::mcp::sse::LegacySSEService;
 use crate::mcp::streamablehttp::{StreamableHttpServerConfig, StreamableHttpService};
 use crate::mcp::{MCPInfo, McpAuthorizationSet};
 use crate::proxy::ProxyError;
-use crate::proxy::httpproxy::PolicyClient;
+use crate::proxy::httpproxy::{MustSnapshot, PolicyClient};
 use crate::store::{BackendPolicies, Stores};
-use crate::telemetry::log::AsyncLog;
+use crate::telemetry::log::RequestLog;
 use crate::types::agent::{
 	BackendTargetRef, McpBackend, McpTargetSpec, ResourceName, SimpleBackend, SimpleBackendReference,
 };
@@ -64,8 +64,8 @@ impl App {
 		backend_group_name: ResourceName,
 		backend: McpBackend,
 		backend_policies: BackendPolicies,
-		mut req: Request,
-		log: AsyncLog<MCPInfo>,
+		mut req: MustSnapshot<'_>,
+		mut log: &mut RequestLog,
 	) -> Result<Response, ProxyError> {
 		let backends = {
 			let binds = self.state.read_binds();
@@ -110,12 +110,10 @@ impl App {
 		let authn = backend_policies.mcp_authentication;
 
 		// Store an empty value, we will populate each field async
-		log.store(Some(MCPInfo::default()));
-		req.extensions_mut().insert(log);
+		let logy = log.mcp_status.clone();
+		logy.store(Some(MCPInfo::default()));
+		req.extensions_mut().insert(logy);
 
-		// TODO: today we duplicate everything which is error prone. It would be ideal to re-use the parent one
-		// The problem is that we decide whether to include various attributes before we pick the backend,
-		// so we don't know to register the MCP policies
 		let mut ctx = ContextBuilder::new();
 		authorization_policies.register(&mut ctx);
 		ctx.maybe_buffer_request_body(&mut req).await;
@@ -130,6 +128,12 @@ impl App {
 			return Ok(resp);
 		}
 
+		let mut req = req.take_and_snapshot(Some(&mut log))?;
+		// This is an unfortunate clone. The request snapshot is intended to be done at the end of the request,
+		// so it strips all of the extensions. However, in MCP land its much trickier for us to do this so
+		// we snapshot early... but then we lose the extensions. So we do a clone here.
+		let snapshot = log.request_snapshot.clone();
+		req.extensions_mut().insert(Arc::new(snapshot));
 		if req.uri().path() == "/sse" {
 			// Legacy handling
 			// Assume this is streamable HTTP otherwise
