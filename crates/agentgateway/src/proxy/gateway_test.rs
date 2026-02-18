@@ -1,5 +1,6 @@
 use ::http::{Method, StatusCode, Version};
 use agent_core::strng;
+use agent_core::telemetry::testing::find_one_with_timeout;
 use assert_matches::assert_matches;
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -1075,18 +1076,12 @@ async fn assert_llm(io: Client<MemoryConnector, Body>, body: &[u8], want: Value)
 
 	// Ensure body finishes
 	let _ = res.into_body().collect().await.unwrap();
-	let logs = check_eventually(
+	let log = find_one_with_timeout(
+		&[("scope", "request"), ("http.path", &format!("/{r}"))],
 		Duration::from_secs(1),
-		|| async {
-			agent_core::telemetry::testing::find(&[("scope", "request"), ("http.path", &format!("/{r}"))])
-				.to_vec()
-		},
-		|log| log.len() == 1,
 	)
-	.await
-	.unwrap();
-	let log = logs.first().unwrap();
-	let valid = is_json_subset(&want, log);
+	.await;
+	let valid = is_json_subset(&want, &log);
 	assert!(valid, "want={want:#?} got={log:#?}");
 }
 
