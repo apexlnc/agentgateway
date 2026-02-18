@@ -646,6 +646,29 @@ pub mod testing {
 		found
 	}
 
+	pub async fn find_one_with_timeout(want: &[(&str, &str)], timeout: std::time::Duration) -> Value {
+		let deadline = std::time::Instant::now() + timeout;
+		let mut delay = std::time::Duration::from_millis(10);
+		loop {
+			let mut logs = find(want);
+			match logs.len() {
+				1 => return logs.pop().unwrap(),
+				0 => {
+					// No logs yet, continue waiting
+					if std::time::Instant::now() >= deadline {
+						panic!("timed out waiting for telemetry log with params: {want:?}");
+					}
+				},
+				n => {
+					// Multiple logs found, this is unexpected
+					panic!("expected exactly 1 telemetry log, found {n} logs: {logs:?}");
+				},
+			}
+			tokio::time::sleep(delay).await;
+			delay = (delay * 2).min(std::time::Duration::from_millis(100));
+		}
+	}
+
 	/// MockWriter will store written logs
 	#[derive(Debug, Clone)]
 	pub struct MockWriter {

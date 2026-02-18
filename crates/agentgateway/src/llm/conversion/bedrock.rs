@@ -2602,7 +2602,6 @@ impl ConverseResponseAdapter {
 			})
 			.unwrap_or_default();
 
-		tracing::error!("howardjohn: {:#?}", usage);
 		completions::Response {
 			id: format!("bedrock-{}", chrono::Utc::now().timestamp_millis()),
 			object: "chat.completion".to_string(),
