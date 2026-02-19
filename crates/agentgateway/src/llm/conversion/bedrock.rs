@@ -429,10 +429,12 @@ pub mod from_completions {
 			completions::ResponseFormat::JsonObject => (
 				None,
 				None,
-				serde_json::json!({ "type": "object", "additionalProperties": true }),
+				std::borrow::Cow::Owned(
+					serde_json::json!({ "type": "object", "additionalProperties": true }),
+				),
 			),
 			completions::ResponseFormat::JsonSchema { json_schema } => {
-				let Some(schema) = json_schema.schema.clone() else {
+				let Some(schema) = json_schema.schema.as_ref() else {
 					tracing::warn!(
 						"Dropping response_format.json_schema for Bedrock conversion because schema is missing"
 					);
@@ -441,12 +443,12 @@ pub mod from_completions {
 				(
 					Some(json_schema.name.clone()),
 					json_schema.description.clone(),
-					schema,
+					std::borrow::Cow::Borrowed(schema),
 				)
 			},
 		};
 
-		let Ok(schema_json) = serde_json::to_string(&schema) else {
+		let Ok(schema_json) = serde_json::to_string(schema.as_ref()) else {
 			tracing::warn!(
 				"Dropping structured output for Bedrock conversion: schema is not serializable"
 			);
@@ -1896,10 +1898,12 @@ pub mod from_responses {
 			responses::TextResponseFormatConfiguration::JsonObject => (
 				None,
 				None,
-				serde_json::json!({ "type": "object", "additionalProperties": true }),
+				std::borrow::Cow::Owned(
+					serde_json::json!({ "type": "object", "additionalProperties": true }),
+				),
 			),
 			responses::TextResponseFormatConfiguration::JsonSchema(json_schema) => {
-				let Some(schema) = json_schema.schema.clone() else {
+				let Some(schema) = json_schema.schema.as_ref() else {
 					tracing::warn!(
 						"Dropping text.format.json_schema for Bedrock conversion because schema is missing"
 					);
@@ -1908,12 +1912,12 @@ pub mod from_responses {
 				(
 					Some(json_schema.name.clone()),
 					json_schema.description.clone(),
-					schema,
+					std::borrow::Cow::Borrowed(schema),
 				)
 			},
 		};
 
-		let Ok(schema_json) = serde_json::to_string(&schema) else {
+		let Ok(schema_json) = serde_json::to_string(schema.as_ref()) else {
 			tracing::warn!("Dropping text.format for Bedrock conversion: schema is not serializable");
 			return None;
 		};
