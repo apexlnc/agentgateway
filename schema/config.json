@@ -2891,6 +2891,11 @@
             "string",
             "null"
           ]
+        },
+        "failureMode": {
+          "description": "Behavior when the remote rate limit service is unavailable or returns an error.\nDefaults to failClosed, denying requests with a 500 status on service failure.",
+          "$ref": "#/$defs/FailureMode",
+          "default": "failClosed"
         }
       },
       "required": [
@@ -2998,6 +3003,21 @@
       "required": [
         "key",
         "value"
+      ]
+    },
+    "FailureMode": {
+      "description": "Defines how the proxy behaves when the remote rate limit service is\nunavailable or returns an error.\n\nDefaults to `FailClosed`. When failing closed, a 500 Internal Server Error\nis returned when the service is unavailable. When failing open, requests are\nallowed through despite the service failure.\n\n# Configuration\n\nBoth camelCase (`failOpen`, `failClosed`) and PascalCase (`FailOpen`,\n`FailClosed`) are accepted in configuration files",
+      "oneOf": [
+        {
+          "description": "Deny the request with a 500 status when the rate limit service is unavailable (default).",
+          "type": "string",
+          "const": "failClosed"
+        },
+        {
+          "description": "Allow the request through when the rate limit service is unavailable.",
+          "type": "string",
+          "const": "failOpen"
+        }
       ]
     },
     "LocalJwtConfig": {
@@ -3217,7 +3237,7 @@
         },
         "failureMode": {
           "description": "Behavior when the authorization service is unavailable or returns an error",
-          "$ref": "#/$defs/FailureMode",
+          "$ref": "#/$defs/FailureMode2",
           "default": "deny"
         },
         "includeRequestHeaders": {
@@ -3405,7 +3425,7 @@
         }
       ]
     },
-    "FailureMode": {
+    "FailureMode2": {
       "oneOf": [
         {
           "type": "string",
@@ -3462,7 +3482,7 @@
       "properties": {
         "failureMode": {
           "description": "Behavior when the ext_proc service is unavailable or returns an error",
-          "$ref": "#/$defs/FailureMode2",
+          "$ref": "#/$defs/FailureMode3",
           "default": "failClosed"
         },
         "metadataContext": {
@@ -3562,7 +3582,7 @@
         }
       ]
     },
-    "FailureMode2": {
+    "FailureMode3": {
       "type": "string",
       "enum": [
         "failClosed",
