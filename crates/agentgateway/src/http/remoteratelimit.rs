@@ -134,6 +134,14 @@ impl RemoteRateLimit {
 			.filter(|e| e.limit_type == limit_type)
 		{
 			if let Some(rl_entries) = Self::eval_descriptor(req, &desc_entry.entries) {
+				// Rate limit servers require each descriptor to have at least one entry.
+				if rl_entries.is_empty() {
+					trace!(
+						"ratelimit skipping descriptor with no entries for domain={}, type={:?}",
+						self.domain, limit_type,
+					);
+					continue;
+				}
 				// Trace evaluated descriptor key/value pairs for visibility
 				let kv_pairs: Vec<String> = rl_entries
 					.iter()
