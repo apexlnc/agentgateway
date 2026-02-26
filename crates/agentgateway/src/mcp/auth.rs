@@ -4,21 +4,22 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum_core::response::IntoResponse;
 use bytes::Bytes;
-use http::Method;
 use http::uri::PathAndQuery;
+use http::Method;
 use tracing::{debug, warn};
 
 use crate::http::jwt::Claims;
 use crate::http::*;
 use crate::json;
 use crate::json::from_body_with_limit;
-use crate::proxy::ProxyError;
 use crate::proxy::httpproxy::PolicyClient;
+use crate::proxy::ProxyError;
 use crate::types::agent::{McpAuthentication, McpIDP};
 
 const OAUTH_PROTECTED_RESOURCE_PREFIX: &str = "/.well-known/oauth-protected-resource";
 const OAUTH_AUTHORIZATION_SERVER_PREFIX: &str = "/.well-known/oauth-authorization-server";
 const CLIENT_REGISTRATION_SUFFIX: &str = "/client-registration";
+const CLIENT_REGISTRATION_SEGMENT: &str = "client-registration";
 
 #[derive(Debug, Clone)]
 pub(crate) struct PassthroughProtectedResource {
@@ -37,6 +38,20 @@ pub(crate) enum PassthroughWellKnown {
 pub(super) fn is_well_known_endpoint(path: &str) -> bool {
 	path.starts_with(OAUTH_PROTECTED_RESOURCE_PREFIX)
 		|| path.starts_with(OAUTH_AUTHORIZATION_SERVER_PREFIX)
+}
+
+fn has_authorization_server_prefix(path: &str) -> bool {
+	path
+		.strip_prefix(OAUTH_AUTHORIZATION_SERVER_PREFIX)
+		.is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+fn is_client_registration_endpoint(path: &str) -> bool {
+	has_authorization_server_prefix(path)
+		&& path
+			.rsplit('/')
+			.next()
+			.is_some_and(|segment| segment == CLIENT_REGISTRATION_SEGMENT)
 }
 
 fn request_uri(req: &Request) -> Uri {
@@ -269,6 +284,7 @@ pub(crate) async fn rewrite_passthrough_protected_resource_metadata(
 pub(super) async fn apply_token_validation(
 	req: &mut Request,
 	auth: &McpAuthentication,
+	client: &PolicyClient,
 ) -> Result<(), ProxyError> {
 	// skip well-known OAuth endpoints for authn
 	if is_well_known_endpoint(request_path(req)) {
@@ -289,9 +305,13 @@ pub(super) async fn apply_token_validation(
 		"MCP auth configured; validating Authorization header (mode={:?})",
 		auth.mode
 	);
-	auth.jwt_validator.apply(None, req).await.map_err(|e| {
-		create_auth_required_response(ProxyError::JwtAuthenticationFailure(e), req, auth)
-	})?;
+	auth
+		.jwt_validator
+		.apply(&client.inputs.upstream, None, None, req)
+		.await
+		.map_err(|e| {
+			create_auth_required_response(ProxyError::JwtAuthenticationFailure(e), req, auth)
+		})?;
 	Ok(())
 }
 
@@ -303,12 +323,12 @@ pub(super) async fn enforce_authentication(
 	// skip well-known OAuth endpoints for authn
 	let path = request_path(req).to_string();
 	if !is_well_known_endpoint(path.as_str()) {
-		apply_token_validation(req, auth).await?;
+		apply_token_validation(req, auth, client).await?;
 	}
 
 	match path.as_str() {
 		// TODO: indicate this is a DirectResponse
-		path if path.ends_with("client-registration") => Ok(Some(
+		path if is_client_registration_endpoint(path) => Ok(Some(
 			client_registration(req, auth, client.clone())
 				.await
 				.map_err(|e| {
@@ -534,9 +554,10 @@ pub(super) async fn client_registration(
 #[cfg(test)]
 mod tests {
 	use super::{
-		OAUTH_PROTECTED_RESOURCE_PREFIX, PassthroughWellKnown, passthrough_well_known,
-		pre_route_rewrite_uri, rewrite_passthrough_protected_resource_metadata,
-		rewrite_passthrough_www_authenticate, rewrite_www_authenticate_for_request_uri,
+		is_client_registration_endpoint, passthrough_well_known, pre_route_rewrite_uri,
+		rewrite_passthrough_protected_resource_metadata, rewrite_passthrough_www_authenticate,
+		rewrite_www_authenticate_for_request_uri, PassthroughWellKnown,
+		OAUTH_PROTECTED_RESOURCE_PREFIX,
 	};
 	use crate::http::tests_common::request_for_uri;
 	use crate::http::{Body, StatusCode, Uri};
@@ -705,6 +726,27 @@ mod tests {
 			.unwrap_or_default();
 		assert!(header.contains(
 			"resource_metadata=\"http://example.com/.well-known/oauth-protected-resource/mcp/notion\""
+		));
+	}
+
+	#[test]
+	fn client_registration_endpoint_requires_expected_prefix_and_segment_suffix() {
+		assert!(is_client_registration_endpoint(
+			"/.well-known/oauth-authorization-server/mcp/client-registration"
+		));
+		assert!(is_client_registration_endpoint(
+			"/.well-known/oauth-authorization-server/client-registration"
+		));
+
+		assert!(!is_client_registration_endpoint(
+			"/.well-known/oauth-authorization-server/mcp/client-registration-extra"
+		));
+		assert!(!is_client_registration_endpoint(
+			"/.well-known/oauth-authorization-serverevil/mcp/client-registration"
+		));
+		assert!(!is_client_registration_endpoint("/mcp/client-registration"));
+		assert!(!is_client_registration_endpoint(
+			"/.well-known/oauth-authorization-server/mcp/client-registration/"
 		));
 	}
 }
