@@ -15,8 +15,10 @@ on:
         type: boolean
 
 env:
-  REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
-  CONTROLLER_REGISTRY_IMAGE: ghcr.io/${{ github.repository }}-controller
+  REGISTRY_IMAGE: ghcr.io/${{ github.repository_owner }}/agentgateway
+  CONTROLLER_REGISTRY_IMAGE: ghcr.io/${{ github.repository_owner }}/controller
+  # Note: /charts is added to this
+  CHART_REGISTRY_IMAGE_BASE: ghcr.io/${{ github.repository_owner }}
 
 jobs:
   setup:
@@ -433,6 +435,28 @@ jobs:
         run: |
           docker buildx imagetools inspect ${{ env.CONTROLLER_REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
 
+  push-helm-charts:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    needs:
+      - setup
+      - push-controller-image
+    env:
+      VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Helm login to ${{ env.CHART_REGISTRY_IMAGE_BASE }}
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | ./tools/helm registry login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+
+      - name: Push helm charts
+        run: make -C controller release-charts
+        env:
+          IMAGE_REGISTRY: ${{ env.CHART_REGISTRY_IMAGE_BASE }}
+
   build:
     if: ${{ github.event_name == 'push' || ! github.event.inputs.skip_gh_release }}
     needs:
@@ -503,6 +527,7 @@ jobs:
     - push-image
     - musl-push-image
     - push-controller-image
+    - push-helm-charts
     - build
     runs-on: ubuntu-latest
     permissions:
@@ -533,6 +558,7 @@ jobs:
         files: outputs/agentgateway-*
         tag_name: ${{ github.ref_name }}
         body: "Automated release of ${{ github.ref_name }}."
+        generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       if: startsWith(github.ref, 'refs/tags/')
