@@ -35,7 +35,6 @@ use anyhow::{Error, anyhow, bail};
 use bytes::Bytes;
 use itertools::Itertools;
 use macro_rules_attribute::apply;
-use openapiv3::OpenAPI;
 use secrecy::SecretString;
 
 // Windows has different output, for now easier to just not deal with it
@@ -437,7 +436,11 @@ impl LocalBackend {
 		})
 	}
 
-	pub fn as_backends(&self, name: ResourceName) -> anyhow::Result<Vec<BackendWithPolicies>> {
+	pub async fn as_backends(
+		&self,
+		name: ResourceName,
+		client: client::Client,
+	) -> anyhow::Result<Vec<BackendWithPolicies>> {
 		Ok(match self {
 			LocalBackend::Service { .. } => vec![], // These stay as references
 			LocalBackend::Opaque(tgt) => vec![Backend::Opaque(name, tgt.clone()).into()],
@@ -477,9 +480,10 @@ impl LocalBackend {
 							if let Some(b) = be {
 								backends.push(Self::make_backend(b, t.policies.clone(), tls)?);
 							}
+							let openapi_schema = schema.load_openapi_schema(client.clone()).await?;
 							McpTargetSpec::OpenAPI(OpenAPITarget {
 								backend: bref,
-								schema,
+								schema: openapi_schema.into(),
 							})
 						},
 					};
@@ -632,9 +636,7 @@ pub enum LocalMcpTargetSpec {
 	OpenAPI {
 		#[serde(flatten)]
 		backend: McpBackendHost,
-		#[serde(deserialize_with = "types::agent::de_openapi")]
-		#[cfg_attr(feature = "schema", schemars(with = "serde_json::value::RawValue"))]
-		schema: Arc<OpenAPI>,
+		schema: serdes::FileInlineOrRemote,
 	},
 }
 
@@ -1524,7 +1526,7 @@ async fn convert_mcp_config(
 	let port = port.unwrap_or(DEFAULT_MCP_PORT);
 
 	let resolved_policies = if let Some(pol) = policies {
-		split_policies(client, pol).await?
+		split_policies(client.clone(), pol).await?
 	} else {
 		ResolvedPolicies::default()
 	};
@@ -1582,7 +1584,9 @@ async fn convert_mcp_config(
 		tunnel_protocol: TunnelProtocol::Direct,
 	};
 
-	let backends = LocalBackend::MCP(backend).as_backends(local_name(strng::new("mcp")))?;
+	let backends = LocalBackend::MCP(backend)
+		.as_backends(local_name(strng::new("mcp")), client)
+		.await?;
 
 	Ok((bind, vec![], backends))
 }
@@ -1758,7 +1762,10 @@ async fn convert_route(
 			LocalBackend::Dynamic {} => BackendReference::Backend("dynamic".into()),
 			_ => BackendReference::Backend(strng::format!("/{}", backend_key)),
 		};
-		let backends = b.backend.as_backends(be_name.clone())?;
+		let backends = b
+			.backend
+			.as_backends(be_name.clone(), client.clone())
+			.await?;
 		let bref = RouteBackendReference {
 			weight: b.weight,
 			backend: bref,
