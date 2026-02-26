@@ -4,7 +4,6 @@ use agent_core::prelude::Strng;
 use axum::response::Response;
 
 use crate::ProxyInputs;
-use crate::cel::ContextBuilder;
 use crate::http::authorization::RuleSets;
 use crate::http::sessionpersistence::Encoder;
 use crate::http::*;
@@ -114,9 +113,8 @@ impl App {
 		logy.store(Some(MCPInfo::default()));
 		req.extensions_mut().insert(logy);
 
-		let mut ctx = ContextBuilder::new();
-		authorization_policies.register(&mut ctx);
-		ctx.maybe_buffer_request_body(&mut req).await;
+		authorization_policies.register(log.cel.ctx());
+		log.cel.ctx().maybe_buffer_request_body(&mut req).await;
 
 		// `response` is not valid here, since we run authz first
 		// MCP context is added later. The context is inserted after
