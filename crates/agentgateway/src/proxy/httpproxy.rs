@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use ::http::uri::PathAndQuery;
 use ::http::{HeaderMap, header};
@@ -11,6 +12,8 @@ use headers::HeaderMapExt;
 use hyper::body::Incoming;
 use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
+use opentelemetry::KeyValue;
+use opentelemetry::trace::Status as SpanStatus;
 use rand::seq::IndexedRandom;
 use tracing::{debug, trace};
 use types::agent::*;
@@ -33,7 +36,7 @@ use crate::store::{
 	RoutePath,
 };
 use crate::telemetry::log;
-use crate::telemetry::log::{AsyncLog, DropOnLog, LogBody, RequestLog};
+use crate::telemetry::log::{AsyncLog, DropOnLog, LogBody, RequestLog, SpanWriter};
 use crate::telemetry::trc::TraceParent;
 use crate::transport::stream::{Extension, TCPConnectionInfo, TLSConnectionInfo};
 use crate::types::{backend, frontend};
@@ -68,6 +71,7 @@ async fn apply_request_policies(
 	client: PolicyClient,
 	log: &mut RequestLog,
 	req: &mut Request,
+	span_writer: Option<SpanWriter>,
 	response_policies: &mut ResponsePolicies,
 ) -> Result<(), ProxyResponse> {
 	// CORS must run before authentication, authorization and rate limiting so that:
@@ -93,7 +97,7 @@ async fn apply_request_policies(
 	}
 
 	if let Some(x) = &policies.ext_authz {
-		x.check(client.clone(), req).await?
+		x.check(client.clone(), req, span_writer.clone()).await?
 	} else {
 		http::PolicyResponse::default()
 	}
@@ -108,7 +112,7 @@ async fn apply_request_policies(
 	}
 
 	if let Some(rrl) = &policies.remote_rate_limit {
-		rrl.check(client, req).await?
+		rrl.check(client, req, span_writer).await?
 	} else {
 		http::PolicyResponse::default()
 	}
@@ -244,6 +248,7 @@ async fn apply_gateway_policies(
 	log: &mut RequestLog,
 	req: &mut Request,
 	ext_proc: Option<&mut ExtProcRequest>,
+	span_writer: Option<SpanWriter>,
 	response_headers: &mut HeaderMap,
 ) -> Result<(), ProxyResponse> {
 	if let Some(j) = &policies.jwt {
@@ -259,7 +264,7 @@ async fn apply_gateway_policies(
 	}
 
 	if let Some(x) = &policies.ext_authz {
-		x.check(client.clone(), req).await?
+		x.check(client.clone(), req, span_writer).await?
 	} else {
 		http::PolicyResponse::default()
 	}
@@ -284,6 +289,7 @@ async fn apply_llm_request_policies(
 	client: PolicyClient,
 	req: &mut Request,
 	llm_req: &LLMRequest,
+	span_writer: Option<SpanWriter>,
 	response_headers: &mut HeaderMap,
 ) -> Result<store::LLMResponsePolicies, ProxyResponse> {
 	for lrl in &policies.local_rate_limit {
@@ -294,7 +300,12 @@ async fn apply_llm_request_policies(
 		// or 0.
 		// Either way, we will 'true up' on the response side.
 		rrl
-			.check_llm(client, req, llm_req.input_tokens.unwrap_or_default())
+			.check_llm(
+				client,
+				req,
+				llm_req.input_tokens.unwrap_or_default(),
+				span_writer.clone(),
+			)
 			.await?
 	} else {
 		(http::PolicyResponse::default(), None)
@@ -309,6 +320,7 @@ async fn apply_llm_request_policies(
 			.and_then(|llm| llm.prompt_guard.as_ref())
 			.map(|g| g.response.clone())
 			.unwrap_or_default(),
+		span_writer,
 	})
 }
 
@@ -564,13 +576,14 @@ impl HTTPProxy {
 		let mut maybe_gateway_ext_proc = gateway_policies
 			.ext_proc
 			.take()
-			.map(|c| c.build(self.policy_client()));
+			.map(|c| c.build(self.policy_client(), log.span_writer()));
 		apply_gateway_policies(
 			&gateway_policies,
 			self.policy_client(),
 			log,
 			&mut req,
 			maybe_gateway_ext_proc.as_mut(),
+			log.span_writer(),
 			&mut response_headers,
 		)
 		.await
@@ -621,7 +634,7 @@ impl HTTPProxy {
 		let maybe_ext_proc = route_policies
 			.ext_proc
 			.take()
-			.map(|c| c.build(self.policy_client()));
+			.map(|c| c.build(self.policy_client(), log.span_writer()));
 		response_policies.route_response_header = route_policies.response_header_modifier.clone();
 		// backend_response_header is set much later
 		response_policies.timeout = route_policies.timeout.clone();
@@ -635,6 +648,7 @@ impl HTTPProxy {
 			self.policy_client(),
 			log,
 			&mut req,
+			log.span_writer(),
 			response_policies,
 		)
 		.await
@@ -812,7 +826,7 @@ impl HTTPProxy {
 		let trace_parent = trc::TraceParent::from_request(req);
 		let trace_sampled = log.trace_sampled(req, trace_parent.as_ref());
 
-		// Use dynamic tracer from frontend policy if available, otherwise use static tracer
+		// Tracing is configured through frontend tracing policies only.
 		if trace_sampled {
 			log.tracer = if let Some(tp) = frontend_policies.tracing.as_deref() {
 				debug!(
@@ -824,12 +838,12 @@ impl HTTPProxy {
 				tp.get_or_init(self.policy_client())
 					.map(|t| Some(t.clone()))
 					.unwrap_or_else(|e| {
-						debug!("failed to initialize dynamic tracer, falling back to static tracer: {e:?}");
-						self.inputs.tracer.clone()
+						debug!("failed to initialize tracing policy tracer: {e:?}");
+						None
 					})
 			} else {
-				debug!("No frontend tracing policy found, using static tracer");
-				self.inputs.tracer.clone()
+				debug!("No frontend tracing policy found; tracing exporter disabled");
+				None
 			};
 			// Register CEL expressions from the tracer
 			if let Some(tracer) = &log.tracer {
@@ -1193,6 +1207,10 @@ async fn make_backend_call(
 	let policy_client = PolicyClient {
 		inputs: inputs.clone(),
 	};
+	let span_writer = log
+		.as_ref()
+		.and_then(|l| l.span_writer())
+		.or_else(|| req.extensions().get::<SpanWriter>().cloned());
 
 	// The MCP backend aggregates multiple backends into a single backend.
 	// In some cases, we want to treat this as a normal backend, so we swap it out.
@@ -1229,7 +1247,7 @@ async fn make_backend_call(
 		}
 	});
 
-	let mut maybe_inference = policies.build_inference(policy_client.clone());
+	let mut maybe_inference = policies.build_inference(policy_client.clone(), span_writer.clone());
 	let (inference_override, ext_proc_resp) = maybe_inference.mutate_request(&mut req).await?;
 	ext_proc_resp.apply(response_policies.headers())?;
 	log.add(|l| l.inference_pool = inference_override);
@@ -1317,6 +1335,9 @@ async fn make_backend_call(
 			let inputs = inputs.clone();
 			let backend = backend.clone();
 			set_backend_cel_context(&mut req, log.as_ref());
+			if let Some(sw) = span_writer.clone() {
+				req.extensions_mut().insert(sw);
+			}
 			let name = name.clone();
 			let Some(log) = log else {
 				return Err(
@@ -1449,6 +1470,7 @@ async fn make_backend_call(
 							policy_client.clone(),
 							&mut req,
 							&llm_request,
+							span_writer.clone(),
 							&mut response_policies.response_headers,
 						)
 						.await?
@@ -1527,6 +1549,26 @@ async fn make_backend_call(
 		target: backend_call.target,
 		transport,
 	};
+	let upstream_target = call.target.to_string();
+	let upstream_name = format!("upstream {}", upstream_target);
+	let upstream_target_meta = call.target.clone();
+	let upstream_method = call.req.method().to_string();
+	let upstream_path = call.req.uri().path().to_string();
+	let upstream_http_version = call.req.version();
+	let upstream_retry_attempt = call
+		.req
+		.headers()
+		.get("x-retry-attempt")
+		.and_then(|v| v.to_str().ok())
+		.map(str::to_string);
+	let upstream_mcp_session = call
+		.req
+		.headers()
+		.get("mcp-session-id")
+		.and_then(|v| v.to_str().ok())
+		.map(str::to_string);
+	let upstream_span_meta = call.req.extensions().get::<UpstreamSpanMeta>().cloned();
+	let upstream_start = SystemTime::now();
 	let upstream = inputs.upstream.clone();
 	let llm_response_log = log.as_ref().map(|l| l.llm_response.clone());
 	let include_completion_in_log = log
@@ -1535,7 +1577,50 @@ async fn make_backend_call(
 		.unwrap_or_default();
 	let a2a_type = response_policies.a2a_type.clone();
 
-	let mut resp = upstream.call(call).await?;
+	let mut resp = match upstream.call(call).await {
+		Ok(resp) => {
+			if let Some(sw) = span_writer.as_ref() {
+				sw.write(upstream_name.clone(), |sb| {
+					let attrs = upstream_span_attributes(UpstreamSpanAttributesInput {
+						upstream_target: &upstream_target_meta,
+						upstream_method: &upstream_method,
+						upstream_path: &upstream_path,
+						upstream_version: upstream_http_version,
+						status: Some(resp.status()),
+						error_type: None,
+						retry_attempt: upstream_retry_attempt.as_deref(),
+						mcp_session: upstream_mcp_session.as_deref(),
+						span_meta: upstream_span_meta.as_ref(),
+					});
+					sb.with_start_time(upstream_start)
+						.with_attributes(attrs)
+						.with_status(upstream_span_status(Some(resp.status()), None))
+				});
+			}
+			resp
+		},
+		Err(err) => {
+			if let Some(sw) = span_writer.as_ref() {
+				sw.write(upstream_name.clone(), |sb| {
+					let attrs = upstream_span_attributes(UpstreamSpanAttributesInput {
+						upstream_target: &upstream_target_meta,
+						upstream_method: &upstream_method,
+						upstream_path: &upstream_path,
+						upstream_version: upstream_http_version,
+						status: None,
+						error_type: Some("ProxyError"),
+						retry_attempt: upstream_retry_attempt.as_deref(),
+						mcp_session: upstream_mcp_session.as_deref(),
+						span_meta: upstream_span_meta.as_ref(),
+					});
+					sb.with_start_time(upstream_start)
+						.with_attributes(attrs)
+						.with_status(upstream_span_status(None, Some("ProxyError")))
+				});
+			}
+			return Err(err.into());
+		},
+	};
 	a2a::apply_to_response(
 		backend_call.backend_policies.a2a.as_ref(),
 		a2a_type,
@@ -1902,11 +1987,111 @@ pub struct PolicyClient {
 	pub inputs: Arc<ProxyInputs>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct UpstreamSpanMeta {
+	pub mcp_target: Option<String>,
+}
+
+struct UpstreamSpanAttributesInput<'a> {
+	upstream_target: &'a Target,
+	upstream_method: &'a str,
+	upstream_path: &'a str,
+	upstream_version: ::http::Version,
+	status: Option<StatusCode>,
+	error_type: Option<&'a str>,
+	retry_attempt: Option<&'a str>,
+	mcp_session: Option<&'a str>,
+	span_meta: Option<&'a UpstreamSpanMeta>,
+}
+
+fn upstream_span_attributes(input: UpstreamSpanAttributesInput<'_>) -> Vec<KeyValue> {
+	let UpstreamSpanAttributesInput {
+		upstream_target,
+		upstream_method,
+		upstream_path,
+		upstream_version,
+		status,
+		error_type,
+		retry_attempt,
+		mcp_session,
+		span_meta,
+	} = input;
+	let (server_address, server_port, network_transport) = match upstream_target {
+		Target::Address(addr) => (addr.ip().to_string(), Some(i64::from(addr.port())), "tcp"),
+		Target::Hostname(hostname, port) => (hostname.to_string(), Some(i64::from(*port)), "tcp"),
+		Target::UnixSocket(path) => (path.display().to_string(), None, "unix"),
+	};
+	let mut attrs = vec![
+		KeyValue::new("server.address", server_address),
+		KeyValue::new("http.request.method", upstream_method.to_string()),
+		KeyValue::new("url.path", upstream_path.to_string()),
+		KeyValue::new("network.protocol.name", "http"),
+		KeyValue::new("network.transport", network_transport),
+	];
+	if let Some(server_port) = server_port {
+		attrs.push(KeyValue::new("server.port", server_port));
+	}
+	match upstream_version {
+		::http::Version::HTTP_11 => {
+			attrs.push(KeyValue::new("network.protocol.version", "1.1"));
+		},
+		::http::Version::HTTP_2 => {
+			attrs.push(KeyValue::new("network.protocol.version", "2"));
+		},
+		_ => {},
+	}
+	if let Some(status) = status {
+		attrs.push(KeyValue::new(
+			"http.response.status_code",
+			i64::from(status.as_u16()),
+		));
+	}
+	if let Some(error_type) = error_type {
+		attrs.push(KeyValue::new("error.type", error_type.to_string()));
+	}
+	if let Some(retry_attempt) = retry_attempt {
+		attrs.push(KeyValue::new(
+			"gateway.retry_attempt",
+			retry_attempt.to_string(),
+		));
+	}
+	if let Some(mcp_session) = mcp_session {
+		attrs.push(KeyValue::new("mcp.session.id", mcp_session.to_string()));
+	}
+	if let Some(meta) = span_meta
+		&& let Some(mcp_target) = &meta.mcp_target
+	{
+		attrs.push(KeyValue::new("mcp.target", mcp_target.clone()));
+	}
+	attrs
+}
+
+fn upstream_span_status(status: Option<StatusCode>, error_type: Option<&str>) -> SpanStatus {
+	if let Some(error_type) = error_type {
+		return SpanStatus::error(error_type.to_string());
+	}
+	if let Some(status) = status
+		&& status.is_server_error()
+	{
+		return SpanStatus::error(format!("http {}", status.as_u16()));
+	}
+	SpanStatus::Unset
+}
+
 impl PolicyClient {
 	pub async fn call_reference(
 		&self,
+		req: Request,
+		backend_ref: &SimpleBackendReference,
+	) -> Result<Response, ProxyError> {
+		self.call_reference_and_span(req, backend_ref, None).await
+	}
+
+	pub async fn call_reference_and_span(
+		&self,
 		mut req: Request,
 		backend_ref: &SimpleBackendReference,
+		span_writer: Option<SpanWriter>,
 	) -> Result<Response, ProxyError> {
 		let backend = resolve_simple_backend(backend_ref, self.inputs.as_ref())?;
 		trace!("resolved {:?} to {:?}", backend_ref, &backend);
@@ -1927,7 +2112,7 @@ impl PolicyClient {
 		let backend = BackendWithPolicies::from(backend);
 		let pols = get_backend_policies(&self.inputs, &backend, &[], None);
 		self
-			.internal_call_with_policies(req, backend.backend, pols)
+			.internal_call_with_policies(req, backend.backend, pols, span_writer)
 			.await
 	}
 
@@ -1936,10 +2121,19 @@ impl PolicyClient {
 		req: Request,
 		backend: SimpleBackendWithPolicies,
 	) -> Result<Response, ProxyError> {
+		self.call_and_span(req, backend, None).await
+	}
+
+	pub async fn call_and_span(
+		&self,
+		req: Request,
+		backend: SimpleBackendWithPolicies,
+		span_writer: Option<SpanWriter>,
+	) -> Result<Response, ProxyError> {
 		let backend = BackendWithPolicies::from(backend);
 		let pols = get_backend_policies(&self.inputs, &backend, &[], None);
 		self
-			.internal_call_with_policies(req, backend.backend, pols)
+			.internal_call_with_policies(req, backend.backend, pols, span_writer)
 			.await
 	}
 
@@ -1949,10 +2143,22 @@ impl PolicyClient {
 		backend: &SimpleBackend,
 		defaults: BackendPolicies,
 	) -> Result<Response, ProxyError> {
+		self
+			.call_with_default_policies_and_span(req, backend, defaults, None)
+			.await
+	}
+
+	pub async fn call_with_default_policies_and_span(
+		&self,
+		req: Request,
+		backend: &SimpleBackend,
+		defaults: BackendPolicies,
+		span_writer: Option<SpanWriter>,
+	) -> Result<Response, ProxyError> {
 		let backend = Backend::from(backend.clone()).into();
 		let pols = defaults.merge(get_backend_policies(&self.inputs, &backend, &[], None));
 		self
-			.internal_call_with_policies(req, backend.backend, pols)
+			.internal_call_with_policies(req, backend.backend, pols, span_writer)
 			.await
 	}
 
@@ -1962,13 +2168,27 @@ impl PolicyClient {
 		backend: SimpleBackend,
 		policies: Vec<BackendPolicy>,
 	) -> Result<Response, ProxyError> {
+		self
+			.call_with_explicit_policies_and_span(req, backend, policies, None)
+			.await
+	}
+
+	pub async fn call_with_explicit_policies_and_span(
+		&self,
+		req: Request,
+		backend: SimpleBackend,
+		policies: Vec<BackendPolicy>,
+		span_writer: Option<SpanWriter>,
+	) -> Result<Response, ProxyError> {
 		let backend = Backend::from(backend);
 		let pols = self
 			.inputs
 			.stores
 			.read_binds()
 			.inline_backend_policies(&policies);
-		self.internal_call_with_policies(req, backend, pols).await
+		self
+			.internal_call_with_policies(req, backend, pols, span_writer)
+			.await
 	}
 
 	fn internal_call_with_policies<'a>(
@@ -1976,9 +2196,15 @@ impl PolicyClient {
 		req: Request,
 		backend: Backend,
 		pols: BackendPolicies,
+		span_writer: Option<SpanWriter>,
 	) -> Pin<Box<dyn Future<Output = Result<Response, ProxyError>> + Send + '_>> {
 		let mut req = Some(req);
 		Box::pin(async move {
+			if let Some(sw) = span_writer
+				&& let Some(req) = req.as_mut()
+			{
+				req.extensions_mut().insert(sw);
+			}
 			make_backend_call(
 				self.inputs.clone(),
 				Arc::new(LLMRequestPolicies::default()),
@@ -2013,5 +2239,59 @@ impl OptLogger for Option<&mut RequestLog> {
 		if let Some(log) = self.as_mut() {
 			f(log)
 		}
+	}
+}
+
+#[cfg(test)]
+mod upstream_span_attr_tests {
+	use super::*;
+
+	fn has_key(attrs: &[KeyValue], key: &str) -> bool {
+		attrs.iter().any(|kv| kv.key.as_str() == key)
+	}
+
+	fn has_str_value(attrs: &[KeyValue], key: &str, expected: &str) -> bool {
+		attrs
+			.iter()
+			.any(|kv| kv.key.as_str() == key && kv.value.as_str() == expected)
+	}
+
+	#[test]
+	fn upstream_span_attributes_include_mcp_fields() {
+		let attrs = upstream_span_attributes(UpstreamSpanAttributesInput {
+			upstream_target: &Target::Address("127.0.0.1:1234".parse().expect("socket addr")),
+			upstream_method: "POST",
+			upstream_path: "/mcp",
+			upstream_version: ::http::Version::HTTP_2,
+			status: Some(StatusCode::OK),
+			error_type: None,
+			retry_attempt: Some("2"),
+			mcp_session: Some("sess-1"),
+			span_meta: Some(&UpstreamSpanMeta {
+				mcp_target: Some("calendar".to_string()),
+			}),
+		});
+		assert!(has_str_value(&attrs, "network.protocol.name", "http"));
+		assert!(has_str_value(&attrs, "mcp.target", "calendar"));
+		assert!(has_str_value(&attrs, "mcp.session.id", "sess-1"));
+		assert!(has_str_value(&attrs, "gateway.retry_attempt", "2"));
+		assert!(has_key(&attrs, "http.response.status_code"));
+	}
+
+	#[test]
+	fn upstream_span_attributes_include_error_type_on_failure() {
+		let attrs = upstream_span_attributes(UpstreamSpanAttributesInput {
+			upstream_target: &Target::Address("127.0.0.1:1234".parse().expect("socket addr")),
+			upstream_method: "GET",
+			upstream_path: "/foo",
+			upstream_version: ::http::Version::HTTP_11,
+			status: None,
+			error_type: Some("ProxyError"),
+			retry_attempt: None,
+			mcp_session: None,
+			span_meta: None,
+		});
+		assert!(has_str_value(&attrs, "network.protocol.name", "http"));
+		assert!(has_str_value(&attrs, "error.type", "ProxyError"));
 	}
 }

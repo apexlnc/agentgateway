@@ -201,9 +201,11 @@ impl Session {
 				let ctx = IncomingRequestContext::new(&parts);
 				let (_span, log, cel) = mcp::handler::setup_request_log(parts, method);
 				let session_id = self.id.to_string();
+				let request_id = r.id.to_string();
 				log.non_atomic_mutate(|l| {
 					l.method_name = Some(method.to_string());
 					l.session_id = Some(session_id);
+					l.jsonrpc_request_id = Some(request_id);
 				});
 				match &mut r.request {
 					ClientRequest::InitializeRequest(ir) => {
@@ -215,6 +217,9 @@ impl Session {
 						ir.params.capabilities.roots = None;
 
 						let pv = ir.params.protocol_version.clone();
+						log.non_atomic_mutate(|l| {
+							l.protocol_version = Some(pv.to_string());
+						});
 						let res = self
 							.relay
 							.send_fanout(
