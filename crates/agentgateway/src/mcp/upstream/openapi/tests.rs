@@ -43,7 +43,6 @@ async fn setup() -> (MockServer, Handler) {
 		None,
 		BackendConfig::default(),
 		None,
-		oidc.clone(),
 	);
 	let pi = Arc::new(ProxyInputs {
 		cfg: Arc::new(config),
@@ -54,6 +53,7 @@ async fn setup() -> (MockServer, Handler) {
 			Default::default(),
 		)),
 		upstream: client.clone(),
+		oidc,
 		ca: None,
 
 		mcp_state: mcp::router::App::new(stores.clone(), encoder),

@@ -12,18 +12,40 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/kgateway/wellknown"
 )
 
-func TestProcessOAuth2PolicyRejectsUnsupportedProviderBackendRefKind(t *testing.T) {
+type stubOIDCResolver struct {
+	resolved *resolvedOIDCProvider
+	err      error
+}
+
+func (s stubOIDCResolver) Resolve(_ PolicyCtx, _, _, _ string, _ *gwv1.BackendObjectReference) (*resolvedOIDCProvider, error) {
+	return s.resolved, s.err
+}
+
+func withStubOIDCResolver(t *testing.T, resolved *resolvedOIDCProvider, err error) {
+	t.Helper()
+	prev := oidcResolverFactory
+	oidcResolverFactory = func() oidcResolver {
+		return stubOIDCResolver{resolved: resolved, err: err}
+	}
+	t.Cleanup(func() {
+		oidcResolverFactory = prev
+	})
+}
+
+func TestProcessOAuth2PolicyRejectsUnsupportedBackendRefKind(t *testing.T) {
 	oauth2 := &agentgateway.OAuth2{
-		Issuer:       "https://issuer.example.com",
-		ClientID:     "agw-client",
-		ClientSecret: ptr.Of("super-secret"),
-		RedirectURI:  ptr.Of(agentgateway.LongString("https://gateway.example.com/oauth2/callback")),
-		ProviderBackendRef: &gwv1.BackendObjectReference{
+		ClientID: "agw-client",
+		Issuer:   ptr.Of(agentgateway.LongString("https://issuer.example.com")),
+		BackendRef: &gwv1.BackendObjectReference{
 			Group: ptr.Of(gwv1.Group(wellknown.InferencePoolGVK.Group)),
 			Kind:  ptr.Of(gwv1.Kind(wellknown.InferencePoolGVK.Kind)),
 			Name:  "test-pool",
 			Port:  ptr.Of(gwv1.PortNumber(8443)),
 		},
+		ClientSecret: agentgateway.OAuth2ClientSecret{
+			Inline: ptr.Of("super-secret"),
+		},
+		RedirectURI: agentgateway.LongString("https://gateway.example.com/oauth2/callback"),
 	}
 
 	policies, err := processOAuth2Policy(
@@ -45,7 +67,7 @@ func TestProcessOAuth2PolicyRejectsUnsupportedProviderBackendRefKind(t *testing.
 	}
 }
 
-func TestProcessJWTAuthenticationPolicyRejectsUnsupportedOIDCProviderBackendRefKind(t *testing.T) {
+func TestProcessJWTAuthenticationPolicyRejectsUnsupportedOIDCBackendRefKind(t *testing.T) {
 	jwt := &agentgateway.JWTAuthentication{
 		Mode: agentgateway.JWTAuthenticationModeStrict,
 		Providers: []agentgateway.JWTProvider{
@@ -53,7 +75,7 @@ func TestProcessJWTAuthenticationPolicyRejectsUnsupportedOIDCProviderBackendRefK
 				Issuer: "https://issuer.example.com",
 				JWKS: agentgateway.JWKS{
 					OIDC: &agentgateway.OIDCJWKS{
-						ProviderBackendRef: &gwv1.BackendObjectReference{
+						BackendRef: &gwv1.BackendObjectReference{
 							Group: ptr.Of(gwv1.Group(wellknown.InferencePoolGVK.Group)),
 							Kind:  ptr.Of(gwv1.Kind(wellknown.InferencePoolGVK.Kind)),
 							Name:  "test-pool",
@@ -83,6 +105,10 @@ func TestProcessJWTAuthenticationPolicyRejectsUnsupportedOIDCProviderBackendRefK
 }
 
 func TestProcessJWTAuthenticationPolicyTranslatesOIDCJwksSource(t *testing.T) {
+	withStubOIDCResolver(t, &resolvedOIDCProvider{
+		JwksInline: `{"keys":[{"kid":"k1"}]}`,
+	}, nil)
+
 	jwt := &agentgateway.JWTAuthentication{
 		Mode: agentgateway.JWTAuthenticationModeStrict,
 		Providers: []agentgateway.JWTProvider{
@@ -122,14 +148,126 @@ func TestProcessJWTAuthenticationPolicyTranslatesOIDCJwksSource(t *testing.T) {
 	if len(jwtSpec.Providers) != 1 {
 		t.Fatalf("expected 1 jwt provider, got %d", len(jwtSpec.Providers))
 	}
-	oidc := jwtSpec.Providers[0].GetOidc()
-	if oidc == nil {
-		t.Fatalf("expected oidc jwks source")
+	inline := jwtSpec.Providers[0].GetInline()
+	if inline == "" {
+		t.Fatalf("expected inline jwks source")
 	}
-	if oidc.GetProviderBackend() != nil {
-		t.Fatalf("expected no provider backend by default")
+	if got, want := inline, `{"keys":[{"kid":"k1"}]}`; got != want {
+		t.Fatalf("unexpected inline jwks: got %q want %q", got, want)
 	}
-	if _, ok := jwtSpec.Providers[0].GetJwksSource().(*api.TrafficPolicySpec_JWTProvider_Oidc); !ok {
-		t.Fatalf("expected jwt provider oneof to be oidc")
+	if _, ok := jwtSpec.Providers[0].GetJwksSource().(*api.TrafficPolicySpec_JWTProvider_Inline); !ok {
+		t.Fatalf("expected jwt provider oneof to be inline")
+	}
+}
+
+func TestProcessOAuth2PolicyTranslatesResolvedProviderMetadata(t *testing.T) {
+	withStubOIDCResolver(t, &resolvedOIDCProvider{
+		AuthorizationEndpoint:             "https://issuer.example.com/authorize",
+		TokenEndpoint:                     "https://issuer.example.com/token",
+		EndSessionEndpoint:                "https://issuer.example.com/logout",
+		TokenEndpointAuthMethodsSupported: []string{"client_secret_post"},
+		JwksInline:                        `{"keys":[{"kid":"k1"}]}`,
+	}, nil)
+
+	oauth2 := &agentgateway.OAuth2{
+		ClientID: "agw-client",
+		Issuer:   ptr.Of(agentgateway.LongString("https://issuer.example.com")),
+		ClientSecret: agentgateway.OAuth2ClientSecret{
+			Inline: ptr.Of("super-secret"),
+		},
+		RedirectURI: agentgateway.LongString("https://gateway.example.com/oauth2/callback"),
+	}
+
+	policies, err := processOAuth2Policy(
+		PolicyCtx{},
+		oauth2,
+		ptr.Of(agentgateway.PolicyPhasePreRouting),
+		"traffic/default/oauth2",
+		types.NamespacedName{Namespace: "default", Name: "oauth2-policy"},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(policies) != 1 {
+		t.Fatalf("expected 1 policy, got %d", len(policies))
+	}
+
+	traffic := policies[0].Policy.GetTraffic()
+	if traffic == nil {
+		t.Fatalf("expected traffic policy")
+	}
+	spec := traffic.GetOauth2()
+	if spec == nil {
+		t.Fatalf("expected oauth2 policy spec")
+	}
+	if got, want := spec.GetAuthorizationEndpoint(), "https://issuer.example.com/authorize"; got != want {
+		t.Fatalf("unexpected authorization endpoint: got %q want %q", got, want)
+	}
+	if got, want := spec.GetTokenEndpoint(), "https://issuer.example.com/token"; got != want {
+		t.Fatalf("unexpected token endpoint: got %q want %q", got, want)
+	}
+	if got, want := spec.GetEndSessionEndpoint(), "https://issuer.example.com/logout"; got != want {
+		t.Fatalf("unexpected end session endpoint: got %q want %q", got, want)
+	}
+	if got, want := spec.GetJwksInline(), `{"keys":[{"kid":"k1"}]}`; got != want {
+		t.Fatalf("unexpected jwks inline: got %q want %q", got, want)
+	}
+	if got, want := spec.GetTokenEndpointAuthMethodsSupported(), []string{"client_secret_post"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("unexpected token endpoint auth methods: got %v want %v", got, want)
+	}
+}
+
+func TestProcessOAuth2PolicyTranslatesExplicitOAuth2Provider(t *testing.T) {
+	oauth2 := &agentgateway.OAuth2{
+		ClientID:              "agw-client",
+		AuthorizationEndpoint: ptr.Of(agentgateway.LongString("https://provider.example.com/oauth/authorize")),
+		TokenEndpoint:         ptr.Of(agentgateway.LongString("https://provider.example.com/oauth/token")),
+		EndSessionEndpoint:    ptr.Of(agentgateway.LongString("https://provider.example.com/logout")),
+		TokenEndpointAuthMethodsSupported: []agentgateway.ShortString{
+			"client_secret_post",
+		},
+		ClientSecret: agentgateway.OAuth2ClientSecret{
+			Inline: ptr.Of("super-secret"),
+		},
+		RedirectURI: agentgateway.LongString("https://gateway.example.com/oauth2/callback"),
+	}
+
+	policies, err := processOAuth2Policy(
+		PolicyCtx{},
+		oauth2,
+		ptr.Of(agentgateway.PolicyPhasePreRouting),
+		"traffic/default/oauth2",
+		types.NamespacedName{Namespace: "default", Name: "oauth2-policy"},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(policies) != 1 {
+		t.Fatalf("expected 1 policy, got %d", len(policies))
+	}
+
+	spec := policies[0].Policy.GetTraffic().GetOauth2()
+	if spec == nil {
+		t.Fatalf("expected oauth2 policy spec")
+	}
+	if got, want := spec.GetProviderId(), "https://provider.example.com/oauth/authorize"; got != want {
+		t.Fatalf("unexpected provider id: got %q want %q", got, want)
+	}
+	if got := spec.GetOidcIssuer(); got != "" {
+		t.Fatalf("did not expect oidc issuer for explicit oauth2 provider, got %q", got)
+	}
+	if got, want := spec.GetAuthorizationEndpoint(), "https://provider.example.com/oauth/authorize"; got != want {
+		t.Fatalf("unexpected authorization endpoint: got %q want %q", got, want)
+	}
+	if got, want := spec.GetTokenEndpoint(), "https://provider.example.com/oauth/token"; got != want {
+		t.Fatalf("unexpected token endpoint: got %q want %q", got, want)
+	}
+	if got, want := spec.GetEndSessionEndpoint(), "https://provider.example.com/logout"; got != want {
+		t.Fatalf("unexpected end session endpoint: got %q want %q", got, want)
+	}
+	if got := spec.GetJwksInline(); got != "" {
+		t.Fatalf("did not expect jwks inline for explicit oauth2 provider, got %q", got)
 	}
 }

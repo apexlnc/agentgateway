@@ -672,10 +672,9 @@ func processJWTAuthenticationPolicy(ctx PolicyCtx, jwt *agentgateway.JWTAuthenti
 			continue
 		}
 		if o := pp.JWKS.OIDC; o != nil {
-			oidc := &api.TrafficPolicySpec_JWTProvider_OIDC{}
-			if o.ProviderBackendRef != nil {
-				kind := ptr.OrDefault(o.ProviderBackendRef.Kind, wellknown.ServiceKind)
-				group := ptr.OrDefault(o.ProviderBackendRef.Group, "")
+			if o.BackendRef != nil {
+				kind := ptr.OrDefault(o.BackendRef.Kind, wellknown.ServiceKind)
+				group := ptr.OrDefault(o.BackendRef.Group, "")
 				gk := schema.GroupKind{
 					Group: string(group),
 					Kind:  string(kind),
@@ -686,14 +685,13 @@ func processJWTAuthenticationPolicy(ctx PolicyCtx, jwt *agentgateway.JWTAuthenti
 					))
 					continue
 				}
-				be, err := buildBackendRef(ctx, *o.ProviderBackendRef, policy.Namespace)
-				if err != nil {
-					errs = append(errs, fmt.Errorf("failed to build jwt oidc provider backend ref: %v", err))
-					continue
-				}
-				oidc.ProviderBackend = be
 			}
-			jp.JwksSource = &api.TrafficPolicySpec_JWTProvider_Oidc{Oidc: oidc}
+			resolved, err := oidcResolverFactory().Resolve(ctx, policy.Name, policy.Namespace, pp.Issuer, o.BackendRef)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("failed resolving jwt oidc provider %q: %v", pp.Issuer, err))
+				continue
+			}
+			jp.JwksSource = &api.TrafficPolicySpec_JWTProvider_Inline{Inline: resolved.JwksInline}
 			p.Providers = append(p.Providers, jp)
 			continue
 		}
@@ -857,35 +855,68 @@ func processOAuth2Policy(
 	target *api.PolicyTarget,
 ) ([]AgwPolicy, error) {
 	spec := &api.TrafficPolicySpec_OAuth2{
-		Issuer:               string(oauth2.Issuer),
-		ClientId:             string(oauth2.ClientID),
-		Scopes:               cast(oauth2.Scopes),
-		PassThroughMatchers:  cast(oauth2.PassThroughMatchers),
-		DenyRedirectMatchers: cast(oauth2.DenyRedirectMatchers),
-		TrustedProxyCidrs:    cast(oauth2.TrustedProxyCIDRs),
+		ProviderId: fmt.Sprintf("%s/%s", policy.Namespace, policy.Name),
+		ClientId:   string(oauth2.ClientID),
+		Scopes:     cast(oauth2.Scopes),
 	}
-	if oauth2.ProviderBackendRef != nil {
-		kind := ptr.OrDefault(oauth2.ProviderBackendRef.Kind, wellknown.ServiceKind)
-		group := ptr.OrDefault(oauth2.ProviderBackendRef.Group, "")
-		gk := schema.GroupKind{
-			Group: string(group),
-			Kind:  string(kind),
+	if oauth2.Issuer != nil &&
+		(oauth2.AuthorizationEndpoint != nil ||
+			oauth2.TokenEndpoint != nil ||
+			oauth2.EndSessionEndpoint != nil ||
+			len(oauth2.TokenEndpointAuthMethodsSupported) > 0) {
+		return nil, fmt.Errorf("oauth2 issuer may not be combined with explicit oauth2 endpoint fields")
+	}
+	switch {
+	case oauth2.Issuer != nil:
+		issuer := string(*oauth2.Issuer)
+		spec.OidcIssuer = issuer
+		spec.ProviderId = issuer
+		if oauth2.BackendRef != nil {
+			be, err := buildOAuth2ProviderBackendRef(ctx, *oauth2.BackendRef, policy.Namespace)
+			if err != nil {
+				return nil, err
+			}
+			spec.ProviderBackend = be
 		}
-		if gk != wellknown.ServiceGVK.GroupKind() && gk != wellknown.AgentgatewayBackendGVK.GroupKind() {
-			return nil, errors.New(
-				"oauth2 provider backend ref only supports Service and AgentgatewayBackend kinds",
-			)
-		}
-		be, err := buildBackendRef(ctx, *oauth2.ProviderBackendRef, policy.Namespace)
+		resolvedProvider, err := oidcResolverFactory().Resolve(
+			ctx,
+			policy.Name,
+			policy.Namespace,
+			issuer,
+			oauth2.BackendRef,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to build oauth2 provider backend ref: %v", err)
+			return nil, fmt.Errorf("failed resolving oauth2 provider metadata: %v", err)
 		}
-		spec.ProviderBackend = be
+		spec.AuthorizationEndpoint = ptr.Of(resolvedProvider.AuthorizationEndpoint)
+		spec.TokenEndpoint = ptr.Of(resolvedProvider.TokenEndpoint)
+		spec.JwksInline = ptr.Of(resolvedProvider.JwksInline)
+		if resolvedProvider.EndSessionEndpoint != "" {
+			spec.EndSessionEndpoint = ptr.Of(resolvedProvider.EndSessionEndpoint)
+		}
+		spec.TokenEndpointAuthMethodsSupported = resolvedProvider.TokenEndpointAuthMethodsSupported
+	case oauth2.AuthorizationEndpoint != nil && oauth2.TokenEndpoint != nil:
+		spec.ProviderId = string(*oauth2.AuthorizationEndpoint)
+		spec.AuthorizationEndpoint = castPtr(oauth2.AuthorizationEndpoint)
+		spec.TokenEndpoint = castPtr(oauth2.TokenEndpoint)
+		if oauth2.BackendRef != nil {
+			be, err := buildOAuth2ProviderBackendRef(ctx, *oauth2.BackendRef, policy.Namespace)
+			if err != nil {
+				return nil, err
+			}
+			spec.ProviderBackend = be
+		}
+		if oauth2.EndSessionEndpoint != nil {
+			spec.EndSessionEndpoint = castPtr(oauth2.EndSessionEndpoint)
+		}
+		spec.TokenEndpointAuthMethodsSupported = cast(oauth2.TokenEndpointAuthMethodsSupported)
+	default:
+		return nil, fmt.Errorf("oauth2 must configure issuer or both authorizationEndpoint and tokenEndpoint")
 	}
 
 	switch {
-	case oauth2.ClientSecretRef != nil:
-		ref := oauth2.ClientSecretRef
+	case oauth2.ClientSecret.SecretRef != nil:
+		ref := oauth2.ClientSecret.SecretRef
 		scrt := ptr.Flatten(krt.FetchOne(ctx.Krt, ctx.Collections.Secrets, krt.FilterKey(policy.Namespace+"/"+ref.Name)))
 		if scrt == nil {
 			return nil, fmt.Errorf("oauth2 client secret %v not found", ref.Name)
@@ -895,23 +926,15 @@ func processOAuth2Policy(
 			return nil, fmt.Errorf("oauth2 client secret %v found, but doesn't contain %q key", ref.Name, ref.Key)
 		}
 		spec.ClientSecret = string(d)
-	case oauth2.ClientSecret != nil:
-		spec.ClientSecret = *oauth2.ClientSecret
+	case oauth2.ClientSecret.Inline != nil:
+		spec.ClientSecret = *oauth2.ClientSecret.Inline
 	default:
-		return nil, fmt.Errorf("oauth2 requires either clientSecret or clientSecretRef")
+		return nil, fmt.Errorf("oauth2 requires clientSecret.inline or clientSecret.secretRef")
 	}
 
-	if oauth2.RedirectURI != nil {
-		spec.RedirectUri = castPtr(oauth2.RedirectURI)
-	}
-	if oauth2.AutoDetectRedirectURI != nil {
-		spec.AutoDetectRedirectUri = oauth2.AutoDetectRedirectURI
-	}
+	spec.RedirectUri = ptr.Of(string(oauth2.RedirectURI))
 	if oauth2.CookieName != nil {
 		spec.CookieName = castPtr(oauth2.CookieName)
-	}
-	if oauth2.PassAccessToken != nil {
-		spec.PassAccessToken = oauth2.PassAccessToken
 	}
 	if oauth2.SignOutPath != nil {
 		spec.SignOutPath = castPtr(oauth2.SignOutPath)
@@ -943,6 +966,29 @@ func processOAuth2Policy(
 		"target", target)
 
 	return []AgwPolicy{{Policy: oauth2Policy}}, nil
+}
+
+func buildOAuth2ProviderBackendRef(
+	ctx PolicyCtx,
+	ref gwv1.BackendObjectReference,
+	namespace string,
+) (*api.BackendReference, error) {
+	kind := ptr.OrDefault(ref.Kind, wellknown.ServiceKind)
+	group := ptr.OrDefault(ref.Group, "")
+	gk := schema.GroupKind{
+		Group: string(group),
+		Kind:  string(kind),
+	}
+	if gk != wellknown.ServiceGVK.GroupKind() && gk != wellknown.AgentgatewayBackendGVK.GroupKind() {
+		return nil, errors.New(
+			"oauth2 provider backend ref only supports Service and AgentgatewayBackend kinds",
+		)
+	}
+	be, err := buildBackendRef(ctx, ref, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build oauth2 provider backend ref: %v", err)
+	}
+	return be, nil
 }
 
 func processTimeoutPolicy(timeout *agentgateway.Timeouts, basePolicyName string, policy types.NamespacedName, target *api.PolicyTarget) []AgwPolicy {

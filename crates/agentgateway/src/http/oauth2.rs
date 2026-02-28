@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -10,7 +9,6 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cookie::{Cookie, SameSite};
 use http::{HeaderValue, StatusCode};
-use ipnet::IpNet;
 use oauth2::basic::BasicClient;
 use oauth2::{AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope, TokenUrl};
 use rand::Rng;
@@ -19,9 +17,11 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use url::Url;
 
-use crate::cel::SourceContext;
 use crate::client::Client;
-use crate::http::jwt::{Claims, Jwt};
+use crate::http::auth::PassthroughBearerToken;
+use crate::http::jwt::{
+	Claims, JWTValidationOptions, Jwt, Mode as JwtMode, Provider as JwtProvider,
+};
 use crate::http::oidc::{
 	Error as OidcError, ExchangeCodeRequest, OidcCallContext, OidcMetadata, OidcProvider,
 	RefreshTokenRequest,
@@ -32,7 +32,9 @@ use crate::proxy::httpproxy::PolicyClient;
 use crate::types::agent::OAuth2Policy;
 
 const DEFAULT_COOKIE_NAME: &str = "__Host-ag-session";
+const INSECURE_DEFAULT_COOKIE_NAME: &str = "ag-session";
 const DEFAULT_HANDSHAKE_COOKIE_NAME: &str = "__Host-ag-nonce";
+const INSECURE_DEFAULT_HANDSHAKE_COOKIE_NAME: &str = "ag-nonce";
 const STATE_TTL: Duration = Duration::from_secs(300); // 5 minutes for login handshake
 const MAX_COOKIE_SIZE: usize = 3800; // Leave room for browser limits and cookie attributes
 const COOKIE_CLEAR_SLOTS: usize = 5;
@@ -41,7 +43,6 @@ const MAX_SESSION_COOKIE_CHUNK_INDEX: usize = 63;
 // Keep refresh-capable sessions alive long enough to perform token refreshes.
 const DEFAULT_REFRESHABLE_COOKIE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const MAX_REFRESHABLE_COOKIE_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-const DEFAULT_CALLBACK_PATH: &str = "/_gateway/callback";
 const DEFAULT_SCOPE_PARAM: &str = "openid profile email";
 const SESSION_COOKIE_AAD: &[u8] = b"agentgateway_session_cookie";
 const HANDSHAKE_STATE_AAD: &[u8] = b"agentgateway_handshake_state";
@@ -65,7 +66,8 @@ pub struct OAuth2Filter {
 	session_codec: Arc<SessionCodec>,
 	handshake_codec: Arc<SessionCodec>,
 	static_redirect_uri: Option<Url>,
-	trusted_proxy_nets: Arc<[IpNet]>,
+	resolved_metadata: Option<Arc<OidcMetadata>>,
+	resolved_jwt_validator: Option<Arc<Jwt>>,
 }
 
 impl OAuth2Filter {
@@ -77,23 +79,78 @@ impl OAuth2Filter {
 		OidcCallContext::new(client, policy_client, self.config.provider_backend.as_ref())
 	}
 
-	fn trusted_proxy_nets(config: &OAuth2Policy) -> anyhow::Result<Arc<[IpNet]>> {
-		config
-			.trusted_proxy_cidrs
-			.iter()
-			.map(|cidr| {
-				cidr
-					.parse::<IpNet>()
-					.map_err(|e| anyhow::anyhow!("invalid trusted_proxy_cidrs entry `{cidr}`: {e}"))
-			})
-			.collect::<Result<Vec<_>, _>>()
-			.map(Into::into)
+	fn oidc_issuer(&self) -> anyhow::Result<&str> {
+		self.config.oidc_issuer.as_deref().ok_or_else(|| {
+			anyhow::anyhow!("oauth2 policy requires oidc_issuer for discovery or id_token validation")
+		})
+	}
+
+	fn auth_realm(&self) -> &str {
+		self
+			.config
+			.oidc_issuer
+			.as_deref()
+			.unwrap_or(&self.config.provider_id)
+	}
+
+	fn cookie_secure(&self) -> bool {
+		self
+			.static_redirect_uri
+			.as_ref()
+			.is_none_or(|uri| uri.scheme() == "https")
+	}
+
+	fn session_cookie_name(&self) -> &str {
+		if self.cookie_secure() {
+			self
+				.config
+				.cookie_name
+				.as_deref()
+				.unwrap_or(DEFAULT_COOKIE_NAME)
+		} else {
+			self
+				.config
+				.cookie_name
+				.as_deref()
+				.unwrap_or(INSECURE_DEFAULT_COOKIE_NAME)
+		}
+	}
+
+	fn handshake_cookie_base_name(&self) -> &'static str {
+		if self.cookie_secure() {
+			DEFAULT_HANDSHAKE_COOKIE_NAME
+		} else {
+			INSECURE_DEFAULT_HANDSHAKE_COOKIE_NAME
+		}
 	}
 
 	pub fn validate_policy(config: &OAuth2Policy) -> anyhow::Result<()> {
-		let auto_detect_redirect_uri = config.auto_detect_redirect_uri.unwrap_or(false);
-		if config.redirect_uri.is_none() && !auto_detect_redirect_uri {
-			anyhow::bail!("oauth2 policy requires redirect_uri or auto_detect_redirect_uri=true");
+		let redirect_uri = config
+			.redirect_uri
+			.as_deref()
+			.ok_or_else(|| anyhow::anyhow!("oauth2 policy requires redirect_uri"))?;
+		let parsed_redirect_uri =
+			Url::parse(redirect_uri).map_err(|e| anyhow::anyhow!("invalid redirect_uri config: {e}"))?;
+		if !Self::is_allowed_redirect_url(&parsed_redirect_uri) {
+			anyhow::bail!(
+				"redirect_uri must be https (or http on loopback hosts), must not contain a fragment, and must not include userinfo"
+			);
+		}
+		if parsed_redirect_uri.scheme() == "http"
+			&& config
+				.cookie_name
+				.as_deref()
+				.is_some_and(|name| name.starts_with("__Host-"))
+		{
+			anyhow::bail!("__Host- cookie names require https redirect_uri");
+		}
+		if parsed_redirect_uri.scheme() == "http"
+			&& config
+				.cookie_name
+				.as_deref()
+				.is_some_and(|name| name.starts_with("__Secure-"))
+		{
+			anyhow::bail!("__Secure- cookie names require https redirect_uri");
 		}
 		if let Some(uri) = &config.post_logout_redirect_uri {
 			let parsed = Url::parse(uri)
@@ -117,13 +174,61 @@ impl OAuth2Filter {
 				MAX_REFRESHABLE_COOKIE_MAX_AGE.as_secs()
 			);
 		}
-		let _ = Self::trusted_proxy_nets(config)?;
+		if let Some(provider) = config.resolved_provider.as_deref() {
+			Url::parse(provider.authorization_endpoint.as_str())
+				.map_err(|e| anyhow::anyhow!("invalid authorization_endpoint config: {e}"))?;
+			Url::parse(provider.token_endpoint.as_str())
+				.map_err(|e| anyhow::anyhow!("invalid token_endpoint config: {e}"))?;
+			if let Some(endpoint) = provider.end_session_endpoint.as_deref() {
+				Url::parse(endpoint)
+					.map_err(|e| anyhow::anyhow!("invalid end_session_endpoint config: {e}"))?;
+			}
+		}
 		Ok(())
+	}
+
+	fn build_resolved_metadata(config: &OAuth2Policy) -> anyhow::Result<Option<Arc<OidcMetadata>>> {
+		let Some(provider) = config.resolved_provider.as_deref() else {
+			return Ok(None);
+		};
+		Ok(Some(Arc::new(OidcMetadata {
+			authorization_endpoint: provider.authorization_endpoint.clone(),
+			token_endpoint: provider.token_endpoint.clone(),
+			jwks_uri: None,
+			end_session_endpoint: provider.end_session_endpoint.clone(),
+			token_endpoint_auth_methods_supported: provider.token_endpoint_auth_methods_supported.clone(),
+		})))
+	}
+
+	fn build_resolved_jwt_validator(config: &OAuth2Policy) -> anyhow::Result<Option<Arc<Jwt>>> {
+		let Some(provider) = config.resolved_provider.as_deref() else {
+			return Ok(None);
+		};
+		let Some(jwks_inline) = provider.jwks_inline.as_deref() else {
+			return Ok(None);
+		};
+		let jwks = serde_json::from_str(jwks_inline)
+			.map_err(|e| anyhow::anyhow!("invalid jwks_inline in oauth2 config: {e}"))?;
+		let provider = JwtProvider::from_jwks(
+			jwks,
+			config
+				.oidc_issuer
+				.clone()
+				.ok_or_else(|| anyhow::anyhow!("jwks_inline requires oidc_issuer in oauth2 config"))?,
+			Some(vec![config.client_id.clone()]),
+			JWTValidationOptions::default(),
+		)
+		.map_err(|e| anyhow::anyhow!("invalid jwks_inline in oauth2 config: {e}"))?;
+		Ok(Some(Arc::new(Jwt::from_providers(
+			vec![provider],
+			JwtMode::Strict,
+		))))
 	}
 
 	pub fn new(config: OAuth2Policy, oidc_provider: Arc<OidcProvider>) -> anyhow::Result<Self> {
 		Self::validate_policy(&config)?;
-		let trusted_proxy_nets = Self::trusted_proxy_nets(&config)?;
+		let resolved_metadata = Self::build_resolved_metadata(&config)?;
+		let resolved_jwt_validator = Self::build_resolved_jwt_validator(&config)?;
 		let static_redirect_uri = config
 			.redirect_uri
 			.as_deref()
@@ -133,14 +238,24 @@ impl OAuth2Filter {
 		// Derive distinct keys for session and handshake encryption using HKDF to ensure key separation.
 		let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]);
 		let prk = salt.extract(config.client_secret.expose_secret().as_bytes());
-		let cookie_scope = config.cookie_name.as_deref().unwrap_or(DEFAULT_COOKIE_NAME);
+		let cookie_scope = config.cookie_name.as_deref().unwrap_or_else(|| {
+			if static_redirect_uri
+				.as_ref()
+				.is_some_and(|uri| uri.scheme() == "http")
+			{
+				INSECURE_DEFAULT_COOKIE_NAME
+			} else {
+				DEFAULT_COOKIE_NAME
+			}
+		});
+		let legacy_provider_identity = config.oidc_issuer.as_deref().unwrap_or(&config.provider_id);
 		let session_info = format!(
 			"agentgateway_session|issuer={}|client_id={}|cookie={cookie_scope}",
-			config.issuer, config.client_id
+			legacy_provider_identity, config.client_id
 		);
 		let handshake_info = format!(
 			"agentgateway_handshake|issuer={}|client_id={}|cookie={cookie_scope}",
-			config.issuer, config.client_id
+			legacy_provider_identity, config.client_id
 		);
 
 		let derive_codec = |info: &[u8], aad: &'static [u8]| -> anyhow::Result<SessionCodec> {
@@ -167,31 +282,14 @@ impl OAuth2Filter {
 			session_codec,
 			handshake_codec,
 			static_redirect_uri,
-			trusted_proxy_nets,
+			resolved_metadata,
+			resolved_jwt_validator,
 		})
-	}
-
-	pub(crate) fn matches_policy(&self, policy: &OAuth2Policy) -> bool {
-		self.config.issuer == policy.issuer
-			&& self.config.provider_backend == policy.provider_backend
-			&& self.config.client_id == policy.client_id
-			&& self.config.client_secret.expose_secret() == policy.client_secret.expose_secret()
-			&& self.config.redirect_uri == policy.redirect_uri
-			&& self.config.auto_detect_redirect_uri == policy.auto_detect_redirect_uri
-			&& self.config.scopes == policy.scopes
-			&& self.config.cookie_name == policy.cookie_name
-			&& self.config.refreshable_cookie_max_age_seconds == policy.refreshable_cookie_max_age_seconds
-			&& self.config.pass_access_token == policy.pass_access_token
-			&& self.config.sign_out_path == policy.sign_out_path
-			&& self.config.post_logout_redirect_uri == policy.post_logout_redirect_uri
-			&& self.config.pass_through_matchers == policy.pass_through_matchers
-			&& self.config.deny_redirect_matchers == policy.deny_redirect_matchers
-			&& self.config.trusted_proxy_cidrs == policy.trusted_proxy_cidrs
 	}
 
 	#[tracing::instrument(
 		skip_all,
-		fields(issuer = %self.config.issuer, client_id = %self.config.client_id)
+		fields(provider_id = %self.config.provider_id, client_id = %self.config.client_id)
 	)]
 	pub async fn apply(
 		&self,
@@ -200,11 +298,6 @@ impl OAuth2Filter {
 		req: &mut Request,
 	) -> Result<PolicyResponse, ProxyError> {
 		debug!(path = req.uri().path(), "applying oauth2 filter");
-		// Bypass auth for explicitly exempt paths.
-		if self.should_bypass(req) {
-			return Ok(PolicyResponse::default());
-		}
-
 		// Handle logout endpoint.
 		if let Some(path) = &self.config.sign_out_path
 			&& req.uri().path() == path
@@ -215,7 +308,7 @@ impl OAuth2Filter {
 			return self.handle_logout(req.headers(), end_session_endpoint.as_deref());
 		}
 
-		let redirect_uri = self.resolve_redirect_uri(req)?;
+		let redirect_uri = self.resolve_redirect_uri()?;
 
 		// Reuse an existing session when possible.
 		if let Some(mut session) = self.get_session(req.headers()) {
@@ -232,7 +325,7 @@ impl OAuth2Filter {
 							policy_client,
 							&mut session,
 							&metadata,
-							jwt_validator.as_ref(),
+							jwt_validator.as_deref(),
 						)
 						.await
 					{
@@ -299,7 +392,7 @@ impl OAuth2Filter {
 					req.uri(),
 					CallbackValidation {
 						metadata: &metadata,
-						jwt_validator: jwt_validator.as_ref(),
+						jwt_validator: jwt_validator.as_deref(),
 					},
 					&redirect_uri,
 				)
@@ -318,11 +411,16 @@ impl OAuth2Filter {
 		client: &Client,
 		policy_client: Option<&PolicyClient>,
 	) -> Result<Arc<OidcMetadata>, ProxyError> {
+		if let Some(metadata) = self.resolved_metadata.clone() {
+			return Ok(metadata);
+		}
 		self
 			.oidc_provider
 			.get_metadata(
 				self.oidc_context(client, policy_client),
-				&self.config.issuer,
+				self
+					.oidc_issuer()
+					.map_err(|err| ProxyError::Generic(err.to_string()))?,
 			)
 			.await
 			.map_err(OAuth2Error::from)
@@ -333,15 +431,21 @@ impl OAuth2Filter {
 		&self,
 		client: &Client,
 		policy_client: Option<&PolicyClient>,
-	) -> Result<(Arc<OidcMetadata>, Arc<Jwt>), ProxyError> {
+	) -> Result<(Arc<OidcMetadata>, Option<Arc<Jwt>>), ProxyError> {
+		if let Some(metadata) = self.resolved_metadata.clone() {
+			return Ok((metadata, self.resolved_jwt_validator.clone()));
+		}
 		self
 			.oidc_provider
 			.get_info(
 				self.oidc_context(client, policy_client),
-				&self.config.issuer,
+				self
+					.oidc_issuer()
+					.map_err(|err| ProxyError::Generic(err.to_string()))?,
 				Some(vec![self.config.client_id.clone()]),
 			)
 			.await
+			.map(|(metadata, jwt_validator)| (metadata, Some(jwt_validator)))
 			.map_err(OAuth2Error::from)
 			.map_err(ProxyError::from)
 	}
@@ -351,10 +455,21 @@ impl OAuth2Filter {
 		client: &Client,
 		policy_client: Option<&PolicyClient>,
 	) -> Option<String> {
+		if let Some(endpoint) = self
+			.config
+			.resolved_provider
+			.as_ref()
+			.and_then(|provider| provider.end_session_endpoint.clone())
+		{
+			return Some(endpoint);
+		}
 		// Fast path: reuse whatever is already cached and avoid adding network latency to logout.
 		if let Some(metadata) = self
 			.oidc_provider
-			.get_cached_metadata(&self.config.issuer, self.config.provider_backend.as_ref())
+			.get_cached_metadata(
+				self.oidc_issuer().ok()?,
+				self.config.provider_backend.as_ref(),
+			)
 			.await
 			&& let Some(endpoint) = metadata.end_session_endpoint.clone()
 		{
@@ -400,28 +515,15 @@ impl OAuth2Filter {
 		Some(state.original_url)
 	}
 
-	fn should_bypass(&self, req: &Request) -> bool {
-		let path = req.uri().path();
-		for prefix in &self.config.pass_through_matchers {
-			if Self::matches_path_prefix(path, prefix) {
-				return true;
-			}
-		}
-		false
-	}
-
 	fn handle_logout(
 		&self,
 		req_headers: &http::HeaderMap,
 		end_session_endpoint: Option<&str>,
 	) -> Result<PolicyResponse, ProxyError> {
-		let cookie_name = self
-			.config
-			.cookie_name
-			.as_deref()
-			.unwrap_or(DEFAULT_COOKIE_NAME);
+		let cookie_name = self.session_cookie_name();
 		let observed_max_chunk = self.session_cookie_max_chunk_index(req_headers);
 		let clear_end = std::cmp::max(COOKIE_CLEAR_SLOTS, observed_max_chunk.saturating_add(1));
+		let secure = self.cookie_secure();
 
 		let mut response_headers = crate::http::HeaderMap::new();
 		for i in 0..=clear_end {
@@ -432,7 +534,7 @@ impl OAuth2Filter {
 			};
 			let cookie = Cookie::build((name, ""))
 				.path("/")
-				.secure(true)
+				.secure(secure)
 				.http_only(true)
 				.max_age(cookie::time::Duration::seconds(0))
 				.build();
@@ -508,27 +610,11 @@ impl OAuth2Filter {
 		Some(redirect)
 	}
 
-	fn resolve_redirect_uri(&self, req: &Request) -> Result<Url, ProxyError> {
-		if let Some(uri) = &self.static_redirect_uri {
-			return Ok(uri.clone());
-		}
-		if !self.config.auto_detect_redirect_uri.unwrap_or(false) {
-			return Err(ProxyError::Generic(
-				"redirect uri inference disabled: set oauth2.redirect_uri or enable oauth2.auto_detect_redirect_uri"
-					.into(),
-			));
-		}
-		// Auto-detect callback URL from request authority/forwarded headers.
-		// In multi-proxy host/scheme rewrite topologies this may not match the public callback URL;
-		// prefer explicit `redirect_uri` in production for deterministic behavior.
-		let host = self.resolve_external_host(req)?;
-		let scheme = self.resolve_external_scheme(req);
-		let url_str = format!("{scheme}://{host}{DEFAULT_CALLBACK_PATH}");
-		Url::parse(&url_str).map_err(|e| {
-			ProxyError::Generic(format!(
-				"failed to construct redirect uri from {url_str}: {e}"
-			))
-		})
+	fn resolve_redirect_uri(&self) -> Result<Url, ProxyError> {
+		self
+			.static_redirect_uri
+			.clone()
+			.ok_or_else(|| ProxyError::Generic("oauth2 policy requires redirect_uri".into()))
 	}
 
 	async fn handle_callback(
@@ -579,7 +665,11 @@ impl OAuth2Filter {
 		}
 
 		// Verify Handshake Isolation (Double Submit Cookie)
-		let handshake_cookie_name = format!("{}.{}", DEFAULT_HANDSHAKE_COOKIE_NAME, state.handshake_id);
+		let handshake_cookie_name = format!(
+			"{}.{}",
+			self.handshake_cookie_base_name(),
+			state.handshake_id
+		);
 		let cookies = headers
 			.get(http::header::COOKIE)
 			.and_then(|v| v.to_str().ok())
@@ -628,12 +718,14 @@ impl OAuth2Filter {
 
 		// Verify ID Token using existing JWT module
 		let claims = if let Some(id_token) = &token_resp.id_token {
-			let claims = callback
-				.jwt_validator
-				.validate_claims(id_token)
-				.map_err(|e| {
-					ProxyError::OAuth2AuthenticationFailure(OAuth2Error::InvalidToken(e.to_string()))
-				})?;
+			let jwt_validator = callback.jwt_validator.ok_or_else(|| {
+				ProxyError::OAuth2AuthenticationFailure(OAuth2Error::InvalidToken(
+					"id_token returned but no JWKS validator is configured".into(),
+				))
+			})?;
+			let claims = jwt_validator.validate_claims(id_token).map_err(|e| {
+				ProxyError::OAuth2AuthenticationFailure(OAuth2Error::InvalidToken(e.to_string()))
+			})?;
 
 			// Additional OIDC specific verification: check nonce
 			let token_nonce = claims
@@ -684,7 +776,7 @@ impl OAuth2Filter {
 		// Cleanup: Clear the specific namespaced handshake cookie
 		let clear_handshake = Cookie::build((handshake_cookie_name, ""))
 			.path("/")
-			.secure(true)
+			.secure(self.cookie_secure())
 			.http_only(true)
 			.max_age(cookie::time::Duration::seconds(0))
 			.build();
@@ -712,11 +804,7 @@ impl OAuth2Filter {
 	}
 
 	fn get_session(&self, headers: &http::HeaderMap) -> Option<SessionState> {
-		let cookie_name = self
-			.config
-			.cookie_name
-			.as_deref()
-			.unwrap_or(DEFAULT_COOKIE_NAME);
+		let cookie_name = self.session_cookie_name();
 		let cookies_header = headers.get(http::header::COOKIE)?.to_str().ok()?;
 
 		let mut chunks = std::collections::HashMap::with_capacity(4);
@@ -774,7 +862,7 @@ impl OAuth2Filter {
 		policy_client: Option<&PolicyClient>,
 		session: &mut SessionState,
 		metadata: &OidcMetadata,
-		jwt_validator: &Jwt,
+		jwt_validator: Option<&Jwt>,
 	) -> Result<bool, OidcError> {
 		let Some(rt) = &session.refresh_token else {
 			return Ok(false);
@@ -808,10 +896,16 @@ impl OAuth2Filter {
 		&self,
 		session: &mut SessionState,
 		id_token: Option<&str>,
-		jwt_validator: &Jwt,
+		jwt_validator: Option<&Jwt>,
 	) -> Result<(), crate::http::jwt::TokenError> {
 		match id_token {
 			Some(id_token) => {
+				let Some(jwt_validator) = jwt_validator else {
+					warn!(
+						"refresh returned id_token but no JWKS validator is configured; ignoring refreshed id_token"
+					);
+					return Ok(());
+				};
 				let claims = jwt_validator.validate_claims(id_token)?;
 				// If the refreshed id_token contains a nonce, verify it matches the original.
 				// A mismatch means we can't trust this id_token's claims, so clear them
@@ -836,12 +930,9 @@ impl OAuth2Filter {
 	}
 
 	fn inject_auth(&self, req: &mut Request, access_token: &str, claims: Option<Claims>) {
-		if self.config.pass_access_token.unwrap_or(false) {
-			let val = format!("Bearer {}", access_token);
-			if let Ok(hv) = HeaderValue::from_str(&val) {
-				req.headers_mut().insert(http::header::AUTHORIZATION, hv);
-			}
-		}
+		req
+			.extensions_mut()
+			.insert(PassthroughBearerToken(access_token.to_string().into()));
 
 		// Inject claims into extensions for RBAC/logging
 		if let Some(claims) = claims {
@@ -855,11 +946,7 @@ impl OAuth2Filter {
 		previous_max_chunk_index: Option<usize>,
 		cookie_max_age: cookie::time::Duration,
 	) -> crate::http::HeaderMap {
-		let cookie_name = self
-			.config
-			.cookie_name
-			.as_deref()
-			.unwrap_or(DEFAULT_COOKIE_NAME);
+		let cookie_name = self.session_cookie_name();
 		let mut headers = crate::http::HeaderMap::new();
 
 		let mut i = 0;
@@ -899,7 +986,7 @@ impl OAuth2Filter {
 			let name = format!("{}.{}", cookie_name, j);
 			let cookie = Cookie::build((name, ""))
 				.path("/")
-				.secure(true)
+				.secure(self.cookie_secure())
 				.http_only(true)
 				.max_age(cookie::time::Duration::seconds(0))
 				.build();
@@ -912,11 +999,7 @@ impl OAuth2Filter {
 	}
 
 	fn session_cookie_max_chunk_index(&self, headers: &http::HeaderMap) -> usize {
-		let cookie_name = self
-			.config
-			.cookie_name
-			.as_deref()
-			.unwrap_or(DEFAULT_COOKIE_NAME);
+		let cookie_name = self.session_cookie_name();
 		let Some(cookies_header) = headers
 			.get(http::header::COOKIE)
 			.and_then(|v| v.to_str().ok())
@@ -960,7 +1043,7 @@ impl OAuth2Filter {
 	) -> Cookie<'static> {
 		Cookie::build((name, value))
 			.path("/")
-			.secure(true)
+			.secure(self.cookie_secure())
 			.http_only(true)
 			.same_site(SameSite::Lax)
 			.max_age(cookie_max_age)
@@ -994,7 +1077,7 @@ impl OAuth2Filter {
 			Cow::Owned(requested_scopes.join(" "))
 		};
 
-		if self.should_return_unauthorized(headers, uri.path()) {
+		if self.should_return_unauthorized(headers) {
 			// API Client -> 401
 			let resp = Response::builder()
 				.status(StatusCode::UNAUTHORIZED)
@@ -1002,7 +1085,7 @@ impl OAuth2Filter {
 					http::header::WWW_AUTHENTICATE,
 					format!(
 						"Bearer realm=\"{}\", scope=\"{}\"",
-						self.config.issuer,
+						self.auth_realm(),
 						scope_string.as_ref()
 					),
 				)
@@ -1053,10 +1136,10 @@ impl OAuth2Filter {
 		let (auth_url, _csrf) = auth_request.url();
 
 		// Set namespaced handshake cookie for Browser Binding (Handshake Isolation)
-		let handshake_cookie_name = format!("{}.{}", DEFAULT_HANDSHAKE_COOKIE_NAME, handshake_id);
+		let handshake_cookie_name = format!("{}.{}", self.handshake_cookie_base_name(), handshake_id);
 		let handshake_cookie = Cookie::build((handshake_cookie_name, "1"))
 			.path("/")
-			.secure(true)
+			.secure(self.cookie_secure())
 			.http_only(true)
 			.same_site(SameSite::Lax)
 			.max_age(cookie::time::Duration::seconds(STATE_TTL.as_secs() as i64))
@@ -1081,15 +1164,7 @@ impl OAuth2Filter {
 		})
 	}
 
-	fn should_return_unauthorized(&self, headers: &http::HeaderMap, path: &str) -> bool {
-		if self
-			.config
-			.deny_redirect_matchers
-			.iter()
-			.any(|matcher| Self::matches_path_prefix(path, matcher))
-		{
-			return true;
-		}
+	fn should_return_unauthorized(&self, headers: &http::HeaderMap) -> bool {
 		let accept = headers
 			.get(http::header::ACCEPT)
 			.and_then(|v| v.to_str().ok())
@@ -1102,72 +1177,6 @@ impl OAuth2Filter {
 		let mut rng = rand::rng();
 		rng.fill_bytes(&mut bytes);
 		URL_SAFE_NO_PAD.encode(bytes)
-	}
-
-	fn forwarded_header_first_value(
-		headers: &http::HeaderMap,
-		name: http::header::HeaderName,
-	) -> Option<String> {
-		headers
-			.get(name)
-			.and_then(|v| v.to_str().ok())
-			.and_then(|v| v.split(',').next())
-			.map(str::trim)
-			.filter(|v| !v.is_empty())
-			.map(ToOwned::to_owned)
-	}
-
-	fn is_trusted_proxy_source(&self, req: &Request) -> bool {
-		if self.trusted_proxy_nets.is_empty() {
-			return false;
-		}
-		let Some(source) = req.extensions().get::<SourceContext>() else {
-			return false;
-		};
-		self
-			.trusted_proxy_nets
-			.iter()
-			.any(|cidr| cidr.contains(&source.address))
-	}
-
-	fn resolve_external_host(&self, req: &Request) -> Result<String, ProxyError> {
-		let trusted_proxy = self.is_trusted_proxy_source(req);
-		let headers = req.headers();
-		let host = if trusted_proxy {
-			Self::forwarded_header_first_value(
-				headers,
-				http::header::HeaderName::from_static("x-forwarded-host"),
-			)
-			.or_else(|| Self::forwarded_header_first_value(headers, http::header::HOST))
-		} else {
-			Self::forwarded_header_first_value(headers, http::header::HOST)
-		}
-		.ok_or_else(|| {
-			ProxyError::Generic("unable to resolve redirect host from request headers".into())
-		})?;
-
-		http::uri::Authority::from_str(&host)
-			.map(|_| host)
-			.map_err(|_| ProxyError::Generic("invalid host header for redirect uri".into()))
-	}
-
-	fn resolve_external_scheme(&self, req: &Request) -> &'static str {
-		if self.is_trusted_proxy_source(req)
-			&& let Some(proto) = Self::forwarded_header_first_value(
-				req.headers(),
-				http::header::HeaderName::from_static("x-forwarded-proto"),
-			) {
-			if proto.eq_ignore_ascii_case("http") {
-				return "http";
-			}
-			if proto.eq_ignore_ascii_case("https") {
-				return "https";
-			}
-		}
-		match req.uri().scheme_str() {
-			Some("http") => "http",
-			_ => "https",
-		}
 	}
 
 	fn original_target_from_uri(uri: &http::Uri) -> String {
@@ -1188,7 +1197,7 @@ impl OAuth2Filter {
 			&& !target.chars().any(char::is_control)
 	}
 
-	fn is_allowed_logout_url(url: &Url) -> bool {
+	fn is_allowed_redirect_url(url: &Url) -> bool {
 		if url.fragment().is_some() || !url.username().is_empty() || url.password().is_some() {
 			return false;
 		}
@@ -1199,21 +1208,8 @@ impl OAuth2Filter {
 		}
 	}
 
-	fn matches_path_prefix(path: &str, matcher: &str) -> bool {
-		if path == matcher {
-			return true;
-		}
-		let matcher = matcher.trim_end_matches('/');
-		if matcher == "/" {
-			return path.starts_with('/');
-		}
-		if matcher.is_empty() {
-			return false;
-		}
-		let Some(rest) = path.trim_end_matches('/').strip_prefix(matcher) else {
-			return false;
-		};
-		rest.is_empty() || rest.starts_with('/')
+	fn is_allowed_logout_url(url: &Url) -> bool {
+		Self::is_allowed_redirect_url(url)
 	}
 }
 
@@ -1331,7 +1327,7 @@ struct SessionState {
 
 struct CallbackValidation<'a> {
 	metadata: &'a OidcMetadata,
-	jwt_validator: &'a Jwt,
+	jwt_validator: Option<&'a Jwt>,
 }
 
 impl SessionState {
@@ -1369,22 +1365,34 @@ mod tests {
 
 	fn test_config() -> OAuth2Policy {
 		OAuth2Policy {
-			issuer: "https://issuer.example.com".to_string(),
+			provider_id: "https://issuer.example.com".to_string(),
+			oidc_issuer: Some("https://issuer.example.com".to_string()),
 			provider_backend: None,
 			client_id: "client-id".to_string(),
 			client_secret: SecretString::new("secret".into()),
+			resolved_provider: None,
 			redirect_uri: Some("https://fixed.example.com/callback".to_string()),
-			auto_detect_redirect_uri: None,
 			scopes: vec![],
 			cookie_name: None,
 			refreshable_cookie_max_age_seconds: None,
-			pass_access_token: None,
 			sign_out_path: None,
 			post_logout_redirect_uri: None,
-			pass_through_matchers: vec![],
-			deny_redirect_matchers: vec![],
-			trusted_proxy_cidrs: vec![],
 		}
+	}
+
+	fn resolved_test_jwks_inline() -> String {
+		json!({
+			"keys": [{
+				"kty": "EC",
+				"crv": "P-256",
+				"kid": "test-nonce-kid",
+				"alg": "ES256",
+				"x": "WfUSsBlmKtTX8Rfmo9K-6PsKG1Ysw1j3St-ZUZSq4HU",
+				"y": "vO_R0kjX3d1oz-2aUtpoWfBp-wu7YxO_XjGSHv40tgM",
+				"use": "sig"
+			}]
+		})
+		.to_string()
 	}
 
 	fn make_test_client() -> crate::client::Client {
@@ -1392,13 +1400,7 @@ mod tests {
 			resolver_cfg: hickory_resolver::config::ResolverConfig::default(),
 			resolver_opts: hickory_resolver::config::ResolverOpts::default(),
 		};
-		crate::client::Client::new(
-			&cfg,
-			None,
-			Default::default(),
-			None,
-			Arc::new(OidcProvider::new()),
-		)
+		crate::client::Client::new(&cfg, None, Default::default(), None)
 	}
 
 	fn request_cookie_header_from_set_cookie_values(
@@ -1424,13 +1426,6 @@ mod tests {
 		OAuth2Filter::new(test_config(), Arc::new(OidcProvider::new())).unwrap()
 	}
 
-	fn test_auto_detect_filter() -> OAuth2Filter {
-		let mut config = test_config();
-		config.redirect_uri = None;
-		config.auto_detect_redirect_uri = Some(true);
-		OAuth2Filter::new(config, Arc::new(OidcProvider::new())).unwrap()
-	}
-
 	#[test]
 	fn original_target_only_keeps_path_and_query() {
 		let uri: http::Uri = "https://evil.example.com/path?q=1".parse().unwrap();
@@ -1454,28 +1449,16 @@ mod tests {
 	#[test]
 	fn resolve_redirect_uri_prefers_config() {
 		let filter = test_filter();
-
-		let mut req = Request::new(crate::http::Body::empty());
-		*req.uri_mut() = "http://ignored/".parse().unwrap();
-		req.headers_mut().insert(
-			http::header::HOST,
-			HeaderValue::from_static("ignored.example.com"),
-		);
-		let resolved = filter.resolve_redirect_uri(&req).unwrap();
+		let resolved = filter.resolve_redirect_uri().unwrap();
 		assert_eq!(resolved.as_str(), "https://fixed.example.com/callback");
 	}
 
 	#[test]
-	fn oauth2_new_requires_redirect_or_auto_detect() {
+	fn oauth2_new_requires_redirect_uri() {
 		let mut config = test_config();
 		config.redirect_uri = None;
-		config.auto_detect_redirect_uri = Some(false);
 		let err = OAuth2Filter::new(config, Arc::new(OidcProvider::new())).unwrap_err();
-		assert!(
-			err
-				.to_string()
-				.contains("requires redirect_uri or auto_detect_redirect_uri=true")
-		);
+		assert!(err.to_string().contains("requires redirect_uri"));
 	}
 
 	#[test]
@@ -1484,6 +1467,47 @@ mod tests {
 		config.redirect_uri = Some("not-a-valid-uri".to_string());
 		let err = OAuth2Filter::new(config, Arc::new(OidcProvider::new())).unwrap_err();
 		assert!(err.to_string().contains("invalid redirect_uri config"));
+	}
+
+	#[test]
+	fn oauth2_new_rejects_non_https_non_loopback_redirect_uri() {
+		let mut config = test_config();
+		config.redirect_uri = Some("http://app.example.com/callback".to_string());
+		let err = OAuth2Filter::new(config, Arc::new(OidcProvider::new())).unwrap_err();
+		assert!(err.to_string().contains("redirect_uri must be https"));
+	}
+
+	#[test]
+	fn oauth2_new_accepts_http_redirect_uri_for_loopback() {
+		let mut config = test_config();
+		config.redirect_uri = Some("http://127.0.0.1:3000/callback".to_string());
+		assert!(OAuth2Filter::new(config, Arc::new(OidcProvider::new())).is_ok());
+	}
+
+	#[test]
+	fn oauth2_new_rejects_host_cookie_name_on_http_loopback_redirect_uri() {
+		let mut config = test_config();
+		config.redirect_uri = Some("http://127.0.0.1:3000/callback".to_string());
+		config.cookie_name = Some("__Host-custom".to_string());
+		let err = OAuth2Filter::new(config, Arc::new(OidcProvider::new())).unwrap_err();
+		assert!(
+			err
+				.to_string()
+				.contains("__Host- cookie names require https redirect_uri")
+		);
+	}
+
+	#[test]
+	fn oauth2_new_rejects_secure_cookie_name_on_http_loopback_redirect_uri() {
+		let mut config = test_config();
+		config.redirect_uri = Some("http://127.0.0.1:3000/callback".to_string());
+		config.cookie_name = Some("__Secure-custom".to_string());
+		let err = OAuth2Filter::new(config, Arc::new(OidcProvider::new())).unwrap_err();
+		assert!(
+			err
+				.to_string()
+				.contains("__Secure- cookie names require https redirect_uri")
+		);
 	}
 
 	#[test]
@@ -1560,6 +1584,99 @@ mod tests {
 	}
 
 	#[test]
+	fn oauth2_new_accepts_resolved_provider_config() {
+		let mut config = test_config();
+		config.resolved_provider = Some(Box::new(crate::types::agent::ResolvedOAuth2Provider {
+			authorization_endpoint: "https://issuer.example.com/authorize".to_string(),
+			token_endpoint: "https://issuer.example.com/token".to_string(),
+			jwks_inline: Some(resolved_test_jwks_inline()),
+			end_session_endpoint: Some("https://issuer.example.com/logout".to_string()),
+			token_endpoint_auth_methods_supported: vec!["client_secret_post".to_string()],
+		}));
+		assert!(OAuth2Filter::new(config, Arc::new(OidcProvider::new())).is_ok());
+	}
+
+	#[test]
+	fn oauth2_new_accepts_resolved_provider_config_without_jwks() {
+		let mut config = test_config();
+		config.resolved_provider = Some(Box::new(crate::types::agent::ResolvedOAuth2Provider {
+			authorization_endpoint: "https://issuer.example.com/authorize".to_string(),
+			token_endpoint: "https://issuer.example.com/token".to_string(),
+			jwks_inline: None,
+			end_session_endpoint: None,
+			token_endpoint_auth_methods_supported: vec!["client_secret_post".to_string()],
+		}));
+		assert!(OAuth2Filter::new(config, Arc::new(OidcProvider::new())).is_ok());
+	}
+
+	#[test]
+	fn oidc_session_cookie_key_stays_compatible_when_provider_id_changes() {
+		let mut legacy = test_config();
+		legacy.provider_id = "provider-a".to_string();
+		let legacy_filter = OAuth2Filter::new(legacy, Arc::new(OidcProvider::new())).unwrap();
+
+		let mut updated = test_config();
+		updated.provider_id = "provider-b".to_string();
+		let updated_filter = OAuth2Filter::new(updated, Arc::new(OidcProvider::new())).unwrap();
+
+		let session = SessionState {
+			access_token: "access-token".to_string(),
+			refresh_token: Some("refresh-token".to_string()),
+			claims: None,
+			expires_at: SystemTime::now() + Duration::from_secs(3600),
+			nonce: Some("nonce".to_string()),
+			id_token: Some("id-token".to_string()),
+		};
+
+		let encoded = legacy_filter
+			.session_codec
+			.encode_session(&session)
+			.expect("legacy filter should encode session");
+		let decoded = updated_filter
+			.session_codec
+			.decode_session(&encoded)
+			.expect("updated filter should decode legacy session");
+
+		assert_eq!(decoded.access_token, session.access_token);
+		assert_eq!(decoded.refresh_token, session.refresh_token);
+		assert_eq!(decoded.id_token, session.id_token);
+	}
+
+	#[tokio::test]
+	async fn oauth2_apply_uses_resolved_metadata_without_discovery() {
+		let mut config = test_config();
+		config.resolved_provider = Some(Box::new(crate::types::agent::ResolvedOAuth2Provider {
+			authorization_endpoint: "https://issuer.example.com/authorize".to_string(),
+			token_endpoint: "https://issuer.example.com/token".to_string(),
+			jwks_inline: Some(resolved_test_jwks_inline()),
+			end_session_endpoint: Some("https://issuer.example.com/logout".to_string()),
+			token_endpoint_auth_methods_supported: vec!["client_secret_post".to_string()],
+		}));
+		let filter = OAuth2Filter::new(config, Arc::new(OidcProvider::new())).unwrap();
+		let client = make_test_client();
+		let mut req = Request::new(crate::http::Body::empty());
+		*req.uri_mut() = "/private/data".parse().unwrap();
+		req
+			.headers_mut()
+			.insert(http::header::ACCEPT, HeaderValue::from_static("text/html"));
+
+		let response = filter.apply(&client, None, &mut req).await.unwrap();
+		let redirect = response
+			.direct_response
+			.expect("oauth2 should redirect to authorization endpoint");
+		assert_eq!(redirect.status(), StatusCode::FOUND);
+		let location = redirect
+			.headers()
+			.get(http::header::LOCATION)
+			.and_then(|v| v.to_str().ok())
+			.expect("redirect location must be present");
+		assert!(
+			location.starts_with("https://issuer.example.com/authorize?"),
+			"unexpected redirect location: {location}"
+		);
+	}
+
+	#[test]
 	fn refreshable_cookie_max_age_uses_policy_override() {
 		let mut filter = test_filter();
 		filter.config.refreshable_cookie_max_age_seconds = Some(1800);
@@ -1593,93 +1710,16 @@ mod tests {
 	}
 
 	#[test]
-	fn resolve_redirect_uri_uses_forwarded_host_and_proto_for_trusted_proxy() {
-		let mut filter = test_auto_detect_filter();
-		filter.config.trusted_proxy_cidrs = vec!["10.0.0.0/8".to_string()];
-		filter.trusted_proxy_nets = vec!["10.0.0.0/8".parse().unwrap()].into();
-		let mut req = Request::new(crate::http::Body::empty());
-		*req.uri_mut() = "http://internal/".parse().unwrap();
-		req.extensions_mut().insert(SourceContext {
-			address: "10.1.2.3".parse().unwrap(),
-			port: 12345,
-			tls: None,
-		});
-		req.headers_mut().insert(
-			http::header::HeaderName::from_static("x-forwarded-host"),
-			HeaderValue::from_static("public.example.com"),
-		);
-		req.headers_mut().insert(
-			http::header::HeaderName::from_static("x-forwarded-proto"),
-			HeaderValue::from_static("https"),
-		);
-		let resolved = filter.resolve_redirect_uri(&req).unwrap();
-		assert_eq!(
-			resolved.as_str(),
-			"https://public.example.com/_gateway/callback"
-		);
-	}
-
-	#[test]
-	fn resolve_redirect_uri_ignores_forwarded_host_for_untrusted_source() {
-		let filter = test_auto_detect_filter();
-		let mut req = Request::new(crate::http::Body::empty());
-		*req.uri_mut() = "http://internal/".parse().unwrap();
-		req.headers_mut().insert(
-			http::header::HOST,
-			HeaderValue::from_static("actual.example.com"),
-		);
-		req.headers_mut().insert(
-			http::header::HeaderName::from_static("x-forwarded-host"),
-			HeaderValue::from_static("ignored-forwarded.example.com"),
-		);
-		let resolved = filter.resolve_redirect_uri(&req).unwrap();
-		assert_eq!(
-			resolved.as_str(),
-			"http://actual.example.com/_gateway/callback"
-		);
-	}
-
-	#[test]
-	fn resolve_redirect_uri_rejects_invalid_host_header() {
-		let filter = test_auto_detect_filter();
-		let mut req = Request::new(crate::http::Body::empty());
-		*req.uri_mut() = "http://internal/".parse().unwrap();
-		req
-			.headers_mut()
-			.insert(http::header::HOST, HeaderValue::from_static("bad host"));
-		assert!(filter.resolve_redirect_uri(&req).is_err());
-	}
-
-	#[test]
-	fn resolve_redirect_uri_rejects_when_auto_detect_disabled() {
-		let mut filter = test_auto_detect_filter();
-		filter.config.auto_detect_redirect_uri = Some(false);
-		let req = Request::new(crate::http::Body::empty());
-		assert!(filter.resolve_redirect_uri(&req).is_err());
-	}
-
-	#[test]
-	fn pass_through_matchers_require_segment_boundary() {
-		let mut filter = test_filter();
-		filter.config.pass_through_matchers = vec!["/public".to_string()];
-
-		let mut public_req = Request::new(crate::http::Body::empty());
-		*public_req.uri_mut() = "/public/health".parse().unwrap();
-		assert!(filter.should_bypass(&public_req));
-
-		let mut false_positive_req = Request::new(crate::http::Body::empty());
-		*false_positive_req.uri_mut() = "/publicity".parse().unwrap();
-		assert!(!filter.should_bypass(&false_positive_req));
-	}
-
-	#[test]
-	fn deny_redirect_matchers_force_unauthorized_for_html_clients() {
-		let mut filter = test_filter();
-		filter.config.deny_redirect_matchers = vec!["/api".to_string()];
+	fn non_html_clients_get_unauthorized_instead_of_redirect() {
+		let filter = test_filter();
 		let mut headers = http::HeaderMap::new();
+		headers.insert(
+			http::header::ACCEPT,
+			HeaderValue::from_static("application/json"),
+		);
+		assert!(filter.should_return_unauthorized(&headers));
 		headers.insert(http::header::ACCEPT, HeaderValue::from_static("text/html"));
-		assert!(filter.should_return_unauthorized(&headers, "/api/v1/resource"));
-		assert!(!filter.should_return_unauthorized(&headers, "/ui/home"));
+		assert!(!filter.should_return_unauthorized(&headers));
 	}
 
 	#[test]
@@ -1699,7 +1739,7 @@ mod tests {
 		let jwt = Jwt::from_providers(vec![], crate::http::jwt::Mode::Strict);
 
 		filter
-			.update_session_claims(&mut session, None, &jwt)
+			.update_session_claims(&mut session, None, Some(&jwt))
 			.unwrap();
 		assert_eq!(
 			session
@@ -1730,10 +1770,45 @@ mod tests {
 
 		assert!(
 			filter
-				.update_session_claims(&mut session, Some("not-a-jwt"), &jwt)
+				.update_session_claims(&mut session, Some("not-a-jwt"), Some(&jwt))
 				.is_err()
 		);
 		assert!(session.claims.is_some());
+		assert_eq!(session.id_token.as_deref(), Some("existing-id-token"));
+	}
+
+	#[test]
+	fn update_session_claims_without_validator_ignores_refreshed_id_token() {
+		let filter = test_filter();
+		let mut session = SessionState {
+			access_token: "access".to_string(),
+			refresh_token: Some("refresh".to_string()),
+			claims: Some(Claims {
+				inner: serde_json::json!({
+					"sub": "existing-user",
+				})
+				.as_object()
+				.cloned()
+				.unwrap(),
+				jwt: SecretString::new("header.payload.sig".into()),
+			}),
+			expires_at: SystemTime::now() + Duration::from_secs(60),
+			nonce: None,
+			id_token: Some("existing-id-token".to_string()),
+		};
+
+		filter
+			.update_session_claims(&mut session, Some("new-id-token"), None)
+			.expect("missing validator should not fail refresh handling");
+
+		assert_eq!(
+			session
+				.claims
+				.as_ref()
+				.and_then(|claims| claims.inner.get("sub"))
+				.and_then(|v| v.as_str()),
+			Some("existing-user")
+		);
 		assert_eq!(session.id_token.as_deref(), Some("existing-id-token"));
 	}
 
@@ -1803,7 +1878,7 @@ mod tests {
 		};
 
 		filter
-			.update_session_claims(&mut session, Some(&token), &jwt)
+			.update_session_claims(&mut session, Some(&token), Some(&jwt))
 			.unwrap();
 		assert!(
 			session.claims.is_none(),
@@ -1875,7 +1950,7 @@ mod tests {
 		};
 
 		filter
-			.update_session_claims(&mut session, Some(&token), &jwt)
+			.update_session_claims(&mut session, Some(&token), Some(&jwt))
 			.unwrap();
 		let claims = session
 			.claims
@@ -1889,10 +1964,8 @@ mod tests {
 	}
 
 	#[test]
-	fn pass_access_token_defaults_to_false() {
-		let mut config = test_config();
-		config.pass_access_token = None;
-		let filter = OAuth2Filter::new(config, Arc::new(OidcProvider::new())).unwrap();
+	fn inject_auth_sets_passthrough_bearer_extension() {
+		let filter = OAuth2Filter::new(test_config(), Arc::new(OidcProvider::new())).unwrap();
 		let session = SessionState {
 			access_token: "token".to_string(),
 			refresh_token: None,
@@ -1903,7 +1976,41 @@ mod tests {
 		};
 		let mut req = Request::new(crate::http::Body::empty());
 		filter.inject_auth(&mut req, &session.access_token, None);
+		let token = req
+			.extensions()
+			.get::<PassthroughBearerToken>()
+			.expect("passthrough token extension should be set");
+		assert_eq!(token.0.expose_secret(), "token");
 		assert!(req.headers().get(http::header::AUTHORIZATION).is_none());
+	}
+
+	#[test]
+	fn oauth2_injected_claims_are_visible_to_cel() {
+		let filter = OAuth2Filter::new(test_config(), Arc::new(OidcProvider::new())).unwrap();
+		let mut req = http::Request::builder()
+			.method(http::Method::GET)
+			.uri("https://example.com/private")
+			.body(crate::http::Body::empty())
+			.unwrap();
+		filter.inject_auth(
+			&mut req,
+			"access-token",
+			Some(Claims {
+				inner: Map::from_iter([("sub".to_string(), Value::String("oauth-user".to_string()))]),
+				jwt: SecretString::new("id.token.value".into()),
+			}),
+		);
+
+		let expr = crate::cel::Expression::new_strict(r#"jwt.sub == "oauth-user""#)
+			.expect("expression should compile");
+		let exec = crate::cel::Executor::new_request(&req);
+		let value = exec
+			.eval(&expr)
+			.expect("oauth2-injected claims should evaluate in CEL")
+			.json()
+			.expect("CEL result should serialize");
+
+		assert_eq!(value, serde_json::json!(true));
 	}
 
 	#[test]
@@ -1928,6 +2035,22 @@ mod tests {
 
 		let decoded = filter.get_session(&headers).expect("session should decode");
 		assert_eq!(decoded.access_token, "token");
+	}
+
+	#[test]
+	fn loopback_http_redirect_uses_insecure_default_cookie_name_and_attributes() {
+		let mut config = test_config();
+		config.redirect_uri = Some("http://127.0.0.1:3000/callback".to_string());
+		let filter = OAuth2Filter::new(config, Arc::new(OidcProvider::new())).unwrap();
+		assert_eq!(filter.session_cookie_name(), INSECURE_DEFAULT_COOKIE_NAME);
+		assert!(!filter.cookie_secure());
+
+		let cookie = filter.build_session_cookie(
+			filter.session_cookie_name().to_string(),
+			"value".to_string(),
+			cookie::time::Duration::seconds(60),
+		);
+		assert_eq!(cookie.secure(), Some(false));
 	}
 
 	#[test]
@@ -2089,8 +2212,8 @@ mod tests {
 			.await;
 
 		let mut config = test_config();
-		config.issuer = issuer;
-		config.pass_access_token = Some(true);
+		config.provider_id = issuer.clone();
+		config.oidc_issuer = Some(issuer);
 		let filter = OAuth2Filter::new(config, Arc::new(OidcProvider::new())).unwrap();
 		let client = make_test_client();
 		let session = SessionState {
@@ -2102,11 +2225,7 @@ mod tests {
 			id_token: None,
 		};
 		let encoded = filter.session_codec.encode_session(&session).unwrap();
-		let cookie_name = filter
-			.config
-			.cookie_name
-			.as_deref()
-			.unwrap_or(DEFAULT_COOKIE_NAME);
+		let cookie_name = filter.session_cookie_name();
 		let cookie_header = format!("{cookie_name}={encoded}");
 
 		let mut set = JoinSet::new();
@@ -2126,23 +2245,22 @@ mod tests {
 					.apply(&client, None, &mut req)
 					.await
 					.expect("apply should succeed");
-				let auth = req
-					.headers()
-					.get(http::header::AUTHORIZATION)
-					.and_then(|value| value.to_str().ok())
-					.map(ToOwned::to_owned);
-				(response, auth)
+				let passthrough = req
+					.extensions()
+					.get::<PassthroughBearerToken>()
+					.map(|token| token.0.expose_secret().to_string());
+				(response, passthrough)
 			});
 		}
 
 		while let Some(joined) = set.join_next().await {
-			let (response, auth) = joined.expect("task should join");
+			let (response, passthrough) = joined.expect("task should join");
 			assert!(response.direct_response.is_none());
 			assert!(
 				response.response_headers.is_some(),
 				"refresh should return updated session cookies"
 			);
-			assert_eq!(auth.as_deref(), Some("Bearer access-refreshed"));
+			assert_eq!(passthrough.as_deref(), Some("access-refreshed"));
 		}
 	}
 
