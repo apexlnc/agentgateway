@@ -1594,6 +1594,7 @@ mod tests {
 					}),
 				],
 				stateful: false,
+				allow_degraded: false,
 			},
 			McpAuthorizationSet::new(vec![].into()),
 			PolicyClient {
@@ -1640,6 +1641,7 @@ mod tests {
 					}),
 				],
 				stateful: false,
+				allow_degraded: false,
 			},
 			McpAuthorizationSet::new(vec![].into()),
 			PolicyClient {
@@ -1687,6 +1689,7 @@ mod tests {
 					}),
 				],
 				stateful: false,
+				allow_degraded: false,
 			},
 			McpAuthorizationSet::new(vec![].into()),
 			PolicyClient {
@@ -1732,6 +1735,7 @@ mod tests {
 					}),
 				],
 				stateful: false,
+				allow_degraded: false,
 			},
 			McpAuthorizationSet::new(vec![].into()),
 			PolicyClient {
@@ -1763,6 +1767,7 @@ mod tests {
 					capture_target("serverB", server_b_capture.path()),
 				],
 				stateful: false,
+				allow_degraded: false,
 			},
 			McpAuthorizationSet::new(vec![].into()),
 			PolicyClient {
@@ -1825,6 +1830,7 @@ mod tests {
 					capture_target("serverB", server_b_capture.path()),
 				],
 				stateful: false,
+				allow_degraded: false,
 			},
 			McpAuthorizationSet::new(vec![].into()),
 			PolicyClient {
@@ -1904,6 +1910,7 @@ mod tests {
 					}),
 				],
 				stateful: false,
+				allow_degraded: false,
 			},
 			McpAuthorizationSet::new(vec![].into()),
 			PolicyClient {
@@ -1994,6 +2001,7 @@ mod tests {
 					capture_target("serverB", server_b_capture.path()),
 				],
 				stateful: false,
+				allow_degraded: false,
 			},
 			McpAuthorizationSet::new(vec![].into()),
 			PolicyClient {
@@ -2086,6 +2094,7 @@ mod tests {
 					capture_target("serverB", server_b_capture.path()),
 				],
 				stateful: false,
+				allow_degraded: false,
 			},
 			McpAuthorizationSet::new(vec![].into()),
 			PolicyClient {
@@ -2143,6 +2152,7 @@ mod tests {
 					backend_policies: Default::default(),
 				})],
 				stateful: false,
+				allow_degraded: false,
 			},
 			McpAuthorizationSet::new(vec![].into()),
 			PolicyClient {

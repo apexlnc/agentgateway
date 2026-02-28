@@ -434,6 +434,7 @@ impl TestBind {
 				})],
 				stateful,
 				always_use_prefix,
+				allow_degraded: false,
 			},
 		);
 		{
@@ -481,6 +482,7 @@ impl TestBind {
 					.collect_vec(),
 				stateful,
 				always_use_prefix: false,
+				allow_degraded: false,
 			},
 		);
 		{

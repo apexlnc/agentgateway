@@ -1618,7 +1618,9 @@ pub async fn mcp_streamable_client(
 	use rmcp::transport::StreamableHttpClientTransport;
 	let transport = StreamableHttpClientTransport::with_client(
 		reqwest::Client::new(),
-		rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(format!("http://{s}/mcp")),
+		rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+			format!("http://{s}/mcp"),
+		),
 	);
 	let client_info = ClientInfo {
 		meta: None,
@@ -1651,7 +1653,9 @@ pub async fn mcp_streamable_client_with_handler<H: rmcp::ClientHandler>(
 	use rmcp::transport::StreamableHttpClientTransport;
 	let transport = StreamableHttpClientTransport::with_client(
 		reqwest::Client::new(),
-		rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(format!("http://{s}/mcp")),
+		rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+			format!("http://{s}/mcp"),
+		),
 	);
 	handler
 		.serve(transport)

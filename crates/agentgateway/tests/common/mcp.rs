@@ -16,7 +16,9 @@ pub(crate) async fn setup_comprehensive_client(
 	use rmcp::transport::StreamableHttpClientTransport;
 	let transport = StreamableHttpClientTransport::with_client(
 		reqwest::Client::new(),
-		rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url.to_string()),
+		rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+			url.to_string(),
+		),
 	);
 
 	let client_info = ClientInfo {
