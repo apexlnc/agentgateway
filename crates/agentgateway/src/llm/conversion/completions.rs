@@ -129,11 +129,10 @@ pub mod from_messages {
 	use types::messages::typed as messages;
 
 	use crate::json;
-	use crate::llm::{AIError, types};
+	use crate::llm::{AIError, AmendOnDrop, types};
 
 	use crate::llm::types::ResponseType;
 	use crate::parse::sse::SseJsonEvent;
-	use crate::telemetry::log::AsyncLog;
 	use agent_core::strng;
 	use bytes::Bytes;
 	use serde_json::Value;
@@ -230,7 +229,7 @@ pub mod from_messages {
 	pub fn translate_stream(
 		b: crate::http::Body,
 		buffer_limit: usize,
-		log: AsyncLog<crate::llm::LLMInfo>,
+		log: AmendOnDrop,
 	) -> crate::http::Body {
 		#[derive(Debug)]
 		struct PendingToolCall {
@@ -358,7 +357,7 @@ pub mod from_messages {
 			index
 		}
 
-		fn maybe_set_first_token(state: &mut StreamState, log: &AsyncLog<crate::llm::LLMInfo>) {
+		fn maybe_set_first_token(state: &mut StreamState, log: &AmendOnDrop) {
 			if state.sent_first_token {
 				return;
 			}
@@ -371,7 +370,7 @@ pub mod from_messages {
 		fn flush_message_end(
 			state: &mut StreamState,
 			events: &mut Vec<(&'static str, messages::MessagesStreamEvent)>,
-			log: &AsyncLog<crate::llm::LLMInfo>,
+			log: &AmendOnDrop,
 			force: bool,
 		) {
 			if state.sent_message_stop {
@@ -621,7 +620,7 @@ pub mod from_messages {
 			stream,
 			temperature,
 			top_p,
-			top_k,
+			top_k: _,
 			tools,
 			tool_choice,
 			metadata,
@@ -874,13 +873,9 @@ pub mod from_messages {
 			tools: if tools.is_empty() { None } else { Some(tools) },
 			tool_choice,
 			user: user_id,
-			vendor_extensions: completions::RequestVendorExtensions {
-				top_k,
-				thinking_budget_tokens: thinking.as_ref().and_then(|t| match t {
-					messages::ThinkingInput::Enabled { budget_tokens } => Some(*budget_tokens),
-					_ => None,
-				}),
-			},
+			// Internal vendor extensions are only for completions-originated requests.
+			// messages -> completions should emit OpenAI-compatible payloads only.
+			vendor_extensions: completions::RequestVendorExtensions::default(),
 			stream_options: if stream {
 				Some(completions::StreamOptions {
 					include_usage: Some(true),

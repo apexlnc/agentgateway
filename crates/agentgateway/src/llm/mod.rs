@@ -1025,9 +1025,13 @@ impl AIProvider {
 			(AIProvider::Vertex(_), InputFormat::Messages) if is_vertex_anthropic => resp.map(|b| {
 				conversion::messages::passthrough_stream(b, buffer, AmendOnDrop::new(log, rate_limit))
 			}),
-			(AIProvider::Vertex(_), InputFormat::Messages) => {
-				resp.map(|b| conversion::completions::from_messages::translate_stream(b, buffer, log))
-			},
+			(AIProvider::Vertex(_), InputFormat::Messages) => resp.map(|b| {
+				conversion::completions::from_messages::translate_stream(
+					b,
+					buffer,
+					AmendOnDrop::new(log, rate_limit),
+				)
+			}),
 			// Anthropic messages: passthrough
 			(AIProvider::Anthropic(_), InputFormat::Messages) => resp.map(|b| {
 				conversion::messages::passthrough_stream(b, buffer, AmendOnDrop::new(log, rate_limit))
@@ -1036,7 +1040,13 @@ impl AIProvider {
 			(
 				AIProvider::OpenAI(_) | AIProvider::Gemini(_) | AIProvider::AzureOpenAI(_),
 				InputFormat::Messages,
-			) => resp.map(|b| conversion::completions::from_messages::translate_stream(b, buffer, log)),
+			) => resp.map(|b| {
+				conversion::completions::from_messages::translate_stream(
+					b,
+					buffer,
+					AmendOnDrop::new(log, rate_limit),
+				)
+			}),
 			// Supported paths with conversion...
 			(AIProvider::Anthropic(_), InputFormat::Completions) => resp.map(|b| {
 				conversion::messages::from_completions::translate_stream(

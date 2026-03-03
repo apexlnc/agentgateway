@@ -569,6 +569,45 @@ fn test_messages_output_config_format_maps_to_openai_response_format() {
 }
 
 #[test]
+fn test_messages_to_completions_preserves_user_id_but_omits_internal_fields() {
+	let request: types::messages::Request = serde_json::from_value(json!({
+		"model": "gpt-4.1",
+		"max_tokens": 64,
+		"top_k": 42,
+		"thinking": {
+			"type": "enabled",
+			"budget_tokens": 2048
+		},
+		"metadata": {
+			"user_id": "user-123",
+			"other_field": "must_not_forward"
+		},
+		"messages": [
+			{
+				"role": "user",
+				"content": "hello"
+			}
+		]
+	}))
+	.expect("valid messages request");
+
+	let translated = conversion::completions::from_messages::translate(&request)
+		.expect("messages->completions translation");
+	let translated: Value =
+		serde_json::from_slice(&translated).expect("translated request should be valid json");
+
+	assert_eq!(translated["user"], json!("user-123"));
+	assert!(
+		translated.get("metadata").is_none(),
+		"messages.metadata should not be forwarded to OpenAI-compatible requests: {translated}"
+	);
+	assert!(
+		translated.get("vendor_extensions").is_none(),
+		"internal vendor extensions must not be serialized into OpenAI-compatible requests: {translated}"
+	);
+}
+
+#[test]
 fn test_messages_to_completions_stream_sets_include_usage_stream_option() {
 	let req: types::messages::Request = serde_json::from_value(serde_json::json!({
 		"model": "gpt-4.1",
@@ -914,7 +953,7 @@ async fn test_completions_from_messages_stream_done_without_finish_reason_emits_
 	let out = conversion::completions::from_messages::translate_stream(
 		Body::from(input.as_bytes().to_vec()),
 		1024 * 1024,
-		AsyncLog::default(),
+		AmendOnDrop::new(AsyncLog::default(), LLMResponsePolicies::default()),
 	)
 	.collect()
 	.await
@@ -946,7 +985,7 @@ async fn test_completions_from_messages_stream_interleaved_tool_calls_single_blo
 	let out = conversion::completions::from_messages::translate_stream(
 		Body::from(input.as_bytes().to_vec()),
 		1024 * 1024,
-		AsyncLog::default(),
+		AmendOnDrop::new(AsyncLog::default(), LLMResponsePolicies::default()),
 	)
 	.collect()
 	.await
@@ -976,7 +1015,7 @@ async fn test_completions_from_messages_stream_waits_for_tool_name_before_open()
 	let out = conversion::completions::from_messages::translate_stream(
 		Body::from(input.as_bytes().to_vec()),
 		1024 * 1024,
-		AsyncLog::default(),
+		AmendOnDrop::new(AsyncLog::default(), LLMResponsePolicies::default()),
 	)
 	.collect()
 	.await
@@ -1076,7 +1115,7 @@ async fn test_process_streaming_messages_uses_completions_translation_for_provid
 	let expected = conversion::completions::from_messages::translate_stream(
 		Body::from(stream_bytes.clone()),
 		1024 * 1024,
-		AsyncLog::default(),
+		AmendOnDrop::new(AsyncLog::default(), LLMResponsePolicies::default()),
 	)
 	.collect()
 	.await
