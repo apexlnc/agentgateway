@@ -434,6 +434,7 @@ impl TestBind {
 				})],
 				stateful,
 				always_use_prefix,
+				allow_degraded: false,
 			},
 		);
 		{
@@ -455,6 +456,16 @@ impl TestBind {
 		name: &str,
 		servers: Vec<(&str, SocketAddr, bool)>,
 		stateful: bool,
+	) -> Self {
+		self.with_multiplex_mcp_backend_with_degraded(name, servers, stateful, false)
+	}
+
+	pub fn with_multiplex_mcp_backend_with_degraded(
+		self,
+		name: &str,
+		servers: Vec<(&str, SocketAddr, bool)>,
+		stateful: bool,
+		allow_degraded: bool,
 	) -> Self {
 		let b = Backend::MCP(
 			ResourceName::new(name.into(), "".into()),
@@ -481,6 +492,7 @@ impl TestBind {
 					.collect_vec(),
 				stateful,
 				always_use_prefix: false,
+				allow_degraded,
 			},
 		);
 		{

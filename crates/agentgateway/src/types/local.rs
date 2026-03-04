@@ -706,6 +706,7 @@ impl LocalBackend {
 						McpPrefixMode::Always => true,
 						McpPrefixMode::Conditional => false,
 					}),
+					allow_degraded: tgt.allow_degraded,
 				};
 				backends.push(Backend::MCP(name, m).into());
 				backends
@@ -764,7 +765,6 @@ pub enum McpPrefixMode {
 	#[default]
 	Conditional,
 }
-
 #[apply(schema_de!)]
 pub struct LocalMcpBackend {
 	pub targets: Vec<Arc<LocalMcpTarget>>,
@@ -772,6 +772,8 @@ pub struct LocalMcpBackend {
 	pub stateful_mode: McpStatefulMode,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub prefix_mode: Option<McpPrefixMode>,
+	#[serde(default)]
+	pub allow_degraded: bool,
 }
 
 #[apply(schema_de!)]

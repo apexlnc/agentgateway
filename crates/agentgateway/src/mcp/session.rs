@@ -14,7 +14,9 @@ use rmcp::model::{
 	ClientInfo, ClientJsonRpcMessage, ClientNotification, ClientRequest, ConstString, ErrorCode,
 	Implementation, JsonRpcError, JsonRpcRequest, ProtocolVersion, RequestId, ServerJsonRpcMessage,
 };
-use rmcp::transport::common::http_header::{EVENT_STREAM_MIME_TYPE, JSON_MIME_TYPE};
+use rmcp::transport::common::http_header::{
+	EVENT_STREAM_MIME_TYPE, HEADER_MCP_PROTOCOL_VERSION, JSON_MIME_TYPE,
+};
 use sse_stream::{KeepAlive, Sse, SseBody, SseStream};
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -63,14 +65,22 @@ impl Session {
 		parts: Parts,
 		message: ClientJsonRpcMessage,
 	) -> Result<Response, ProxyError> {
+		let request_uri = parts.uri.clone();
+		let req_id = match &message {
+			ClientJsonRpcMessage::Request(r) => Some(r.id.clone()),
+			_ => None,
+		};
 		let is_init = matches!(&message, ClientJsonRpcMessage::Request(r) if matches!(&r.request, &ClientRequest::InitializeRequest(_)));
 		if !is_init {
-			// first, send the initialize
-			let init_request = rmcp::model::InitializeRequest {
-				method: Default::default(),
-				params: get_client_info(),
-				extensions: Default::default(),
+			let synthetic_init_protocol_version = match protocol_version_from_headers(&parts.headers) {
+				Ok(version) => version,
+				Err(err) => {
+					return Self::handle_error(req_id, Some(request_uri), Err(err)).await;
+				},
 			};
+			// first, send the initialize
+			let init_request =
+				rmcp::model::InitializeRequest::new(get_client_info(synthetic_init_protocol_version));
 			let _ = self
 				.send(
 					parts.clone(),
@@ -200,9 +210,10 @@ impl Session {
 			Err(UpstreamError::Authorization {
 				resource_type,
 				resource_name,
-			}) if req_id.is_some() => {
-				Err(mcp::Error::Authorization(req_id.unwrap(), resource_type, resource_name).into())
-			},
+			}) if req_id.is_some() => Self::json_rpc_error_response(
+				req_id,
+				ErrorData::invalid_params(format!("Unknown {resource_type}: {resource_name}"), None),
+			),
 			Err(UpstreamError::InvalidRequest(msg)) => {
 				Self::json_rpc_error_response(req_id, ErrorData::invalid_request(msg, None))
 			},
@@ -385,6 +396,11 @@ impl Session {
 				});
 				match &mut r.request {
 					ClientRequest::InitializeRequest(ir) => {
+						if self.relay.count() == 0 {
+							return Err(UpstreamError::Proxy(
+								mcp::Error::SendError(None, "no MCP targets available".to_string()).into(),
+							));
+						}
 						let pv = ir.params.protocol_version.clone();
 						let res = self
 							.relay
@@ -396,7 +412,9 @@ impl Session {
 									.merge_initialize(pv, self.relay.is_multiplexing()),
 							)
 							.await;
-						if let Some(sessions) = self.relay.get_sessions() {
+						if res.is_ok()
+							&& let Some(sessions) = self.relay.get_sessions()
+						{
 							let s = http::sessionpersistence::SessionState::MCP(
 								http::sessionpersistence::MCPSessionState::new(sessions),
 							);
@@ -839,24 +857,36 @@ impl sse_stream::Timer for TokioSseTimer {
 	}
 }
 
-fn get_client_info() -> ClientInfo {
-	ClientInfo {
-		meta: None,
-		protocol_version: ProtocolVersion::V_2025_06_18,
-		capabilities: rmcp::model::ClientCapabilities {
-			experimental: None,
-			roots: None,
-			sampling: None,
-			elicitation: None,
-			tasks: None,
-			extensions: None,
+fn get_client_info(protocol_version: ProtocolVersion) -> ClientInfo {
+	ClientInfo::new(
+		rmcp::model::ClientCapabilities::default(),
+		Implementation::new("agentgateway", BuildInfo::new().version.to_string()),
+	)
+	.with_protocol_version(protocol_version)
+}
+
+fn protocol_version_from_headers(
+	headers: &http::HeaderMap,
+) -> Result<ProtocolVersion, UpstreamError> {
+	let Some(raw) = headers.get(HEADER_MCP_PROTOCOL_VERSION) else {
+		return Err(UpstreamError::InvalidRequest(
+			"missing MCP-Protocol-Version header for synthetic initialize; send initialize first"
+				.to_string(),
+		));
+	};
+	let Ok(value) = raw.to_str() else {
+		return Err(UpstreamError::InvalidRequest(
+			"invalid MCP-Protocol-Version header encoding".to_string(),
+		));
+	};
+	// ProtocolVersion has no public constructor/FromStr, so deserialize from a JSON string value.
+	serde_json::from_value::<ProtocolVersion>(serde_json::Value::String(value.to_owned())).map_err(
+		|_| {
+			UpstreamError::InvalidRequest(format!(
+				"invalid MCP-Protocol-Version header value: {value}"
+			))
 		},
-		client_info: Implementation {
-			name: "agentgateway".to_string(),
-			version: BuildInfo::new().version.to_string(),
-			..Default::default()
-		},
-	}
+	)
 }
 
 #[cfg(test)]
@@ -868,6 +898,7 @@ mod tests {
 	async fn handle_error_invalid_method_returns_jsonrpc() {
 		let resp = Session::handle_error(
 			Some(RequestId::Number(7)),
+			None,
 			Err(UpstreamError::InvalidMethod("nope".to_string())),
 		)
 		.await
@@ -893,6 +924,7 @@ mod tests {
 		let data = ErrorData::invalid_params("bad args", None);
 		let resp = Session::handle_error(
 			Some(RequestId::Number(9)),
+			None,
 			Err(UpstreamError::ServiceError(rmcp::ServiceError::McpError(
 				data.clone(),
 			))),
@@ -908,6 +940,28 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn handle_error_authorization_returns_jsonrpc_invalid_params() {
+		let resp = Session::handle_error(
+			Some(RequestId::Number(13)),
+			None,
+			Err(UpstreamError::Authorization {
+				resource_type: "tool".to_string(),
+				resource_name: "echo".to_string(),
+			}),
+		)
+		.await
+		.expect("response");
+		assert_eq!(resp.status(), StatusCode::OK);
+		let body = crate::http::read_body_with_limit(resp.into_body(), 8 * 1024)
+			.await
+			.expect("body");
+		let err: JsonRpcError = serde_json::from_slice(&body).expect("jsonrpc error");
+		assert_eq!(err.id, RequestId::Number(13));
+		assert_eq!(err.error.code, ErrorCode::INVALID_PARAMS);
+		assert_eq!(err.error.message.as_ref(), "Unknown tool: echo");
+	}
+
+	#[tokio::test]
 	async fn handle_error_http_passthrough_preserves_status() {
 		let resp = ::http::Response::builder()
 			.status(StatusCode::BAD_GATEWAY)
@@ -915,6 +969,7 @@ mod tests {
 			.expect("response");
 		let err = Session::handle_error(
 			Some(RequestId::Number(1)),
+			None,
 			Err(UpstreamError::Http(ClientError::Status(Box::new(resp)))),
 		)
 		.await
@@ -924,6 +979,56 @@ mod tests {
 				assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 			},
 			other => panic!("unexpected error: {:?}", other),
+		}
+	}
+
+	#[test]
+	fn protocol_version_errors_when_header_missing() {
+		let headers = http::HeaderMap::new();
+		let err = protocol_version_from_headers(&headers).expect_err("header must be required");
+		match err {
+			UpstreamError::InvalidRequest(msg) => {
+				assert!(msg.contains("missing MCP-Protocol-Version header"));
+			},
+			other => panic!("unexpected error: {other:?}"),
+		}
+	}
+
+	#[test]
+	fn protocol_version_uses_known_header_value() {
+		let mut headers = http::HeaderMap::new();
+		headers.insert(
+			HEADER_MCP_PROTOCOL_VERSION,
+			http::HeaderValue::from_static("2025-06-18"),
+		);
+		let pv = protocol_version_from_headers(&headers).expect("known version should parse");
+		assert_eq!(pv.as_str(), "2025-06-18");
+	}
+
+	#[test]
+	fn protocol_version_preserves_custom_header_value_for_passthrough() {
+		let mut headers = http::HeaderMap::new();
+		headers.insert(
+			HEADER_MCP_PROTOCOL_VERSION,
+			http::HeaderValue::from_static("2026-01-01"),
+		);
+		let pv = protocol_version_from_headers(&headers).expect("custom version should parse");
+		assert_eq!(pv.as_str(), "2026-01-01");
+	}
+
+	#[test]
+	fn protocol_version_errors_when_header_is_not_utf8() {
+		let mut headers = http::HeaderMap::new();
+		headers.insert(
+			HEADER_MCP_PROTOCOL_VERSION,
+			http::HeaderValue::from_bytes(b"\xFF").expect("non-utf8 header should be constructible"),
+		);
+		let err = protocol_version_from_headers(&headers).expect_err("header must be utf8");
+		match err {
+			UpstreamError::InvalidRequest(msg) => {
+				assert_eq!(msg.as_str(), "invalid MCP-Protocol-Version header encoding");
+			},
+			other => panic!("unexpected error: {other:?}"),
 		}
 	}
 }

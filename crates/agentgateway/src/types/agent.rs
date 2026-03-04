@@ -1180,6 +1180,7 @@ pub struct McpBackend {
 	pub targets: Vec<Arc<McpTarget>>,
 	pub stateful: bool,
 	pub always_use_prefix: bool,
+	pub allow_degraded: bool,
 }
 
 impl McpBackend {

@@ -108,6 +108,31 @@ func TestBuildMCP(t *testing.T) {
 			inputs: append(createMockMultipleNamespaceServices(), createMockNamespaceCollectionWithLabels()...),
 		},
 		{
+			name: "Error case - selector resolves no MCP targets",
+			backend: &agentgateway.AgentgatewayBackend{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "empty-selector-backend",
+					Namespace: "test-ns",
+				},
+				Spec: agentgateway.AgentgatewayBackendSpec{
+					MCP: &agentgateway.MCPBackend{
+						Targets: []agentgateway.McpTargetSelector{
+							{
+								Selector: &agentgateway.McpSelector{
+									Service: &metav1.LabelSelector{
+										MatchLabels: map[string]string{
+											"app": "mcp-server",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
 			name: "Error case - invalid service selector",
 			backend: &agentgateway.AgentgatewayBackend{
 				ObjectMeta: metav1.ObjectMeta{
