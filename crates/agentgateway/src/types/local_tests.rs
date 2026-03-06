@@ -13,13 +13,7 @@ fn make_test_client() -> crate::client::Client {
 		resolver_cfg: hickory_resolver::config::ResolverConfig::default(),
 		resolver_opts: hickory_resolver::config::ResolverOpts::default(),
 	};
-	crate::client::Client::new(
-		&cfg,
-		None,
-		Default::default(),
-		None,
-		Arc::new(crate::http::oidc::OidcProvider::new()),
-	)
+	crate::client::Client::new(&cfg, None, Default::default(), None)
 }
 
 async fn test_config_parsing(test_name: &str) {
@@ -36,6 +30,7 @@ async fn test_config_parsing(test_name: &str) {
 	let normalized = NormalizedLocalConfig::from(
 		&config,
 		client,
+		Arc::new(crate::http::oidc::OidcClient::new()),
 		ListenerTarget {
 			gateway_name: "name".into(),
 			gateway_namespace: "ns".into(),
@@ -167,120 +162,158 @@ config:
 	assert_eq!(tracing.get("protocol").unwrap(), "http");
 }
 
-#[tokio::test]
-async fn local_oauth2_policy_accepts_inline_client_secret() {
-	let policy: LocalOAuth2Policy = crate::serdes::yamlviajson::from_str(
-		r#"
-issuer: https://issuer.example.com
-clientId: client-id
-clientSecret: super-secret
-autoDetectRedirectUri: true
-"#,
-	)
-	.expect("policy should parse");
-
-	let oauth2 = policy.try_into().expect("policy should convert");
-	assert_eq!(oauth2.client_secret.expose_secret(), "super-secret");
-}
-
-#[tokio::test]
-async fn local_oauth2_policy_loads_client_secret_from_file() {
+#[test]
+fn local_oauth2_policy_reads_supported_client_secret_sources() {
 	let dir = tempfile::tempdir().expect("temp dir");
 	let secret_path = dir.path().join("oauth2-client-secret");
 	std::fs::write(&secret_path, "from-file-secret").expect("write secret");
 
+	let cases = [
+		(
+			"inline",
+			serde_json::json!({
+				"issuer": "https://issuer.example.com",
+				"clientId": "client-id",
+				"clientSecret": "super-secret",
+				"redirectUri": "https://issuer.example.com/_gateway/callback",
+			}),
+			"super-secret",
+		),
+		(
+			"file",
+			serde_json::json!({
+				"issuer": "https://issuer.example.com",
+				"clientId": "client-id",
+				"clientSecret": { "file": secret_path },
+				"redirectUri": "https://issuer.example.com/_gateway/callback",
+			}),
+			"from-file-secret",
+		),
+	];
+
+	for (name, value, expected_secret) in cases {
+		let policy: LocalOAuth2Policy = serde_json::from_value(value).expect("policy should parse");
+		let oauth2 = policy.try_into().expect("policy should convert");
+		assert_eq!(
+			oauth2.client_secret.expose_secret(),
+			expected_secret,
+			"case {name:?} produced unexpected client secret",
+		);
+	}
+}
+
+#[test]
+fn local_oauth2_policy_accepts_resolved_provider_without_jwks() {
 	let policy: LocalOAuth2Policy = serde_json::from_value(serde_json::json!({
-		"issuer": "https://issuer.example.com",
+		"authorizationEndpoint": "https://issuer.example.com/authorize",
+		"tokenEndpoint": "https://issuer.example.com/token",
 		"clientId": "client-id",
-		"clientSecret": { "file": secret_path },
-		"autoDetectRedirectUri": true,
+		"clientSecret": "super-secret",
+		"redirectUri": "https://issuer.example.com/_gateway/callback",
 	}))
 	.expect("policy should parse");
 
 	let oauth2 = policy.try_into().expect("policy should convert");
-	assert_eq!(oauth2.client_secret.expose_secret(), "from-file-secret");
-}
-
-#[tokio::test]
-async fn local_oauth2_policy_rejects_missing_client_secret() {
-	let err = serde_json::from_value::<LocalOAuth2Policy>(serde_json::json!({
-		"issuer": "https://issuer.example.com",
-		"clientId": "client-id",
-	}))
-	.expect_err("policy parse should fail");
-	assert!(
-		err.to_string().contains("clientSecret"),
-		"unexpected error: {err}"
+	let resolved = oauth2
+		.resolved_provider
+		.expect("resolved provider should be present");
+	assert_eq!(
+		resolved.authorization_endpoint,
+		"https://issuer.example.com/authorize"
 	);
+	assert_eq!(resolved.token_endpoint, "https://issuer.example.com/token");
+	assert_eq!(resolved.jwks_inline, None);
 }
 
-#[tokio::test]
-async fn local_oauth2_policy_rejects_client_secret_ref_only() {
-	let err = serde_json::from_value::<LocalOAuth2Policy>(serde_json::json!({
-		"issuer": "https://issuer.example.com",
-		"clientId": "client-id",
-		"clientSecretRef": {
-			"name": "oauth2-client-secret",
-			"key": "client-secret",
+#[test]
+fn local_oauth2_policy_rejects_schema_and_conversion_errors() {
+	struct Case {
+		name: &'static str,
+		value: serde_json::Value,
+		want_err: &'static str,
+		parse_should_fail: bool,
+	}
+
+	let cases = [
+		Case {
+			name: "missing client secret",
+			value: serde_json::json!({
+				"issuer": "https://issuer.example.com",
+				"clientId": "client-id",
+			}),
+			want_err: "clientSecret",
+			parse_should_fail: true,
 		},
-	}))
-	.expect_err("policy parse should fail");
-	assert!(
-		err.to_string().contains("clientSecret"),
-		"unexpected error: {err}"
-	);
-}
+		Case {
+			name: "client secret ref only",
+			value: serde_json::json!({
+				"issuer": "https://issuer.example.com",
+				"clientId": "client-id",
+				"clientSecretRef": {
+					"name": "oauth2-client-secret",
+					"key": "client-secret",
+				},
+			}),
+			want_err: "clientSecret",
+			parse_should_fail: true,
+		},
+		Case {
+			name: "missing redirect uri",
+			value: serde_json::json!({
+				"issuer": "https://issuer.example.com",
+				"clientId": "client-id",
+				"clientSecret": "super-secret",
+			}),
+			want_err: "missing field `redirectUri`",
+			parse_should_fail: true,
+		},
+		Case {
+			name: "missing provider mode",
+			value: serde_json::json!({
+				"cookieName": "test",
+				"clientId": "client-id",
+				"clientSecret": "super-secret",
+				"redirectUri": "https://issuer.example.com/_gateway/callback",
+			}),
+			want_err: "issuer or both authorizationEndpoint and tokenEndpoint",
+			parse_should_fail: false,
+		},
+	];
 
-#[tokio::test]
-async fn local_oauth2_policy_requires_redirect_or_auto_detect() {
-	let policy: LocalOAuth2Policy = serde_json::from_value(serde_json::json!({
-		"issuer": "https://issuer.example.com",
-		"clientId": "client-id",
-		"clientSecret": "super-secret",
-	}))
-	.expect("policy should parse");
+	for case in cases {
+		if case.parse_should_fail {
+			let err = serde_json::from_value::<LocalOAuth2Policy>(case.value)
+				.expect_err("policy parse should fail");
+			assert!(
+				err.to_string().contains(case.want_err),
+				"case {:?}: unexpected error: {err}",
+				case.name,
+			);
+			continue;
+		}
 
-	let err = policy
-		.try_into()
-		.expect_err("missing redirect configuration must fail");
-	assert!(
-		err
-			.to_string()
-			.contains("redirect_uri or auto_detect_redirect_uri=true"),
-		"unexpected error: {err}"
-	);
-}
-
-#[tokio::test]
-async fn local_oauth2_policy_rejects_excessive_refreshable_cookie_max_age() {
-	let policy: LocalOAuth2Policy = serde_json::from_value(serde_json::json!({
-		"issuer": "https://issuer.example.com",
-		"clientId": "client-id",
-		"clientSecret": "super-secret",
-		"autoDetectRedirectUri": true,
-		"refreshableCookieMaxAgeSeconds": 2_592_001,
-	}))
-	.expect("policy should parse");
-
-	let err = policy
-		.try_into()
-		.expect_err("excessive refreshable max age must fail");
-	assert!(
-		err
-			.to_string()
-			.contains("refreshable_cookie_max_age_seconds must be <="),
-		"unexpected error: {err}"
-	);
+		let policy: LocalOAuth2Policy =
+			serde_json::from_value(case.value).expect("policy should parse");
+		let err = policy
+			.try_into()
+			.expect_err("policy conversion should fail");
+		assert!(
+			err.to_string().contains(case.want_err),
+			"case {:?}: unexpected error: {err}",
+			case.name,
+		);
+	}
 }
 
 #[tokio::test]
 async fn split_policies_translates_local_oauth2_client_secret() {
 	let policy: LocalOAuth2Policy = crate::serdes::yamlviajson::from_str(
 		r#"
-issuer: https://issuer.example.com
+authorizationEndpoint: https://issuer.example.com/authorize
+tokenEndpoint: https://issuer.example.com/token
 clientId: client-id
 clientSecret: secret-from-inline
-autoDetectRedirectUri: true
+redirectUri: https://issuer.example.com/_gateway/callback
 "#,
 	)
 	.expect("policy should parse");
@@ -289,37 +322,43 @@ autoDetectRedirectUri: true
 		..Default::default()
 	};
 
-	let resolved = split_policies(make_test_client(), filter_or_policy)
-		.await
-		.expect("split_policies should succeed");
+	let resolved = split_policies(
+		make_test_client(),
+		Arc::new(crate::http::oidc::OidcClient::new()),
+		filter_or_policy,
+	)
+	.await
+	.expect("split_policies should succeed");
 
 	let [TrafficPolicy::OAuth2(oauth2)] = resolved.route_policies.as_slice() else {
 		panic!("expected exactly one oauth2 route policy");
 	};
-	assert_eq!(oauth2.client_secret.expose_secret(), "secret-from-inline");
+	assert_eq!(
+		oauth2.config().client_secret.expose_secret(),
+		"secret-from-inline"
+	);
 }
 
-#[tokio::test]
-async fn local_oauth2_policy_maps_hardening_fields() {
+#[test]
+fn local_oauth2_policy_maps_hardening_fields() {
 	let policy: LocalOAuth2Policy = serde_json::from_value(serde_json::json!({
 		"issuer": "https://issuer.example.com",
 		"clientId": "client-id",
 		"clientSecret": "super-secret",
-		"autoDetectRedirectUri": true,
+		"redirectUri": "https://issuer.example.com/_gateway/callback",
 		"refreshableCookieMaxAgeSeconds": 900,
 		"postLogoutRedirectUri": "https://app.example.com/signed-out",
-		"denyRedirectMatchers": ["/api"],
-		"trustedProxyCidrs": ["10.0.0.0/8"],
 	}))
 	.expect("policy should parse");
 
 	let oauth2 = policy.try_into().expect("policy should convert");
-	assert_eq!(oauth2.auto_detect_redirect_uri, Some(true));
+	assert_eq!(
+		oauth2.redirect_uri.as_deref(),
+		Some("https://issuer.example.com/_gateway/callback")
+	);
 	assert_eq!(oauth2.refreshable_cookie_max_age_seconds, Some(900));
 	assert_eq!(
 		oauth2.post_logout_redirect_uri.as_deref(),
 		Some("https://app.example.com/signed-out")
 	);
-	assert_eq!(oauth2.deny_redirect_matchers, vec!["/api"]);
-	assert_eq!(oauth2.trusted_proxy_cidrs, vec!["10.0.0.0/8"]);
 }

@@ -27,6 +27,7 @@ pub struct UiHandler {
 struct App {
 	state: Arc<Config>,
 	client: client::Client,
+	oidc: Arc<crate::http::oidc::OidcClient>,
 }
 
 impl App {
@@ -46,7 +47,7 @@ lazy_static::lazy_static! {
 
 impl UiHandler {
 	pub fn new(cfg: Arc<Config>) -> Self {
-		let oidc = Arc::new(crate::http::oidc::OidcProvider::new());
+		let oidc = Arc::new(crate::http::oidc::OidcClient::new());
 		let ui_service = ServeDir::new(&ASSETS_DIR);
 		let router = Router::new()
 			// Redirect to the UI
@@ -57,7 +58,8 @@ impl UiHandler {
 			.layer(add_cors_layer())
 			.with_state(App {
 				state: cfg.clone(),
-				client: client::Client::new(&cfg.dns, None, Default::default(), None, oidc),
+				client: client::Client::new(&cfg.dns, None, Default::default(), None),
+				oidc,
 			});
 		Self { router }
 	}
@@ -112,6 +114,7 @@ async fn write_config(
 	if let Err(e) = crate::types::local::NormalizedLocalConfig::from(
 		&app.state,
 		app.client.clone(),
+		app.oidc.clone(),
 		app.state.gateway(),
 		yaml_content.as_str(),
 	)

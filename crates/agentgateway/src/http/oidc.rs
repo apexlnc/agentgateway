@@ -399,7 +399,6 @@ impl<'a> OidcJwtResolver<'a> {
 				.clone(),
 		})
 	}
-
 	pub async fn get_info(
 		self,
 		ctx: OidcCallContext<'_>,
@@ -838,6 +837,7 @@ impl OidcClient {
 					}
 
 					// 4. Slow Path: Network Call (singleflight work gate is held for this cache key)
+					let jwk_set = self.fetch_jwk_set(ctx, metadata).await?;
 					let jwk_set = self.fetch_jwk_set(ctx, metadata).await?;
 
 					let provider = JwtProvider::from_jwks(

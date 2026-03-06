@@ -3,11 +3,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU16;
 use std::sync::Arc;
 
-use ::http::{HeaderName, StatusCode};
-use frozen_collections::FzHashSet;
-use itertools::Itertools;
-use llm::{AIBackend, AIProvider, NamedAIProvider};
-
 use super::agent::*;
 use crate::http::auth::{AwsAuth, BackendAuth, GcpAuth};
 use crate::http::transformation_cel::{LocalTransform, LocalTransformationConfig, Transformation};
@@ -23,6 +18,10 @@ use crate::types::proto::agent::mcp_target::Protocol;
 use crate::types::proto::agent::traffic_policy_spec::host_rewrite::Mode;
 use crate::types::{agent, backend, proto};
 use crate::*;
+use ::http::{HeaderName, StatusCode};
+use frozen_collections::FzHashSet;
+use itertools::Itertools;
+use llm::{AIBackend, AIProvider, NamedAIProvider};
 
 impl TryFrom<proto::agent::tls_config::CipherSuite> for crate::transport::tls::CipherSuite {
 	type Error = anyhow::Error;
@@ -205,12 +204,6 @@ impl TryFrom<&proto::agent::backend_policy_spec::McpAuthentication> for McpAuthe
 					.to_string(),
 			));
 		}
-		let jwks_json = m.jwks_inline.clone();
-
-		let jwk_set: jsonwebtoken::jwk::JwkSet = serde_json::from_str(&jwks_json).map_err(|e| {
-			ProtoError::Generic(format!("failed to parse JWKS for MCP Authentication: {e}"))
-		})?;
-
 		let audiences = (!m.audiences.is_empty()).then(|| m.audiences.clone());
 		let jwt_validation_options = m
 			.jwt_validation_options
@@ -219,13 +212,17 @@ impl TryFrom<&proto::agent::backend_policy_spec::McpAuthentication> for McpAuthe
 				required_claims: vo.required_claims.iter().cloned().collect(),
 			})
 			.unwrap_or_default();
-		let jwt_provider =
-			http::jwt::Provider::from_jwks(jwk_set, m.issuer.clone(), audiences, jwt_validation_options)
-				.map_err(|e| {
-					ProtoError::Generic(format!(
-						"failed to create JWT provider for MCP Authentication: {e}"
-					))
-				})?;
+		let jwt_provider = http::jwt::Provider::from_inline_jwks(
+			&m.jwks_inline,
+			m.issuer.clone(),
+			audiences,
+			jwt_validation_options,
+		)
+		.map_err(|e| {
+			ProtoError::Generic(format!(
+				"failed to create JWT provider for MCP Authentication: {e}"
+			))
+		})?;
 
 		let mode = match proto::agent::backend_policy_spec::mcp_authentication::Mode::try_from(m.mode)
 			.map_err(|_| ProtoError::EnumParse("invalid JWT mode".to_string()))?
@@ -1379,7 +1376,6 @@ impl TryFrom<&proto::agent::TrafficPolicySpec> for TrafficPolicy {
 					tps::jwt::Mode::Permissive => http::jwt::Mode::Permissive,
 				};
 				let mut providers = Vec::with_capacity(jwt.providers.len());
-				let mut oidc_infos = Vec::new();
 				for p in &jwt.providers {
 					let audiences = if p.audiences.is_empty() {
 						None
@@ -1388,8 +1384,6 @@ impl TryFrom<&proto::agent::TrafficPolicySpec> for TrafficPolicy {
 					};
 					match &p.jwks_source {
 						Some(tps::jwt_provider::JwksSource::Inline(inline)) => {
-							let jwk_set: jsonwebtoken::jwk::JwkSet = serde_json::from_str(inline)
-								.map_err(|e| ProtoError::Generic(format!("failed to parse JWKS: {e}")))?;
 							let jwt_validation_options = p
 								.jwt_validation_options
 								.as_ref()
@@ -1397,8 +1391,8 @@ impl TryFrom<&proto::agent::TrafficPolicySpec> for TrafficPolicy {
 									required_claims: vo.required_claims.iter().cloned().collect(),
 								})
 								.unwrap_or_default();
-							let provider = http::jwt::Provider::from_jwks(
-								jwk_set,
+							let provider = http::jwt::Provider::from_inline_jwks(
+								inline,
 								p.issuer.clone(),
 								audiences,
 								jwt_validation_options,
@@ -1406,17 +1400,11 @@ impl TryFrom<&proto::agent::TrafficPolicySpec> for TrafficPolicy {
 							.map_err(|e| ProtoError::Generic(format!("failed to create JWT config: {e}")))?;
 							providers.push(provider);
 						},
-						Some(tps::jwt_provider::JwksSource::Oidc(oidc)) => {
-							let provider_backend = match resolve_simple_reference(oidc.provider_backend.as_ref())?
-							{
-								SimpleBackendReference::Invalid => None,
-								backend => Some(backend),
-							};
-							oidc_infos.push(http::jwt::OidcInfo {
-								issuer: p.issuer.clone(),
-								audiences,
-								provider_backend,
-							});
+						Some(tps::jwt_provider::JwksSource::Oidc(_)) => {
+							return Err(ProtoError::Generic(format!(
+								"JWT provider {} uses unresolved OIDC JWKS source; control plane must resolve OIDC to inline JWKS",
+								p.issuer
+							)));
 						},
 						None => {
 							return Err(ProtoError::Generic(
@@ -1425,12 +1413,7 @@ impl TryFrom<&proto::agent::TrafficPolicySpec> for TrafficPolicy {
 						},
 					}
 				}
-				let jwt_auth = http::jwt::Jwt::from_providers_with_oidc_infos(
-					providers,
-					mode,
-					jwt.forward.unwrap_or(false),
-					oidc_infos,
-				);
+				let jwt_auth = http::jwt::Jwt::from_providers(providers, mode);
 				TrafficPolicy::JwtAuth(jwt_auth)
 			},
 			Some(tps::Kind::Transformation(tp)) => {
@@ -1684,26 +1667,51 @@ impl TryFrom<&proto::agent::TrafficPolicySpec> for TrafficPolicy {
 					SimpleBackendReference::Invalid => None,
 					backend => Some(backend),
 				};
+				let resolved_provider = match (o.authorization_endpoint.clone(), o.token_endpoint.clone()) {
+					(Some(authorization_endpoint), Some(token_endpoint)) => {
+						Some(Box::new(agent::ResolvedOAuth2Provider {
+							authorization_endpoint,
+							token_endpoint,
+							jwks_inline: o.jwks_inline.clone(),
+							end_session_endpoint: o.end_session_endpoint.clone(),
+							token_endpoint_auth_methods_supported: o
+								.token_endpoint_auth_methods_supported
+								.clone(),
+						}))
+					},
+					(None, None) => {
+						if o.jwks_inline.is_some() {
+							return Err(ProtoError::Generic(
+									"oauth2 policy cannot provide jwks_inline without authorization_endpoint and token_endpoint".to_string(),
+								));
+						}
+						None
+					},
+					_ => {
+						return Err(ProtoError::Generic(
+							"oauth2 policy must provide authorization_endpoint and token_endpoint together"
+								.to_string(),
+						));
+					},
+				};
 				let policy = OAuth2Policy {
-					issuer: o.issuer.clone(),
+					provider_id: o.provider_id.clone(),
+					oidc_issuer: (!o.oidc_issuer.is_empty()).then(|| o.oidc_issuer.clone()),
 					provider_backend,
 					client_id: o.client_id.clone(),
 					client_secret: o.client_secret.clone().into(),
+					resolved_provider,
 					redirect_uri: o.redirect_uri.clone(),
-					auto_detect_redirect_uri: o.auto_detect_redirect_uri,
+					allow_insecure_redirect_uri: o.allow_insecure_redirect_uri,
 					scopes: o.scopes.clone(),
 					cookie_name: o.cookie_name.clone(),
 					refreshable_cookie_max_age_seconds: o.refreshable_cookie_max_age_seconds,
-					pass_access_token: o.pass_access_token,
 					sign_out_path: o.sign_out_path.clone(),
 					post_logout_redirect_uri: o.post_logout_redirect_uri.clone(),
-					pass_through_matchers: o.pass_through_matchers.clone(),
-					deny_redirect_matchers: o.deny_redirect_matchers.clone(),
-					trusted_proxy_cidrs: o.trusted_proxy_cidrs.clone(),
 				};
-				crate::http::oauth2::OAuth2Filter::validate_policy(&policy)
+				let oauth2 = crate::http::oauth2::OAuth2::new(policy)
 					.map_err(|e| ProtoError::Generic(format!("invalid oauth2 policy: {e}")))?;
-				TrafficPolicy::OAuth2(policy)
+				TrafficPolicy::OAuth2(oauth2)
 			},
 			Some(tps::Kind::HostRewrite(hr)) => {
 				let mode = tps::host_rewrite::Mode::try_from(hr.mode)?;
@@ -2272,6 +2280,37 @@ mod tests {
 		} else {
 			panic!("Expected CSRF policy variant, got: {policy:?}");
 		}
+	}
+
+	#[test]
+	fn test_policy_spec_jwt_rejects_unresolved_oidc_jwks_source() {
+		let spec = proto::agent::TrafficPolicySpec {
+			phase: proto::agent::traffic_policy_spec::PolicyPhase::Route as i32,
+			kind: Some(proto::agent::traffic_policy_spec::Kind::Jwt(
+				proto::agent::traffic_policy_spec::Jwt {
+					mode: proto::agent::traffic_policy_spec::jwt::Mode::Strict as i32,
+					providers: vec![proto::agent::traffic_policy_spec::JwtProvider {
+						issuer: "https://issuer.example.com".to_string(),
+						audiences: vec!["aud".to_string()],
+						jwt_validation_options: None,
+						jwks_source: Some(
+							proto::agent::traffic_policy_spec::jwt_provider::JwksSource::Oidc(
+								proto::agent::traffic_policy_spec::jwt_provider::Oidc {
+									provider_backend: None,
+								},
+							),
+						),
+					}],
+				},
+			)),
+		};
+
+		let err = TrafficPolicy::try_from(&spec).expect_err("OIDC JWKS source should be rejected");
+		let ProtoError::Generic(message) = err else {
+			panic!("expected ProtoError::Generic, got: {err:?}");
+		};
+		assert!(message.contains("unresolved OIDC JWKS source"), "{message}");
+		assert!(message.contains("https://issuer.example.com"), "{message}");
 	}
 
 	#[test]
