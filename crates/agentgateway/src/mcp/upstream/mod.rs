@@ -449,6 +449,7 @@ mod tests {
 			],
 			stateful: false,
 			allow_degraded: true,
+			allow_insecure_multiplex: false,
 		};
 
 		let group = UpstreamGroup::new(
@@ -481,6 +482,7 @@ mod tests {
 			],
 			stateful: false,
 			allow_degraded: false,
+			allow_insecure_multiplex: false,
 		};
 
 		let err = UpstreamGroup::new(
@@ -504,6 +506,7 @@ mod tests {
 			],
 			stateful: false,
 			allow_degraded: true,
+			allow_insecure_multiplex: false,
 		};
 
 		let err = UpstreamGroup::new(

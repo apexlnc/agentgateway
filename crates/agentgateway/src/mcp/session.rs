@@ -18,7 +18,6 @@ use rmcp::transport::common::http_header::{
 	EVENT_STREAM_MIME_TYPE, HEADER_MCP_PROTOCOL_VERSION, JSON_MIME_TYPE,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use sse_stream::{KeepAlive, Sse, SseBody, SseStream};
 use tokio::sync::{
 	Mutex, Notify, broadcast,
@@ -30,7 +29,9 @@ use crate::mcp::handler::{Relay, RelayInputs};
 use crate::mcp::mergestream::{MergeFn, Messages};
 use crate::mcp::streamablehttp::{ServerSseMessage, StreamableHttpPostResponse};
 use crate::mcp::upstream::{IncomingRequestContext, UpstreamError};
-use crate::mcp::{ClientError, MCPOperation, ResumeFailureReason, rbac};
+use crate::mcp::{
+	ClientError, MCPOperation, ResumeFailureReason, local_session_binding, rbac, session_binding_tag,
+};
 use crate::proxy::ProxyError;
 use crate::{mcp, *};
 
@@ -62,16 +63,6 @@ const STREAM_EVENT_ID_KIND: &str = "agw-stream";
 const STREAM_EVENT_ID_VERSION: u8 = 1;
 const STREAM_REPLAY_BUFFER_CAPACITY: usize = 256;
 const STREAM_REPLAY_CHANNEL_CAPACITY: usize = 256;
-
-fn session_binding_fingerprint(session_handle: &str) -> String {
-	let mut hasher = Sha256::new();
-	hasher.update(session_handle.as_bytes());
-	hex::encode(hasher.finalize())
-}
-
-fn local_session_binding() -> String {
-	session_binding_fingerprint(&uuid::Uuid::new_v4().to_string())
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StreamEventId {
@@ -153,7 +144,7 @@ impl SessionReplayState {
 			tracing::error!("session replay binding lock poisoned while updating; continuing");
 			e.into_inner()
 		});
-		*binding = session_binding_fingerprint(session_handle);
+		*binding = session_binding_tag(session_handle);
 	}
 
 	async fn open_stream(
@@ -1135,6 +1126,22 @@ impl SessionManager {
 		}
 	}
 
+	fn ensure_encrypted_session_ids_for_routed_identifiers(
+		&self,
+		uses_routed_identifiers: bool,
+		allow_insecure_multiplex: bool,
+	) -> Result<(), http::sessionpersistence::Error> {
+		if uses_routed_identifiers && !self.encoder.is_encrypted() && !allow_insecure_multiplex {
+			return Err(http::sessionpersistence::Error::EncryptedSessionIdsRequired);
+		}
+		if uses_routed_identifiers && !self.encoder.is_encrypted() && allow_insecure_multiplex {
+			warn!(
+				"allow_insecure_multiplex is enabled for this backend; routed MCP identifiers will use insecure base64 encoding"
+			);
+		}
+		Ok(())
+	}
+
 	fn encode_instance_bound_session_id(
 		&self,
 		local_id: &str,
@@ -1173,6 +1180,7 @@ impl SessionManager {
 			);
 			return Ok(session);
 		}
+		let allow_insecure_multiplex = builder.backend.allow_insecure_multiplex;
 		let d = match http::sessionpersistence::SessionState::decode(id, &self.encoder) {
 			Ok(state) => state,
 			Err(_) => return Err(ResumeFailureReason::MalformedHandle),
@@ -1194,6 +1202,19 @@ impl SessionManager {
 				return Err(ResumeFailureReason::UnsupportedHandle);
 			},
 		};
+		if self
+			.ensure_encrypted_session_ids_for_routed_identifiers(
+				state.routing.default_target_name.is_none(),
+				allow_insecure_multiplex,
+			)
+			.is_err()
+		{
+			warn!(
+				reason = %ResumeFailureReason::EncryptedSessionIdsRequired,
+				"failed to resume session: routed MCP identifiers require encrypted session ids"
+			);
+			return Err(ResumeFailureReason::EncryptedSessionIdsRequired);
+		}
 		let member_names = state
 			.members
 			.iter()
@@ -1249,6 +1270,10 @@ impl SessionManager {
 
 	/// create_session establishes an MCP session.
 	pub fn create_session(&self, relay: Relay) -> Result<Session, http::sessionpersistence::Error> {
+		self.ensure_encrypted_session_ids_for_routed_identifiers(
+			relay.uses_routed_identifiers(),
+			relay.allow_insecure_multiplex(),
+		)?;
 		let id = self.encode_instance_bound_session_id(local_session_id().as_ref())?;
 		let relay = relay.with_session_binding(id.as_ref(), self.encoder.clone());
 		let continuity = relay.session_continuity();
@@ -1281,7 +1306,14 @@ impl SessionManager {
 	/// Unlike create_session, this does NOT register the session in the session manager.
 	/// The caller is responsible for calling session.delete_session() when done
 	/// to clean up upstream resources (e.g., stdio processes).
-	pub fn create_stateless_session(&self, relay: Relay) -> Session {
+	pub fn create_stateless_session(
+		&self,
+		relay: Relay,
+	) -> Result<Session, http::sessionpersistence::Error> {
+		self.ensure_encrypted_session_ids_for_routed_identifiers(
+			relay.uses_routed_identifiers(),
+			relay.allow_insecure_multiplex(),
+		)?;
 		let id = local_session_id();
 		let session = Session {
 			id: id.clone(),
@@ -1299,7 +1331,7 @@ impl SessionManager {
 			continuity = %session.continuity(),
 			"created one-shot MCP session"
 		);
-		session
+		Ok(session)
 	}
 
 	/// create_legacy_session establishes a legacy SSE session.
@@ -1308,6 +1340,10 @@ impl SessionManager {
 		&self,
 		relay: Relay,
 	) -> Result<(Session, Receiver<ServerJsonRpcMessage>), http::sessionpersistence::Error> {
+		self.ensure_encrypted_session_ids_for_routed_identifiers(
+			relay.uses_routed_identifiers(),
+			relay.allow_insecure_multiplex(),
+		)?;
 		let (tx, rx) = tokio::sync::mpsc::channel(64);
 		let id = self.encode_instance_bound_session_id(local_session_id().as_ref())?;
 		let sess = Session {
@@ -1343,6 +1379,11 @@ impl SessionManager {
 		// Swallow the error
 		sess.delete_session(parts).await.ok()
 	}
+
+	#[cfg(test)]
+	fn contains_session(&self, id: &str) -> bool {
+		self.sessions.read().expect("read lock").contains_key(id)
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -1359,9 +1400,28 @@ pub fn dropper(sm: Arc<SessionManager>, s: Session, parts: Parts) -> SessionDrop
 	}
 }
 
+impl SessionDropper {
+	fn take(&mut self) -> Option<(Session, Parts)> {
+		self.s.take()
+	}
+
+	pub async fn cleanup(mut self) {
+		let Some((s, parts)) = self.take() else {
+			return;
+		};
+		self
+			.sm
+			.sessions
+			.write()
+			.expect("write lock")
+			.remove(s.id.as_ref());
+		let _ = s.delete_session(parts).await;
+	}
+}
+
 impl Drop for SessionDropper {
 	fn drop(&mut self) {
-		let Some((s, parts)) = self.s.take() else {
+		let Some((s, parts)) = self.take() else {
 			return;
 		};
 		let mut sm = self.sm.sessions.write().expect("write lock");
@@ -1620,7 +1680,11 @@ mod tests {
 		}
 	}
 
-	fn capture_target(name: &str, capture_file: &Path) -> Arc<McpTarget> {
+	fn capture_target_with_prefix(
+		name: &str,
+		capture_file: &Path,
+		always_use_prefix: bool,
+	) -> Arc<McpTarget> {
 		Arc::new(McpTarget {
 			name: name.into(),
 			spec: McpTargetSpec::Stdio {
@@ -1635,14 +1699,19 @@ mod tests {
 				)]),
 			},
 			backend: None,
-			always_use_prefix: false,
+			always_use_prefix,
 			backend_policies: Default::default(),
 		})
 	}
 
-	fn relay_inputs(
+	fn capture_target(name: &str, capture_file: &Path) -> Arc<McpTarget> {
+		capture_target_with_prefix(name, capture_file, false)
+	}
+
+	fn relay_inputs_with_options(
 		targets: Vec<Arc<McpTarget>>,
 		allow_degraded: bool,
+		allow_insecure_multiplex: bool,
 	) -> crate::mcp::handler::RelayInputs {
 		let test = crate::test_helpers::proxymock::setup_proxy_test("{}").expect("setup_proxy_test");
 		crate::mcp::handler::RelayInputs {
@@ -1650,12 +1719,20 @@ mod tests {
 				targets,
 				stateful: true,
 				allow_degraded,
+				allow_insecure_multiplex,
 			},
 			policies: McpAuthorizationSet::new(vec![].into()),
 			client: PolicyClient {
 				inputs: test.inputs(),
 			},
 		}
+	}
+
+	fn relay_inputs(
+		targets: Vec<Arc<McpTarget>>,
+		allow_degraded: bool,
+	) -> crate::mcp::handler::RelayInputs {
+		relay_inputs_with_options(targets, allow_degraded, false)
 	}
 
 	fn empty_parts() -> Parts {
@@ -1804,12 +1881,12 @@ mod tests {
 	}
 
 	fn encode_snapshot(
-		encoder: &Encoder,
+		session_encoder: &Encoder,
 		members: Vec<MCPSnapshotMember>,
 		routing: MCPSnapshotRouting,
 	) -> String {
 		SessionState::MCPSnapshot(MCPSnapshotState::new(members, routing))
-			.encode(encoder)
+			.encode(session_encoder)
 			.expect("snapshot should encode")
 	}
 
@@ -1879,6 +1956,11 @@ mod tests {
 		}
 	}
 
+	fn encrypted_test_encoder() -> Encoder {
+		Encoder::aes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+			.expect("test codec should be valid")
+	}
+
 	#[tokio::test]
 	async fn create_session_with_stdio_relay_is_live_only() {
 		let server_a_capture = NamedTempFile::new().expect("temp file");
@@ -1908,9 +1990,160 @@ mod tests {
 		.build_new_connections()
 		.expect("relay should build");
 		let session_manager = SessionManager::new(Encoder::base64());
-		let session = session_manager.create_stateless_session(relay);
+		let session = session_manager
+			.create_stateless_session(relay)
+			.expect("one-shot session should create");
 
 		assert_eq!(session.continuity(), SessionContinuity::OneShot);
+
+		let _ = session.delete_session(empty_parts()).await;
+	}
+
+	#[tokio::test]
+	async fn create_session_rejects_multiplex_without_encrypted_session_ids() {
+		let server_a_capture = NamedTempFile::new().expect("temp file");
+		let server_b_capture = NamedTempFile::new().expect("temp file");
+		let relay = relay_inputs(
+			vec![
+				capture_target("serverA", server_a_capture.path()),
+				capture_target("serverB", server_b_capture.path()),
+			],
+			true,
+		)
+		.build_new_connections()
+		.expect("relay should build");
+		let session_manager = SessionManager::new(Encoder::base64());
+		let err = session_manager
+			.create_session(relay)
+			.expect_err("multiplex sessions should require encrypted session ids");
+
+		assert!(matches!(
+			err,
+			http::sessionpersistence::Error::EncryptedSessionIdsRequired
+		));
+	}
+
+	#[tokio::test]
+	async fn create_session_allows_multiplex_when_explicitly_opted_in() {
+		let server_a_capture = NamedTempFile::new().expect("temp file");
+		let server_b_capture = NamedTempFile::new().expect("temp file");
+		let relay = relay_inputs_with_options(
+			vec![
+				capture_target("serverA", server_a_capture.path()),
+				capture_target("serverB", server_b_capture.path()),
+			],
+			true,
+			true,
+		)
+		.build_new_connections()
+		.expect("relay should build");
+		let session_manager = SessionManager::new(Encoder::base64());
+		let session = session_manager
+			.create_session(relay)
+			.expect("explicit opt-in should allow insecure multiplex session ids");
+
+		assert_eq!(session.continuity(), SessionContinuity::LiveOnly);
+
+		let _ = session.delete_session(empty_parts()).await;
+	}
+
+	#[tokio::test]
+	async fn create_session_rejects_single_target_routed_ids_without_encrypted_session_ids() {
+		let server_a_capture = NamedTempFile::new().expect("temp file");
+		let relay = relay_inputs(
+			vec![capture_target_with_prefix(
+				"serverA",
+				server_a_capture.path(),
+				true,
+			)],
+			true,
+		)
+		.build_new_connections()
+		.expect("relay should build");
+		assert!(
+			relay.uses_routed_identifiers(),
+			"single-target always_use_prefix should use routed identifiers"
+		);
+		let session_manager = SessionManager::new(Encoder::base64());
+		let err = session_manager
+			.create_session(relay)
+			.expect_err("routed identifiers should require encrypted session ids");
+
+		assert!(matches!(
+			err,
+			http::sessionpersistence::Error::EncryptedSessionIdsRequired
+		));
+	}
+
+	#[tokio::test]
+	async fn create_stateless_session_rejects_single_target_routed_ids_without_encrypted_session_ids()
+	{
+		let server_a_capture = NamedTempFile::new().expect("temp file");
+		let relay = relay_inputs(
+			vec![capture_target_with_prefix(
+				"serverA",
+				server_a_capture.path(),
+				true,
+			)],
+			true,
+		)
+		.build_new_connections()
+		.expect("relay should build");
+		let session_manager = SessionManager::new(Encoder::base64());
+		let err = session_manager
+			.create_stateless_session(relay)
+			.expect_err("routed identifiers should require encrypted session ids");
+
+		assert!(matches!(
+			err,
+			http::sessionpersistence::Error::EncryptedSessionIdsRequired
+		));
+	}
+
+	#[tokio::test]
+	async fn create_legacy_session_rejects_single_target_routed_ids_without_encrypted_session_ids() {
+		let server_a_capture = NamedTempFile::new().expect("temp file");
+		let relay = relay_inputs(
+			vec![capture_target_with_prefix(
+				"serverA",
+				server_a_capture.path(),
+				true,
+			)],
+			true,
+		)
+		.build_new_connections()
+		.expect("relay should build");
+		let session_manager = SessionManager::new(Encoder::base64());
+		let err = session_manager
+			.create_legacy_session(relay)
+			.expect_err("routed identifiers should require encrypted session ids");
+
+		assert!(matches!(
+			err,
+			http::sessionpersistence::Error::EncryptedSessionIdsRequired
+		));
+	}
+
+	#[tokio::test]
+	async fn create_session_allows_single_target_routed_ids_when_explicitly_opted_in() {
+		let server_a_capture = NamedTempFile::new().expect("temp file");
+		let relay = relay_inputs_with_options(
+			vec![capture_target_with_prefix(
+				"serverA",
+				server_a_capture.path(),
+				true,
+			)],
+			true,
+			true,
+		)
+		.build_new_connections()
+		.expect("relay should build");
+		let session_manager = SessionManager::new(Encoder::base64());
+		let session = session_manager
+			.create_session(relay)
+			.expect("explicit opt-in should allow insecure routed identifiers");
+
+		assert_eq!(session.continuity(), SessionContinuity::LiveOnly);
 
 		let _ = session.delete_session(empty_parts()).await;
 	}
@@ -1945,7 +2178,7 @@ mod tests {
 		)
 		.build_new_connections()
 		.expect("relay should build");
-		let encoder = Encoder::base64();
+		let encoder = encrypted_test_encoder();
 		let session_manager = SessionManager::new(encoder.clone());
 		let (session, _rx) = session_manager
 			.create_legacy_session(relay)
@@ -1969,7 +2202,7 @@ mod tests {
 		)
 		.build_new_connections()
 		.expect("relay should build");
-		let encoder = Encoder::base64();
+		let encoder = encrypted_test_encoder();
 		let session_manager = SessionManager::new(encoder.clone());
 		let (session, _rx) = session_manager
 			.create_legacy_session(relay)
@@ -1993,6 +2226,30 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn session_dropper_cleanup_removes_registered_session() {
+		let server_a_capture = NamedTempFile::new().expect("temp file");
+		let relay = relay_inputs(
+			vec![capture_target("serverA", server_a_capture.path())],
+			true,
+		)
+		.build_new_connections()
+		.expect("relay should build");
+		let session_manager = Arc::new(SessionManager::new(Encoder::base64()));
+		let session = session_manager
+			.create_session(relay)
+			.expect("session should create");
+		let session_id = session.id.to_string();
+		session_manager.insert_session(session.clone());
+		assert!(session_manager.contains_session(&session_id));
+
+		dropper(session_manager.clone(), session, empty_parts())
+			.cleanup()
+			.await;
+
+		assert!(!session_manager.contains_session(&session_id));
+	}
+
+	#[tokio::test]
 	async fn instance_bound_handle_from_other_manager_returns_none_not_invalid() {
 		let server_a_capture = NamedTempFile::new().expect("temp file");
 		let relay = relay_inputs(
@@ -2001,7 +2258,7 @@ mod tests {
 		)
 		.build_new_connections()
 		.expect("relay should build");
-		let encoder = Encoder::base64();
+		let encoder = encrypted_test_encoder();
 		let origin_manager = SessionManager::new(encoder.clone());
 		let (session, _rx) = origin_manager
 			.create_legacy_session(relay)
@@ -2022,7 +2279,7 @@ mod tests {
 
 	#[test]
 	fn opaque_local_id_handle_is_malformed_when_not_live() {
-		let encoder = Encoder::base64();
+		let encoder = encrypted_test_encoder();
 		let session_manager = SessionManager::new(encoder);
 		let opaque_local_id = uuid::Uuid::new_v4().to_string();
 
@@ -2052,7 +2309,7 @@ mod tests {
 		let server_b_capture = NamedTempFile::new().expect("temp file");
 		let server_a = capture_target("serverA", server_a_capture.path());
 		let server_b = capture_target("serverB", server_b_capture.path());
-		let encoder = Encoder::base64();
+		let encoder = encrypted_test_encoder();
 		let session_manager = SessionManager::new(encoder.clone());
 		let session_id = encode_snapshot(
 			&encoder,
@@ -2087,13 +2344,159 @@ mod tests {
 		assert_eq!(err, ResumeFailureReason::SnapshotMismatch);
 	}
 
+	#[test]
+	fn resolve_session_rejects_multiplex_snapshot_without_encrypted_session_ids() {
+		let server_a_capture = NamedTempFile::new().expect("temp file");
+		let server_b_capture = NamedTempFile::new().expect("temp file");
+		let server_a = capture_target("serverA", server_a_capture.path());
+		let server_b = capture_target("serverB", server_b_capture.path());
+		let encoder = Encoder::base64();
+		let session_manager = SessionManager::new(encoder.clone());
+		let session_id = encode_snapshot(
+			&encoder,
+			vec![
+				snapshot_member(
+					&server_a,
+					MCPSession {
+						session: None,
+						backend: None,
+					},
+					server_info(true, false),
+				),
+				snapshot_member(
+					&server_b,
+					MCPSession {
+						session: None,
+						backend: None,
+					},
+					server_info(false, true),
+				),
+			],
+			MCPSnapshotRouting {
+				default_target_name: None,
+				is_multiplexing: true,
+			},
+		);
+
+		let err = session_manager
+			.resolve_session(&session_id, relay_inputs(vec![server_a, server_b], true))
+			.expect_err("multiplex snapshots should require encrypted session ids");
+
+		assert_eq!(err, ResumeFailureReason::EncryptedSessionIdsRequired);
+	}
+
+	#[tokio::test]
+	async fn resolve_session_allows_multiplex_snapshot_when_explicitly_opted_in() {
+		let server_a_capture = NamedTempFile::new().expect("temp file");
+		let server_b_capture = NamedTempFile::new().expect("temp file");
+		let server_a = capture_target("serverA", server_a_capture.path());
+		let server_b = capture_target("serverB", server_b_capture.path());
+		let encoder = Encoder::base64();
+		let session_manager = SessionManager::new(encoder.clone());
+		let session_id = encode_snapshot(
+			&encoder,
+			vec![
+				snapshot_member(
+					&server_a,
+					MCPSession {
+						session: None,
+						backend: None,
+					},
+					server_info(true, false),
+				),
+				snapshot_member(
+					&server_b,
+					MCPSession {
+						session: None,
+						backend: None,
+					},
+					server_info(false, true),
+				),
+			],
+			MCPSnapshotRouting {
+				default_target_name: None,
+				is_multiplexing: true,
+			},
+		);
+
+		let session = session_manager
+			.resolve_session(
+				&session_id,
+				relay_inputs_with_options(vec![server_a, server_b], true, true),
+			)
+			.expect("explicit opt-in should allow insecure multiplex snapshot resume");
+
+		assert_eq!(session.continuity(), SessionContinuity::Reconstructible);
+	}
+
+	#[test]
+	fn resolve_session_rejects_single_target_routed_snapshot_without_encrypted_session_ids() {
+		let server_a_capture = NamedTempFile::new().expect("temp file");
+		let server_a = capture_target_with_prefix("serverA", server_a_capture.path(), true);
+		let encoder = Encoder::base64();
+		let session_manager = SessionManager::new(encoder.clone());
+		let session_id = encode_snapshot(
+			&encoder,
+			vec![snapshot_member(
+				&server_a,
+				MCPSession {
+					session: None,
+					backend: None,
+				},
+				server_info(true, false),
+			)],
+			MCPSnapshotRouting {
+				default_target_name: None,
+				is_multiplexing: false,
+			},
+		);
+
+		let err = session_manager
+			.resolve_session(&session_id, relay_inputs(vec![server_a], true))
+			.expect_err("single-target routed snapshots should require encrypted session ids");
+
+		assert_eq!(err, ResumeFailureReason::EncryptedSessionIdsRequired);
+	}
+
+	#[tokio::test]
+	async fn resolve_session_allows_single_target_routed_snapshot_when_explicitly_opted_in() {
+		let server_a_capture = NamedTempFile::new().expect("temp file");
+		let server_a = capture_target_with_prefix("serverA", server_a_capture.path(), true);
+		let encoder = Encoder::base64();
+		let session_manager = SessionManager::new(encoder.clone());
+		let session_id = encode_snapshot(
+			&encoder,
+			vec![snapshot_member(
+				&server_a,
+				MCPSession {
+					session: None,
+					backend: None,
+				},
+				server_info(true, false),
+			)],
+			MCPSnapshotRouting {
+				default_target_name: None,
+				is_multiplexing: false,
+			},
+		);
+
+		let session = session_manager
+			.resolve_session(
+				&session_id,
+				relay_inputs_with_options(vec![server_a], true, true),
+			)
+			.expect("explicit opt-in should allow insecure routed snapshot resume");
+
+		assert_eq!(session.continuity(), SessionContinuity::Reconstructible);
+	}
+
 	#[tokio::test]
 	async fn resume_session_restores_snapshot_membership() {
 		let server_a_capture = NamedTempFile::new().expect("temp file");
 		let server_b_capture = NamedTempFile::new().expect("temp file");
 		let server_a = capture_target("serverA", server_a_capture.path());
 		let server_b = capture_target("serverB", server_b_capture.path());
-		let encoder = Encoder::base64();
+		let encoder = encrypted_test_encoder();
 		let session_manager = SessionManager::new(encoder.clone());
 		let session_id = encode_snapshot(
 			&encoder,
@@ -2167,7 +2570,7 @@ mod tests {
 		let server_b_capture = NamedTempFile::new().expect("temp file");
 		let server_a = capture_target("serverA", server_a_capture.path());
 		let server_b = capture_target("serverB", server_b_capture.path());
-		let encoder = Encoder::base64();
+		let encoder = encrypted_test_encoder();
 		let session_manager = SessionManager::new(encoder.clone());
 		let session_id = encode_snapshot(
 			&encoder,
@@ -2206,7 +2609,7 @@ mod tests {
 	#[test]
 	fn resume_session_rejects_legacy_snapshot() {
 		let server_a_capture = NamedTempFile::new().expect("temp file");
-		let encoder = Encoder::base64();
+		let encoder = encrypted_test_encoder();
 		let session_manager = SessionManager::new(encoder.clone());
 		let legacy_session_id = encoder
 			.encrypt(r#"{"t":"mcp","s":[{"s":"upstream-session","b":"127.0.0.1:8080"}]}"#)
@@ -2227,7 +2630,7 @@ mod tests {
 	async fn resume_session_preserves_allow_degraded() {
 		let server_a_capture = NamedTempFile::new().expect("temp file");
 		let server_a = capture_target("serverA", server_a_capture.path());
-		let encoder = Encoder::base64();
+		let encoder = encrypted_test_encoder();
 		let session_manager = SessionManager::new(encoder.clone());
 		let session_id = encode_snapshot(
 			&encoder,
@@ -2269,7 +2672,7 @@ mod tests {
 		let server_b_capture = NamedTempFile::new().expect("temp file");
 		let server_a = capture_target("serverA", server_a_capture.path());
 		let server_b = capture_target("serverB", server_b_capture.path());
-		let encoder = Encoder::base64();
+		let encoder = encrypted_test_encoder();
 		let session_manager = SessionManager::new(encoder.clone());
 		let session_id = encode_snapshot(
 			&encoder,
