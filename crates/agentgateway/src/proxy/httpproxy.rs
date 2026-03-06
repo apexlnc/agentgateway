@@ -67,6 +67,7 @@ pub fn apply_logging_policy_to_log(log: &mut RequestLog, lp: &frontend::LoggingP
 async fn apply_request_policies(
 	policies: &store::RoutePolicies,
 	client: PolicyClient,
+	oidc: &crate::http::oidc::OidcClient,
 	log: &mut RequestLog,
 	req: &mut Request,
 	response_policies: &mut ResponsePolicies,
@@ -83,21 +84,20 @@ async fn apply_request_policies(
 
 	if let Some(oauth) = &policies.oauth2 {
 		let resp = oauth
-			.apply(&client.inputs.upstream, Some(&client), req)
+			.apply(&client.inputs.upstream, &client, oidc.tokens(), req)
 			.await
 			.map_err(ProxyResponse::from)?;
-		if let Some(dr) = resp.direct_response {
-			let mut dr = dr;
-			crate::http::merge_in_headers(resp.response_headers, dr.headers_mut());
-			return Err(ProxyResponse::DirectResponse(Box::new(dr)));
+		if let Some(direct_response) = resp.direct_response {
+			let mut direct_response = direct_response;
+			merge_in_headers(resp.response_headers, direct_response.headers_mut());
+			return Err(ProxyResponse::DirectResponse(Box::new(direct_response)));
 		}
-		crate::http::merge_in_headers(resp.response_headers, response_policies.headers());
+		merge_in_headers(resp.response_headers, response_policies.headers());
 	}
 
-	if policies.oauth2.is_none()
-		&& let Some(j) = &policies.jwt
-	{
-		j.apply(&client.inputs.upstream, Some(&client), Some(log), req)
+	if let Some(jwt) = &policies.jwt {
+		jwt
+			.apply(Some(log), req)
 			.await
 			.map_err(|e| ProxyResponse::from(ProxyError::JwtAuthenticationFailure(e)))?;
 	}
@@ -264,6 +264,7 @@ async fn apply_backend_policies(
 async fn apply_gateway_policies(
 	policies: &GatewayPolicies,
 	client: PolicyClient,
+	oidc: &crate::http::oidc::OidcClient,
 	log: &mut RequestLog,
 	req: &mut Request,
 	ext_proc: Option<&mut ExtProcRequest>,
@@ -271,21 +272,20 @@ async fn apply_gateway_policies(
 ) -> Result<(), ProxyResponse> {
 	if let Some(oauth) = &policies.oauth2 {
 		let resp = oauth
-			.apply(&client.inputs.upstream, Some(&client), req)
+			.apply(&client.inputs.upstream, &client, oidc.tokens(), req)
 			.await
 			.map_err(ProxyResponse::from)?;
-		if let Some(dr) = resp.direct_response {
-			let mut dr = dr;
-			crate::http::merge_in_headers(resp.response_headers, dr.headers_mut());
-			return Err(ProxyResponse::DirectResponse(Box::new(dr)));
+		if let Some(direct_response) = resp.direct_response {
+			let mut direct_response = direct_response;
+			merge_in_headers(resp.response_headers, direct_response.headers_mut());
+			return Err(ProxyResponse::DirectResponse(Box::new(direct_response)));
 		}
-		crate::http::merge_in_headers(resp.response_headers, response_headers);
+		merge_in_headers(resp.response_headers, response_headers);
 	}
 
-	if policies.oauth2.is_none()
-		&& let Some(j) = &policies.jwt
-	{
-		j.apply(&client.inputs.upstream, Some(&client), Some(log), req)
+	if let Some(jwt) = &policies.jwt {
+		jwt
+			.apply(Some(log), req)
 			.await
 			.map_err(|e| ProxyResponse::from(ProxyError::JwtAuthenticationFailure(e)))?;
 	}
@@ -354,6 +354,7 @@ async fn apply_llm_request_policies(
 pub struct HTTPProxy {
 	pub(super) bind_name: BindKey,
 	pub(super) inputs: Arc<ProxyInputs>,
+	pub(super) oidc: Arc<crate::http::oidc::OidcClient>,
 	pub(super) selected_listener: Option<Arc<Listener>>,
 	pub(super) target_address: SocketAddr,
 }
@@ -606,6 +607,7 @@ impl HTTPProxy {
 		apply_gateway_policies(
 			&gateway_policies,
 			self.policy_client(),
+			self.oidc.as_ref(),
 			log,
 			&mut req,
 			maybe_gateway_ext_proc.as_mut(),
@@ -691,6 +693,7 @@ impl HTTPProxy {
 		apply_request_policies(
 			&route_policies,
 			self.policy_client(),
+			self.oidc.as_ref(),
 			log,
 			&mut req,
 			response_policies,
@@ -1269,6 +1272,7 @@ impl DerefMut for MustSnapshot<'_> {
 	}
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn make_backend_call(
 	inputs: Arc<ProxyInputs>,
 	route_policies: Arc<store::LLMRequestPolicies>,
@@ -2122,8 +2126,7 @@ impl PolicyClient {
 			..Default::default()
 		};
 
-		if let Some(mut tls) = resolved.backend_tls.clone() {
-			tls.hostname_override = Some(endpoint_server_name);
+		if let Some(tls) = resolved.backend_tls.clone() {
 			provider_policies.backend_tls = Some(tls);
 		} else if endpoint_scheme == Scheme::HTTPS {
 			let mut tls = crate::http::backendtls::SYSTEM_TRUST.clone();

@@ -4,16 +4,16 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum_core::response::IntoResponse;
 use bytes::Bytes;
-use http::uri::PathAndQuery;
 use http::Method;
+use http::uri::PathAndQuery;
 use tracing::{debug, warn};
 
 use crate::http::jwt::Claims;
 use crate::http::*;
 use crate::json;
 use crate::json::from_body_with_limit;
-use crate::proxy::httpproxy::PolicyClient;
 use crate::proxy::ProxyError;
+use crate::proxy::httpproxy::PolicyClient;
 use crate::types::agent::{McpAuthentication, McpIDP};
 
 const OAUTH_PROTECTED_RESOURCE_PREFIX: &str = "/.well-known/oauth-protected-resource";
@@ -284,7 +284,7 @@ pub(crate) async fn rewrite_passthrough_protected_resource_metadata(
 pub(super) async fn apply_token_validation(
 	req: &mut Request,
 	auth: &McpAuthentication,
-	client: &PolicyClient,
+	_client: &PolicyClient,
 ) -> Result<(), ProxyError> {
 	// skip well-known OAuth endpoints for authn
 	if is_well_known_endpoint(request_path(req)) {
@@ -305,13 +305,9 @@ pub(super) async fn apply_token_validation(
 		"MCP auth configured; validating Authorization header (mode={:?})",
 		auth.mode
 	);
-	auth
-		.jwt_validator
-		.apply(&client.inputs.upstream, None, None, req)
-		.await
-		.map_err(|e| {
-			create_auth_required_response(ProxyError::JwtAuthenticationFailure(e), req, auth)
-		})?;
+	auth.jwt_validator.apply(None, req).await.map_err(|e| {
+		create_auth_required_response(ProxyError::JwtAuthenticationFailure(e), req, auth)
+	})?;
 	Ok(())
 }
 
@@ -554,10 +550,9 @@ pub(super) async fn client_registration(
 #[cfg(test)]
 mod tests {
 	use super::{
-		is_client_registration_endpoint, passthrough_well_known, pre_route_rewrite_uri,
-		rewrite_passthrough_protected_resource_metadata, rewrite_passthrough_www_authenticate,
-		rewrite_www_authenticate_for_request_uri, PassthroughWellKnown,
-		OAUTH_PROTECTED_RESOURCE_PREFIX,
+		OAUTH_PROTECTED_RESOURCE_PREFIX, PassthroughWellKnown, is_client_registration_endpoint,
+		passthrough_well_known, pre_route_rewrite_uri, rewrite_passthrough_protected_resource_metadata,
+		rewrite_passthrough_www_authenticate, rewrite_www_authenticate_for_request_uri,
 	};
 	use crate::http::tests_common::request_for_uri;
 	use crate::http::{Body, StatusCode, Uri};

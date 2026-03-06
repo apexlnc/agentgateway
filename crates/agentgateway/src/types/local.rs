@@ -49,6 +49,7 @@ impl NormalizedLocalConfig {
 	pub async fn from(
 		config: &crate::Config,
 		client: client::Client,
+		oidc: Arc<crate::http::oidc::OidcClient>,
 		gateway_name: ListenerTarget,
 		s: &str,
 	) -> anyhow::Result<NormalizedLocalConfig> {
@@ -56,7 +57,7 @@ impl NormalizedLocalConfig {
 		let s = s.replace("# yaml-language-server: $schema", "#");
 		let s = shellexpand::full(&s)?;
 		let local_config: LocalConfig = serdes::yamlviajson::from_str(&s)?;
-		let t = convert(client, gateway_name, config, local_config).await?;
+		let t = convert(client, oidc, gateway_name, config, local_config).await?;
 		Ok(t)
 	}
 }
@@ -946,22 +947,33 @@ where
 
 #[apply(schema_de!)]
 struct LocalOAuth2Policy {
-	/// OIDC issuer URL.
-	issuer: String,
-	/// Optional provider backend used for OIDC back-channel calls.
+	/// OIDC issuer URL. When set, endpoints are resolved using OIDC discovery.
+	#[serde(default)]
+	issuer: Option<String>,
+	/// Explicit authorization endpoint for non-discovery OAuth2 providers.
+	#[serde(default)]
+	authorization_endpoint: Option<String>,
+	/// Explicit token endpoint for non-discovery OAuth2 providers.
+	#[serde(default)]
+	token_endpoint: Option<String>,
+	/// Optional provider backend used for provider back-channel calls.
 	#[serde(default)]
 	provider_backend: Option<SimpleLocalBackend>,
+	/// Optional end-session endpoint for explicit OAuth2 providers.
+	#[serde(default)]
+	end_session_endpoint: Option<String>,
+	/// Optional token endpoint auth methods supported by explicit OAuth2 providers.
+	#[serde(default)]
+	token_endpoint_auth_methods_supported: Vec<String>,
 	/// OAuth2 client ID.
 	client_id: String,
 	/// OAuth2 client secret value or file reference.
 	client_secret: crate::serdes::FileOrInline,
-	/// Explicit callback URL (recommended for multi-proxy deployments).
+	/// Explicit callback URL configured with the upstream provider.
+	redirect_uri: String,
+	/// Allow non-loopback `http://` redirect URIs for local development only.
 	#[serde(default)]
-	redirect_uri: Option<String>,
-	/// Allow callback URL inference from request host/proxy headers when `redirectUri` is unset.
-	/// Prefer explicit `redirectUri` in production.
-	#[serde(default)]
-	auto_detect_redirect_uri: Option<bool>,
+	allow_insecure_redirect_uri: bool,
 	/// OAuth scopes requested during browser login flow.
 	#[serde(default)]
 	scopes: Vec<String>,
@@ -971,81 +983,140 @@ struct LocalOAuth2Policy {
 	/// Max age in seconds for refreshable OAuth2 sessions (default: 604800 / 7 days, max: 2592000 / 30 days).
 	#[serde(default)]
 	refreshable_cookie_max_age_seconds: Option<u64>,
-	/// Forward `Authorization: Bearer <access_token>` upstream after login (default: false).
-	#[serde(default)]
-	pass_access_token: Option<bool>,
 	/// Sign-out path that clears the local OAuth2 session.
 	#[serde(default)]
 	sign_out_path: Option<String>,
 	/// Optional post-logout redirect URI sent to OIDC end_session_endpoint.
 	#[serde(default)]
 	post_logout_redirect_uri: Option<String>,
-	/// Route path prefixes that bypass OAuth2 auth.
-	#[serde(default)]
-	pass_through_matchers: Vec<String>,
-	/// Route path prefixes that return `401` instead of browser redirect for unauthenticated requests.
-	#[serde(default)]
-	deny_redirect_matchers: Vec<String>,
-	/// Trusted proxy CIDRs allowed to provide `X-Forwarded-*` values for redirect inference.
-	#[serde(default)]
-	trusted_proxy_cidrs: Vec<String>,
 }
 
 impl LocalOAuth2Policy {
 	fn try_into(self) -> anyhow::Result<crate::types::agent::OAuth2Policy> {
 		let Self {
 			issuer,
+			authorization_endpoint,
+			token_endpoint,
 			provider_backend,
+			end_session_endpoint,
+			token_endpoint_auth_methods_supported,
 			client_id,
 			client_secret,
 			redirect_uri,
-			auto_detect_redirect_uri,
+			allow_insecure_redirect_uri,
 			scopes,
 			cookie_name,
 			refreshable_cookie_max_age_seconds,
-			pass_access_token,
 			sign_out_path,
 			post_logout_redirect_uri,
-			pass_through_matchers,
-			deny_redirect_matchers,
-			trusted_proxy_cidrs,
 		} = self;
 		let client_secret = client_secret.load()?;
-		let provider_backend = provider_backend
-			.map(|backend| match backend {
-				SimpleLocalBackend::Service { name, port } => {
-					Ok(SimpleBackendReference::Service { name, port })
+		let resolve_provider_backend =
+			|provider_backend: Option<SimpleLocalBackend>| -> anyhow::Result<Option<SimpleBackendReference>> {
+				Ok(provider_backend
+					.map(|backend| match backend {
+						SimpleLocalBackend::Service { name, port } => {
+							Ok(SimpleBackendReference::Service { name, port })
+						},
+						SimpleLocalBackend::Backend(name) => Ok(SimpleBackendReference::Backend(name)),
+						SimpleLocalBackend::Invalid => Ok(SimpleBackendReference::Invalid),
+						SimpleLocalBackend::Opaque(_) => {
+							anyhow::bail!("oauth2 provider_backend supports only service/backend references")
+						},
+					})
+					.transpose()?
+					.and_then(|backend| match backend {
+						SimpleBackendReference::Invalid => None,
+						backend => Some(backend),
+					}))
+			};
+		let resolved_provider_backend = resolve_provider_backend(provider_backend)?;
+		if issuer.is_some()
+			&& (end_session_endpoint.is_some() || !token_endpoint_auth_methods_supported.is_empty())
+		{
+			anyhow::bail!(
+				"oauth2 issuer may not be combined with explicit end_session_endpoint or token_endpoint_auth_methods_supported fields"
+			);
+		}
+		let (provider_id, oidc_issuer, resolved_provider) =
+			match (issuer, authorization_endpoint, token_endpoint) {
+				(Some(issuer), None, None) => (issuer.clone(), Some(issuer), None),
+				(None, Some(authorization_endpoint), Some(token_endpoint)) => (
+					authorization_endpoint.clone(),
+					None,
+					Some(Box::new(crate::types::agent::ResolvedOAuth2Provider {
+						authorization_endpoint,
+						token_endpoint,
+						jwks_inline: None,
+						end_session_endpoint,
+						token_endpoint_auth_methods_supported,
+					})),
+				),
+				(Some(_), _, _) => {
+					anyhow::bail!(
+						"oauth2 issuer may not be combined with explicit authorizationEndpoint/tokenEndpoint fields"
+					)
 				},
-				SimpleLocalBackend::Backend(name) => Ok(SimpleBackendReference::Backend(name)),
-				SimpleLocalBackend::Invalid => Ok(SimpleBackendReference::Invalid),
-				SimpleLocalBackend::Opaque(_) => {
-					anyhow::bail!("oauth2 provider_backend supports only service/backend references")
+				(None, Some(_), None) | (None, None, Some(_)) => {
+					anyhow::bail!(
+						"oauth2 requires both authorizationEndpoint and tokenEndpoint when issuer is not set"
+					)
 				},
-			})
-			.transpose()?
-			.and_then(|backend| match backend {
-				SimpleBackendReference::Invalid => None,
-				backend => Some(backend),
-			});
+				(None, None, None) => {
+					anyhow::bail!(
+						"oauth2 must configure issuer or both authorizationEndpoint and tokenEndpoint"
+					)
+				},
+			};
 		let policy = crate::types::agent::OAuth2Policy {
-			issuer,
-			provider_backend,
+			provider_id,
+			oidc_issuer,
+			provider_backend: resolved_provider_backend,
 			client_id,
 			client_secret: secrecy::SecretString::new(client_secret.into()),
-			redirect_uri,
-			auto_detect_redirect_uri,
+			resolved_provider,
+			redirect_uri: Some(redirect_uri),
+			allow_insecure_redirect_uri,
 			scopes,
 			cookie_name,
 			refreshable_cookie_max_age_seconds,
-			pass_access_token,
 			sign_out_path,
 			post_logout_redirect_uri,
-			pass_through_matchers,
-			deny_redirect_matchers,
-			trusted_proxy_cidrs,
 		};
-		crate::http::oauth2::OAuth2Filter::validate_policy(&policy)?;
+		crate::http::oauth2::OAuth2::validate_policy(&policy)?;
 		Ok(policy)
+	}
+
+	async fn try_into_with_resolved_provider(
+		self,
+		client: Client,
+		oidc: crate::http::oidc::OidcJwtResolver<'_>,
+	) -> anyhow::Result<crate::http::oauth2::OAuth2> {
+		let mut policy = self.try_into()?;
+		if policy.resolved_provider.is_some() {
+			return crate::http::oauth2::OAuth2::new(policy);
+		}
+
+		let issuer = policy.oidc_issuer.clone().ok_or_else(|| {
+			anyhow!("oauth2 policy requires resolved provider metadata when issuer is not configured")
+		})?;
+		let (metadata, validator) = oidc
+			.get_info(
+				crate::http::oidc::OidcCallContext::new(&client, None, policy.provider_backend.as_ref()),
+				&issuer,
+				Some(vec![policy.client_id.clone()]),
+			)
+			.await
+			.map_err(|e| anyhow!("failed resolving local oauth2 provider metadata: {e}"))?;
+		policy.resolved_provider = Some(Box::new(crate::types::agent::ResolvedOAuth2Provider {
+			authorization_endpoint: metadata.authorization_endpoint.clone(),
+			token_endpoint: metadata.token_endpoint.clone(),
+			jwks_inline: None,
+			end_session_endpoint: metadata.end_session_endpoint.clone(),
+			token_endpoint_auth_methods_supported: metadata.token_endpoint_auth_methods_supported.clone(),
+		}));
+
+		crate::http::oauth2::OAuth2::new_with_resolved_provider(policy, metadata, Some(validator))
 	}
 }
 
@@ -1395,6 +1466,7 @@ struct TCPFilterOrPolicy {
 
 async fn convert(
 	client: client::Client,
+	oidc: Arc<crate::http::oidc::OidcClient>,
 	gateway: ListenerTarget,
 	config: &crate::Config,
 	i: LocalConfig,
@@ -1418,8 +1490,15 @@ async fn convert(
 		let bind_name = strng::format!("bind/{}", b.port);
 		let mut ls = ListenerSet::default();
 		for (idx, l) in b.listeners.into_iter().enumerate() {
-			let (l, pol, backends) =
-				convert_listener(client.clone(), idx, l, bind_name.clone(), gateway.clone()).await?;
+			let (l, pol, backends) = convert_listener(
+				client.clone(),
+				oidc.clone(),
+				idx,
+				l,
+				bind_name.clone(),
+				gateway.clone(),
+			)
+			.await?;
 			all_policies.extend_from_slice(&pol);
 			all_backends.extend_from_slice(&backends);
 			ls.insert(l)
@@ -1441,7 +1520,7 @@ async fn convert(
 	}
 
 	for p in policies {
-		let res = split_policies(client.clone(), p.policy).await?;
+		let res = split_policies(client.clone(), oidc.clone(), p.policy).await?;
 		if (res.route_policies.len() + res.backend_policies.len()) != 1 {
 			anyhow::bail!("'policies' must contain exactly 1 policy")
 		}
@@ -1477,15 +1556,27 @@ async fn convert(
 
 	// Convert llm config if present
 	if let Some(llm_config) = llm {
-		let (llm_bind, llm_policies, llm_backends) =
-			convert_llm_config(client.clone(), config, gateway.clone(), llm_config).await?;
+		let (llm_bind, llm_policies, llm_backends) = convert_llm_config(
+			client.clone(),
+			oidc.clone(),
+			config,
+			gateway.clone(),
+			llm_config,
+		)
+		.await?;
 		all_binds.push(llm_bind);
 		all_policies.extend_from_slice(&llm_policies);
 		all_backends.extend_from_slice(&llm_backends);
 	}
 	if let Some(mcp_config) = mcp {
-		let (mcp_bind, mcp_policies, mcp_backends) =
-			convert_mcp_config(client.clone(), config, gateway.clone(), mcp_config).await?;
+		let (mcp_bind, mcp_policies, mcp_backends) = convert_mcp_config(
+			client.clone(),
+			oidc.clone(),
+			config,
+			gateway.clone(),
+			mcp_config,
+		)
+		.await?;
 		all_binds.push(mcp_bind);
 		all_policies.extend_from_slice(&mcp_policies);
 		all_backends.extend_from_slice(&mcp_backends);
@@ -1536,6 +1627,7 @@ fn llm_model_name_header_match(model_name: &str) -> anyhow::Result<HeaderValueMa
 
 async fn convert_llm_config(
 	client: client::Client,
+	oidc: Arc<crate::http::oidc::OidcClient>,
 	config: &crate::Config,
 	gateway: ListenerTarget,
 	llm_config: LocalLLMConfig,
@@ -1818,13 +1910,14 @@ json(request.body).model
 	if let Some(pol) = llm_config.policies {
 		let route_pols = split_policies(
 			client.clone(),
+			oidc.clone(),
 			FilterOrPolicy {
 				authorization: pol.authorization.clone(),
 				..Default::default()
 			},
 		)
 		.await?;
-		let pols = split_policies(client.clone(), pol.gateway.into()).await?;
+		let pols = split_policies(client.clone(), oidc, pol.gateway.into()).await?;
 
 		let pc = pols.route_policies.len();
 		for (idx, pol) in pols.route_policies.into_iter().enumerate() {
@@ -1887,6 +1980,7 @@ json(request.body).model
 
 async fn convert_mcp_config(
 	client: client::Client,
+	oidc: Arc<crate::http::oidc::OidcClient>,
 	config: &crate::Config,
 	gateway: ListenerTarget,
 	mcp_config: LocalSimpleMcpConfig,
@@ -1900,7 +1994,7 @@ async fn convert_mcp_config(
 	let port = port.unwrap_or(DEFAULT_MCP_PORT);
 
 	let resolved_policies = if let Some(pol) = policies {
-		split_policies(client.clone(), pol).await?
+		split_policies(client.clone(), oidc, pol).await?
 	} else {
 		ResolvedPolicies::default()
 	};
@@ -1989,6 +2083,7 @@ fn detect_bind_protocol(listeners: &ListenerSet) -> BindProtocol {
 
 async fn convert_listener(
 	client: client::Client,
+	oidc: Arc<crate::http::oidc::OidcClient>,
 	idx: usize,
 	l: LocalListener,
 	bind_key: Strng,
@@ -2053,7 +2148,8 @@ async fn convert_listener(
 
 	let mut rs = RouteSet::default();
 	for (idx, l) in routes.into_iter().flatten().enumerate() {
-		let (route, policies, backends) = convert_route(client.clone(), l, idx, key.clone()).await?;
+		let (route, policies, backends) =
+			convert_route(client.clone(), oidc.clone(), l, idx, key.clone()).await?;
 		all_policies.extend_from_slice(&policies);
 		all_backends.extend_from_slice(&backends);
 		rs.insert(route)
@@ -2075,7 +2171,7 @@ async fn convert_listener(
 	};
 
 	if let Some(pol) = policies {
-		let pols = split_policies(client.clone(), pol.into()).await?;
+		let pols = split_policies(client.clone(), oidc.clone(), pol.into()).await?;
 		for (idx, pol) in pols.route_policies.into_iter().enumerate() {
 			let key = strng::format!("listener/{key}/{idx}");
 			all_policies.push(TargetedPolicy {
@@ -2100,6 +2196,7 @@ async fn convert_listener(
 
 async fn convert_route(
 	client: client::Client,
+	oidc: Arc<crate::http::oidc::OidcClient>,
 	lr: LocalRoute,
 	idx: usize,
 	listener_key: ListenerKey,
@@ -2149,7 +2246,7 @@ async fn convert_route(
 		external_backends.extend_from_slice(&backends);
 	}
 	let resolved = if let Some(pol) = policies {
-		split_policies(client, pol).await?
+		split_policies(client, oidc, pol).await?
 	} else {
 		ResolvedPolicies::default()
 	};
@@ -2231,7 +2328,11 @@ async fn split_frontend_policies(
 	}
 	Ok(pols)
 }
-async fn split_policies(client: Client, pol: FilterOrPolicy) -> Result<ResolvedPolicies, Error> {
+async fn split_policies(
+	client: Client,
+	oidc: Arc<crate::http::oidc::OidcClient>,
+	pol: FilterOrPolicy,
+) -> Result<ResolvedPolicies, Error> {
 	let mut resolved = ResolvedPolicies::default();
 	let ResolvedPolicies {
 		backend_policies,
@@ -2300,7 +2401,7 @@ async fn split_policies(client: Client, pol: FilterOrPolicy) -> Result<ResolvedP
 	}
 	if let Some(p) = mcp_authentication {
 		// Translate local MCP authn into runtime authn with a ready JWT validator.
-		let authn: McpAuthentication = p.translate(client.clone()).await?;
+		let authn: McpAuthentication = p.translate(client.clone(), oidc.as_ref().jwt()).await?;
 		backend_policies.push(BackendPolicy::McpAuthentication(authn));
 		// Do NOT inject a separate route-level JwtAuth; MCP router handles validation using jwt_validator.
 	}
@@ -2320,7 +2421,9 @@ async fn split_policies(client: Client, pol: FilterOrPolicy) -> Result<ResolvedP
 		route_policies.push(TrafficPolicy::AI(Arc::new(p)))
 	}
 	if let Some(p) = jwt_auth {
-		route_policies.push(TrafficPolicy::JwtAuth(p.try_into(client.clone()).await?));
+		route_policies.push(TrafficPolicy::JwtAuth(
+			p.try_into(client.clone(), oidc.as_ref().jwt()).await?,
+		));
 	}
 	if let Some(p) = basic_auth {
 		route_policies.push(TrafficPolicy::BasicAuth(p.try_into()?));
@@ -2341,8 +2444,10 @@ async fn split_policies(client: Client, pol: FilterOrPolicy) -> Result<ResolvedP
 		route_policies.push(TrafficPolicy::ExtAuthz(p))
 	}
 	if let Some(p) = oauth2 {
-		let oauth2_policy = p.try_into()?;
-		route_policies.push(TrafficPolicy::OAuth2(oauth2_policy))
+		let oauth2 = p
+			.try_into_with_resolved_provider(client.clone(), oidc.as_ref().jwt())
+			.await?;
+		route_policies.push(TrafficPolicy::OAuth2(oauth2))
 	}
 	if let Some(p) = ext_proc {
 		route_policies.push(TrafficPolicy::ExtProc(p))

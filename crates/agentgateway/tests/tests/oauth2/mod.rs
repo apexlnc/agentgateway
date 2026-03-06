@@ -9,10 +9,8 @@ use crate::common::oauth2::{
 	find_cookie_pair, gateway_url, require_e2e, session_cookie_header, set_cookie_values,
 };
 
-pub mod keycloak;
-
 #[tokio::test]
-async fn oauth2_pass_access_token_refresh_and_logout() {
+async fn oauth2_backend_passthrough_refresh_and_logout() {
 	let Some((gateway, oidc, client)) = setup_gateway(true).await else {
 		return;
 	};
@@ -95,7 +93,7 @@ async fn oauth2_pass_access_token_refresh_and_logout() {
 }
 
 #[tokio::test]
-async fn oauth2_without_pass_access_token_does_not_forward_authorization() {
+async fn oauth2_without_backend_passthrough_does_not_forward_authorization() {
 	let Some((gateway, oidc, client)) = setup_gateway(false).await else {
 		return;
 	};
@@ -134,7 +132,7 @@ async fn oauth2_without_pass_access_token_does_not_forward_authorization() {
 				.get("authorization")
 				.and_then(|v| v.as_str())
 				.is_none(),
-		"authorization header must not be forwarded when passAccessToken=false"
+		"authorization header must not be forwarded when backendAuth.passthrough is disabled"
 	);
 
 	gateway.shutdown().await;
@@ -353,44 +351,8 @@ async fn oauth2_refresh_failure_restarts_browser_auth() {
 	gateway.shutdown().await;
 }
 
-#[tokio::test]
-async fn oauth2_pass_through_matchers_bypass_authentication() {
-	let Some((gateway, _oidc, client)) = setup_gateway_with_matchers(true, &["/public"]).await else {
-		return;
-	};
-
-	let public = client
-		.get(gateway_url(&gateway, "/public/health"))
-		.send()
-		.await
-		.unwrap();
-	assert_eq!(public.status(), StatusCode::OK);
-	let public_body: serde_json::Value = public.json().await.unwrap();
-	assert_eq!(
-		public_body.get("path").and_then(|v| v.as_str()),
-		Some("/public/health")
-	);
-
-	let private = client
-		.get(gateway_url(&gateway, "/private/data"))
-		.header(reqwest::header::ACCEPT, "application/json")
-		.send()
-		.await
-		.unwrap();
-	assert_eq!(private.status(), StatusCode::UNAUTHORIZED);
-
-	gateway.shutdown().await;
-}
-
 async fn setup_gateway(
-	pass_access_token: bool,
-) -> Option<(AgentGateway, MockServer, reqwest::Client)> {
-	setup_gateway_with_matchers(pass_access_token, &[]).await
-}
-
-async fn setup_gateway_with_matchers(
-	pass_access_token: bool,
-	pass_through_matchers: &[&str],
+	backend_passthrough: bool,
 ) -> Option<(AgentGateway, MockServer, reqwest::Client)> {
 	if !require_e2e() {
 		return None;
@@ -448,8 +410,7 @@ async fn setup_gateway_with_matchers(
 	let gw = AgentGateway::new(oauth2_config(
 		&oidc.uri(),
 		&upstream.address().to_string(),
-		pass_access_token,
-		pass_through_matchers,
+		backend_passthrough,
 	))
 	.await
 	.unwrap();
@@ -516,20 +477,15 @@ fn callback_url(gateway: &AgentGateway, code: &str, state: &str) -> Url {
 	callback_url
 }
 
-fn oauth2_config(
-	issuer: &str,
-	upstream: &str,
-	pass_access_token: bool,
-	pass_through_matchers: &[&str],
-) -> String {
-	let pass_through_block = if pass_through_matchers.is_empty() {
-		String::new()
+fn oauth2_config(issuer: &str, upstream: &str, backend_passthrough: bool) -> String {
+	let backend_auth_block = if backend_passthrough {
+		String::from(
+			r#"        backendAuth:
+          passthrough: {}
+"#,
+		)
 	} else {
-		let mut s = String::from("          passThroughMatchers:\n");
-		for matcher in pass_through_matchers {
-			s.push_str(&format!("          - \"{}\"\n", matcher));
-		}
-		s
+		String::new()
 	};
 
 	format!(
@@ -546,13 +502,12 @@ binds:
           issuer: "{issuer}"
           clientId: "agentgateway-local"
           clientSecret: "local-secret"
-          redirectUri: "http://example.test/_gateway/callback"
+          redirectUri: "https://example.test/_gateway/callback"
           scopes:
           - openid
           - profile
-          passAccessToken: {pass_access_token}
           signOutPath: "/logout"
-{pass_through_block}      backends:
+{backend_auth_block}      backends:
       - host: {upstream}
 "#
 	)

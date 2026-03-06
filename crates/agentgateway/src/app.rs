@@ -50,16 +50,10 @@ pub async fn run(config: Arc<Config>) -> anyhow::Result<Bound> {
 	let xds_metrics = agent_xds::Metrics::new(sub_registry);
 	agent_core::metrics::TokioCollector::register(sub_registry, &data_plane_handle);
 
-	let oidc = Arc::new(crate::http::oidc::OidcProvider::new());
+	let oidc = Arc::new(crate::http::oidc::OidcClient::new());
 
 	// TODO: use for XDS
-	let control_client = client::Client::new(
-		&config.dns,
-		None,
-		config.backend.clone(),
-		None,
-		oidc.clone(),
-	);
+	let control_client = client::Client::new(&config.dns, None, config.backend.clone(), None);
 	let ca = if let Some(cfg) = &config.ca {
 		Some(Arc::new(caclient::CaClient::new(
 			control_client.clone(),
@@ -82,7 +76,6 @@ pub async fn run(config: Arc<Config>) -> anyhow::Result<Bound> {
 		pool,
 		config.backend.clone(),
 		Some(metrics_handle.clone()),
-		oidc.clone(),
 	);
 
 	let (xds_tx, xds_rx) = tokio::sync::watch::channel(());
@@ -129,7 +122,7 @@ pub async fn run(config: Arc<Config>) -> anyhow::Result<Bound> {
 		mcp_state: mcp::App::new(stores.clone(), config.session_encoder.clone()),
 	};
 
-	let gw = proxy::Gateway::new(Arc::new(pi), drain_rx.clone());
+	let gw = proxy::Gateway::new(Arc::new(pi), oidc.clone(), drain_rx.clone());
 
 	// Run the agentgateway in the data plane worker pool.
 	let mut xds_rx_for_proxy = xds_rx.clone();
