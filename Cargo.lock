@@ -237,6 +237,7 @@ dependencies = [
  "serde_urlencoded",
  "serde_with",
  "serde_yaml",
+ "sha2 0.10.9",
  "shellexpand",
  "socket2 0.6.2",
  "sse-stream",

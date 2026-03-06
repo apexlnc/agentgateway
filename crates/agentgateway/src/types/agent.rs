@@ -1180,6 +1180,7 @@ pub struct McpBackend {
 	pub targets: Vec<Arc<McpTarget>>,
 	pub stateful: bool,
 	pub always_use_prefix: bool,
+	#[serde(skip_serializing_if = "is_false")]
 	pub allow_degraded: bool,
 }
 
@@ -1191,6 +1192,10 @@ impl McpBackend {
 			.find(|target| target.name.as_str() == name)
 			.cloned()
 	}
+}
+
+fn is_false(v: &bool) -> bool {
+	!*v
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
