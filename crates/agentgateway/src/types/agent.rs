@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cmp;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
@@ -8,6 +9,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
+use aws_lc_rs::digest;
 use hashbrown::Equivalent;
 use heck::ToSnakeCase;
 use itertools::Itertools;
@@ -2004,7 +2006,7 @@ pub enum TrafficPolicy {
 	#[serde(rename = "cors")]
 	CORS(http::cors::Cors),
 	#[serde(rename = "oauth2")]
-	OAuth2(crate::http::oauth2::OAuth2),
+	OAuth2(Box<crate::http::oauth2::OAuth2>),
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2048,6 +2050,66 @@ pub struct ResolvedOAuth2Provider {
 	pub end_session_endpoint: Option<String>,
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub token_endpoint_auth_methods_supported: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum OAuth2AttachmentKey {
+	TargetedPolicy {
+		policy_key: PolicyKey,
+	},
+	ListenerPolicy {
+		listener_key: ListenerKey,
+	},
+	InlineRoute {
+		route_key: RouteKey,
+		policy_index: u32,
+	},
+}
+
+impl OAuth2AttachmentKey {
+	pub(crate) fn targeted_policy(policy_key: impl Into<PolicyKey>) -> Self {
+		Self::TargetedPolicy {
+			policy_key: policy_key.into(),
+		}
+	}
+
+	pub(crate) fn listener_policy(listener_key: impl Into<ListenerKey>) -> Self {
+		Self::ListenerPolicy {
+			listener_key: listener_key.into(),
+		}
+	}
+
+	pub(crate) fn inline_route(route_key: impl Into<RouteKey>, policy_index: usize) -> Self {
+		Self::InlineRoute {
+			route_key: route_key.into(),
+			policy_index: policy_index as u32,
+		}
+	}
+
+	pub(crate) fn cookie_namespace(&self) -> String {
+		let digest = digest::digest(&digest::SHA256, self.stable_source().as_bytes());
+		format!("p{}", hex::encode(&digest.as_ref()[..12]))
+	}
+
+	fn stable_source(&self) -> Cow<'_, str> {
+		match self {
+			Self::TargetedPolicy { policy_key } => Cow::Owned(format!("policy:{policy_key}")),
+			Self::ListenerPolicy { listener_key } => {
+				Cow::Owned(format!("listener:{listener_key}:policy:oauth2"))
+			},
+			Self::InlineRoute {
+				route_key,
+				policy_index,
+			} => Cow::Owned(format!("route:{route_key}:policy:{policy_index}")),
+		}
+	}
+}
+
+impl std::fmt::Display for OAuth2AttachmentKey {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		f.write_str(self.stable_source().as_ref())
+	}
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

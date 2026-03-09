@@ -193,7 +193,7 @@ fn local_oauth2_policy_reads_supported_client_secret_sources() {
 
 	for (name, value, expected_secret) in cases {
 		let policy: LocalOAuth2Policy = serde_json::from_value(value).expect("policy should parse");
-		let oauth2 = policy.try_into().expect("policy should convert");
+		let oauth2 = policy.into_policy().expect("policy should convert");
 		assert_eq!(
 			oauth2.client_secret.expose_secret(),
 			expected_secret,
@@ -213,7 +213,7 @@ fn local_oauth2_policy_accepts_resolved_provider_without_jwks() {
 	}))
 	.expect("policy should parse");
 
-	let oauth2 = policy.try_into().expect("policy should convert");
+	let oauth2 = policy.into_policy().expect("policy should convert");
 	let resolved = oauth2
 		.resolved_provider
 		.expect("resolved provider should be present");
@@ -295,7 +295,7 @@ fn local_oauth2_policy_rejects_schema_and_conversion_errors() {
 		let policy: LocalOAuth2Policy =
 			serde_json::from_value(case.value).expect("policy should parse");
 		let err = policy
-			.try_into()
+			.into_policy()
 			.expect_err("policy conversion should fail");
 		assert!(
 			err.to_string().contains(case.want_err),
@@ -325,6 +325,7 @@ redirectUri: https://issuer.example.com/_gateway/callback
 	let resolved = split_policies(
 		make_test_client(),
 		Arc::new(crate::http::oidc::OidcClient::new()),
+		&PolicyBuildContext::inline_route("test/route", 0),
 		filter_or_policy,
 	)
 	.await
@@ -336,6 +337,45 @@ redirectUri: https://issuer.example.com/_gateway/callback
 	assert_eq!(
 		oauth2.config().client_secret.expose_secret(),
 		"secret-from-inline"
+	);
+	assert_eq!(
+		oauth2.attachment_key(),
+		&crate::types::agent::OAuth2AttachmentKey::inline_route("test/route", 0)
+	);
+}
+
+#[tokio::test]
+async fn split_policies_binds_local_listener_oauth2_to_listener_attachment_key() {
+	let policy: LocalOAuth2Policy = crate::serdes::yamlviajson::from_str(
+		r#"
+authorizationEndpoint: https://issuer.example.com/authorize
+tokenEndpoint: https://issuer.example.com/token
+clientId: client-id
+clientSecret: secret-from-inline
+redirectUri: https://issuer.example.com/_gateway/callback
+"#,
+	)
+	.expect("policy should parse");
+	let filter_or_policy = FilterOrPolicy {
+		oauth2: Some(policy),
+		..Default::default()
+	};
+
+	let resolved = split_policies(
+		make_test_client(),
+		Arc::new(crate::http::oidc::OidcClient::new()),
+		&PolicyBuildContext::listener_policy("listener-a"),
+		filter_or_policy,
+	)
+	.await
+	.expect("split_policies should succeed");
+
+	let [TrafficPolicy::OAuth2(oauth2)] = resolved.route_policies.as_slice() else {
+		panic!("expected exactly one oauth2 route policy");
+	};
+	assert_eq!(
+		oauth2.attachment_key(),
+		&crate::types::agent::OAuth2AttachmentKey::listener_policy("listener-a")
 	);
 }
 
@@ -351,7 +391,7 @@ fn local_oauth2_policy_maps_hardening_fields() {
 	}))
 	.expect("policy should parse");
 
-	let oauth2 = policy.try_into().expect("policy should convert");
+	let oauth2 = policy.into_policy().expect("policy should convert");
 	assert_eq!(
 		oauth2.redirect_uri.as_deref(),
 		Some("https://issuer.example.com/_gateway/callback")

@@ -359,7 +359,13 @@ impl tower::Service<Uri> for MemoryConnector {
 
 impl TestBind {
 	pub fn with_bind(self, bind: Bind) -> Self {
-		self.pi.stores.binds.write().insert_bind(bind);
+		self
+			.pi
+			.stores
+			.binds
+			.write()
+			.insert_bind(bind)
+			.expect("test bind should insert");
 		self
 	}
 	pub fn inputs(&self) -> Arc<ProxyInputs> {
@@ -369,7 +375,13 @@ impl TestBind {
 		self.oidc.clone()
 	}
 	pub fn with_route(self, r: Route) -> Self {
-		self.pi.stores.binds.write().insert_route(r, LISTENER_KEY);
+		self
+			.pi
+			.stores
+			.binds
+			.write()
+			.insert_route(r, LISTENER_KEY)
+			.expect("test route should insert");
 		self
 	}
 
@@ -532,10 +544,15 @@ impl TestBind {
 	pub async fn attach_route(&mut self, p: serde_json::Value) {
 		let pol: local::LocalRoute = serde_json::from_value(p).unwrap();
 		self.routes += 1;
-		let (route, backends) =
-			local::convert_route(self.pi.upstream.clone(), pol, self.routes, LISTENER_KEY)
-				.await
-				.unwrap();
+		let (route, backends) = local::convert_route(
+			self.pi.upstream.clone(),
+			self.oidc.clone(),
+			pol,
+			self.routes,
+			LISTENER_KEY,
+		)
+		.await
+		.unwrap();
 		for b in backends {
 			self
 				.pi
@@ -544,7 +561,7 @@ impl TestBind {
 				.write()
 				.insert_backend(b.backend.name(), b);
 		}
-		self
+		let _ = self
 			.pi
 			.stores
 			.binds
@@ -553,12 +570,12 @@ impl TestBind {
 	}
 	pub async fn attach_route_policy(&mut self, p: serde_json::Value) {
 		let pol: local::FilterOrPolicy = serde_json::from_value(p).unwrap();
-		let pols = local::split_policies(self.pi.upstream.clone(), pol)
+		let pols = local::split_policies_for_test(self.pi.upstream.clone(), self.oidc.clone(), pol)
 			.await
 			.unwrap();
 		for v in pols.route_policies.into_iter() {
 			self.policies += 1;
-			self.with_policy(TargetedPolicy {
+			self.insert_policy(TargetedPolicy {
 				key: strng::format!("pol-{}", self.policies),
 				name: None,
 				target: PolicyTarget::Route(RouteName {
@@ -573,12 +590,12 @@ impl TestBind {
 	}
 	pub async fn attached_backend_policy(&mut self, addr: &SocketAddr, p: serde_json::Value) {
 		let pol: local::FilterOrPolicy = serde_json::from_value(p).unwrap();
-		let pols = local::split_policies(self.pi.upstream.clone(), pol)
+		let pols = local::split_policies_for_test(self.pi.upstream.clone(), self.oidc.clone(), pol)
 			.await
 			.unwrap();
 		for v in pols.backend_policies.into_iter() {
 			self.policies += 1;
-			self.with_policy(TargetedPolicy {
+			self.insert_policy(TargetedPolicy {
 				key: strng::format!("pol-{}", self.policies),
 				name: None,
 				target: PolicyTarget::Backend(BackendTarget::Backend {
@@ -591,8 +608,8 @@ impl TestBind {
 		}
 	}
 
-	pub fn with_policy(&mut self, p: TargetedPolicy) {
-		self.pi.stores.binds.write().insert_policy(p);
+	pub fn insert_policy(&mut self, p: TargetedPolicy) {
+		let _ = self.pi.stores.binds.write().insert_policy(p);
 	}
 	pub fn serve_http(&self, bind_name: BindKey) -> Client<MemoryConnector, Body> {
 		let io = self.serve(bind_name);
