@@ -27,7 +27,10 @@ import (
 
 	apitests "github.com/agentgateway/agentgateway/controller/api/tests"
 	agwv1alpha1 "github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/plugins"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
+	agwutils "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/utils"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient/fake"
 	"github.com/agentgateway/agentgateway/controller/pkg/controller"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
@@ -150,11 +153,18 @@ type testOutput[Status any, Output any] struct {
 	Output []Output `json:"output"`
 }
 
+type RuntimeWiring struct {
+	RemoteHTTPResolver remotehttp.Resolver
+	JWKSResolver       jwks.Resolver
+	JWKSLookup         jwks.Lookup
+}
+
 func Syncer(t *testing.T, ctx plugins.PolicyCtx, includeStatusKinds ...string) (*TestStatusQueue, *syncer.Syncer) {
 	fc := fake.NewClient(t)
 	stop := test.NewStop(t)
 	debugger := new(krt.DebugHandler)
 	opts := krtutil.NewKrtOptions(stop, debugger)
+	runtimeWiring := BuildRuntimeWiring(ctx.Collections)
 	t.Cleanup(func() {
 		if t.Failed() {
 			b, _ := yaml.Marshal(debugger)
@@ -167,6 +177,7 @@ func Syncer(t *testing.T, ctx plugins.PolicyCtx, includeStatusKinds ...string) (
 		fc,
 		ctx.Collections,
 		agwPluginFactory(ctx.Collections),
+		runtimeWiring.JWKSLookup,
 		nil,
 		opts,
 		nil,
@@ -190,16 +201,37 @@ func Syncer(t *testing.T, ctx plugins.PolicyCtx, includeStatusKinds ...string) (
 // agwPluginFactory is a factory function that returns the agent gateway plugins
 // It is based on agwPluginFactory(cfg)(ctx, cfg.AgwCollections) in start.go
 func agwPluginFactory(agwCollections *plugins.AgwCollections) plugins.AgwPlugin {
-	agwPlugins := controller.Plugins(agwCollections)
+	runtimeWiring := BuildRuntimeWiring(agwCollections)
+	agwPlugins := controller.BuiltinAgwPlugins(agwCollections, runtimeWiring.JWKSLookup)
 	mergedPlugins := plugins.MergePlugins(agwPlugins...)
 	return mergedPlugins
 }
 
 func BuildMockPolicyContext(t test.Failer, inputs []any) plugins.PolicyCtx {
+	collections := BuildMockCollection(t, inputs)
+	runtimeWiring := BuildRuntimeWiring(collections)
 	return plugins.PolicyCtx{
 		Krt:         krt.TestingDummyContext{},
-		Collections: BuildMockCollection(t, inputs),
+		Collections: collections,
+		References:  BuildMockReferenceIndex(collections),
+		JWKSLookup:  runtimeWiring.JWKSLookup,
 	}
+}
+
+func BuildMockReferenceIndex(collections *plugins.AgwCollections) plugins.ReferenceIndex {
+	referenceTypes := plugins.DefaultReferenceTypes(collections)
+
+	routeAttachments := krt.NewStaticCollection[*plugins.RouteAttachment](nil, nil)
+	routeAttachmentsIndex := krt.NewIndex(routeAttachments, "test-route-attachments", func(o *plugins.RouteAttachment) []agwutils.TypedNamespacedName {
+		return []agwutils.TypedNamespacedName{o.From}
+	}).AsCollection(agwutils.TypedNamespacedNameIndexCollectionFunc)
+
+	ancestorBackends := krt.NewStaticCollection[*agwutils.AncestorBackend](nil, nil)
+	ancestorBackendsIndex := krt.NewIndex(ancestorBackends, "test-ancestor-backends", func(o *agwutils.AncestorBackend) []agwutils.TypedNamespacedName {
+		return []agwutils.TypedNamespacedName{o.Backend}
+	}).AsCollection(agwutils.TypedNamespacedNameIndexCollectionFunc)
+
+	return plugins.BuildReferenceIndex(ancestorBackendsIndex, routeAttachmentsIndex, referenceTypes)
 }
 
 func BuildMockCollection(t test.Failer, inputs []any) *plugins.AgwCollections {
@@ -233,4 +265,27 @@ func BuildMockCollection(t test.Failer, inputs []any) *plugins.AgwCollections {
 	}
 	col.SetupIndexes()
 	return col
+}
+
+func BuildRuntimeWiring(collections *plugins.AgwCollections) RuntimeWiring {
+	remoteHTTPResolver := remotehttp.NewResolver(remotehttp.Inputs{
+		ConfigMaps:           collections.ConfigMaps,
+		Services:             collections.Services,
+		Backends:             collections.Backends,
+		AgentgatewayPolicies: collections.AgentgatewayPolicies,
+		BackendTLSPolicies:   collections.BackendTLSPolicies,
+	})
+	jwksResolver := jwks.NewResolver(remoteHTTPResolver)
+	jwksLookup := jwks.NewLookup(
+		collections.ConfigMaps,
+		jwksResolver,
+		jwks.DefaultJwksStorePrefix,
+		collections.SystemNamespace,
+	)
+
+	return RuntimeWiring{
+		RemoteHTTPResolver: remoteHTTPResolver,
+		JWKSResolver:       jwksResolver,
+		JWKSLookup:         jwksLookup,
+	}
 }
