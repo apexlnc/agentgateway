@@ -337,8 +337,8 @@ type MCPBackend struct {
 	SessionRouting SessionRouting `json:"sessionRouting,omitempty"`
 
 	// FailureMode controls behavior when MCP targets fail to initialize or
-	// become unavailable at runtime. "failOpen" skips failed targets and
-	// continues serving from healthy ones. "failClosed" (default) fails the
+	// become unavailable at runtime. "FailOpen" skips failed targets and
+	// continues serving from healthy ones. "FailClosed" (default) fails the
 	// entire session if any target fails.
 	// +optional
 	FailureMode FailureMode `json:"failureMode,omitempty"`
@@ -346,12 +346,12 @@ type MCPBackend struct {
 
 const (
 	// FailClosed fails the entire MCP session if any target fails.
-	FailClosed FailureMode = "failClosed"
+	FailClosed FailureMode = "FailClosed"
 	// FailOpen skips failed targets and continues serving from healthy ones.
-	FailOpen FailureMode = "failOpen"
+	FailOpen FailureMode = "FailOpen"
 )
 
-// +kubebuilder:validation:Enum=failOpen;failClosed
+// +kubebuilder:validation:Enum=FailOpen;FailClosed
 type FailureMode string
 
 // McpTargetSelector defines the MCPBackend target to use for this backend.
