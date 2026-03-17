@@ -948,38 +948,9 @@ impl Drop for DropOnLog {
 					.map(display),
 			),
 			(
-				"mcp.method", // Kept for compatibility with v1.37
-				mcp
-					.as_ref()
-					.and_then(|m| m.method_name.as_ref())
-					.map(display),
-			),
-			(
-				"gen_ai.operation.name",
-				mcp.as_ref().and_then(|m| {
-					if matches!(m.resource, Some(MCPOperation::Tool))
-						&& m.method_name.as_deref() == Some("tools/call")
-					{
-						Some("execute_tool".into())
-					} else {
-						None
-					}
-				}),
-			),
-			(
 				"gen_ai.tool.name",
 				mcp.as_ref().and_then(|m| {
 					if matches!(m.resource, Some(MCPOperation::Tool)) {
-						m.resource_name.as_ref().map(display)
-					} else {
-						None
-					}
-				}),
-			),
-			(
-				"gen_ai.prompt.name",
-				mcp.as_ref().and_then(|m| {
-					if matches!(m.resource, Some(MCPOperation::Prompt)) {
 						m.resource_name.as_ref().map(display)
 					} else {
 						None
@@ -1006,13 +977,6 @@ impl Drop for DropOnLog {
 						None
 					}
 				}),
-			),
-			(
-				"mcp.resource.name", // Kept for compatibility with v1.37
-				mcp
-					.as_ref()
-					.and_then(|m| m.resource_name.as_ref())
-					.map(display),
 			),
 			(
 				"mcp.session.id",
