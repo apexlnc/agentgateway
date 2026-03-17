@@ -13,13 +13,13 @@ type Lookup interface {
 
 type lookup struct {
 	resolver Resolver
-	cache    *artifactCache
+	cache    *keysetCache
 }
 
 func NewLookup(configMaps krt.Collection[*corev1.ConfigMap], resolver Resolver, storePrefix, storeNamespace string) Lookup {
 	return &lookup{
 		resolver: resolver,
-		cache:    newArtifactCache(configMaps, storePrefix, storeNamespace),
+		cache:    newKeysetCache(configMaps, storePrefix, storeNamespace),
 	}
 }
 
@@ -29,59 +29,59 @@ func (l *lookup) InlineForOwner(krtctx krt.HandlerContext, owner RemoteJwksOwner
 		return "", err
 	}
 
-	artifact, ok := l.cache.Get(krtctx, RequestKey(resolved.Endpoint.Key))
+	keyset, ok := l.cache.Get(krtctx, RequestKey(resolved.Endpoint.Key))
 	if !ok {
-		return "", fmt.Errorf("jwks artifact for request key %s isn't available", resolved.Endpoint.Key)
+		return "", fmt.Errorf("jwks keyset for %q isn't available (not yet fetched or fetch failed)", resolved.Endpoint.Request.URL)
 	}
-	return artifact.JwksJSON, nil
+	return keyset.JwksJSON, nil
 }
 
-// artifactCache provides an in-memory view of persisted JWKS artifacts. It is
+// keysetCache provides an in-memory view of persisted JWKS keysets. It is
 // hydrated by the ConfigMap informer, so lookup does not depend on raw
 // ConfigMap fetches or persistence naming details.
-type artifactCache struct {
+type keysetCache struct {
 	storePrefix string
-	artifacts   krt.Collection[cachedArtifact]
+	keysets     krt.Collection[cachedKeyset]
 }
 
-type cachedArtifact struct {
+type cachedKeyset struct {
 	Name string
-	Artifact
+	Keyset
 }
 
-func (c cachedArtifact) ResourceName() string {
+func (c cachedKeyset) ResourceName() string {
 	return c.Name
 }
 
-func (c cachedArtifact) Equals(other cachedArtifact) bool {
-	return c.Name == other.Name && c.Artifact == other.Artifact
+func (c cachedKeyset) Equals(other cachedKeyset) bool {
+	return c.Name == other.Name && c.Keyset == other.Keyset
 }
 
-func newArtifactCache(configMaps krt.Collection[*corev1.ConfigMap], storePrefix, storeNamespace string) *artifactCache {
-	artifacts := krt.NewCollection(configMaps, func(krtctx krt.HandlerContext, cm *corev1.ConfigMap) *cachedArtifact {
+func newKeysetCache(configMaps krt.Collection[*corev1.ConfigMap], storePrefix, storeNamespace string) *keysetCache {
+	keysets := krt.NewCollection(configMaps, func(krtctx krt.HandlerContext, cm *corev1.ConfigMap) *cachedKeyset {
 		if cm.Namespace != storeNamespace {
 			return nil
 		}
 
-		artifact, err := JwksFromConfigMap(cm)
+		keyset, err := JwksFromConfigMap(cm)
 		if err != nil {
 			return nil
 		}
 
-		cached := cachedArtifact{Name: cm.Name, Artifact: artifact}
+		cached := cachedKeyset{Name: cm.Name, Keyset: keyset}
 		return &cached
 	})
 
-	return &artifactCache{
+	return &keysetCache{
 		storePrefix: storePrefix,
-		artifacts:   artifacts,
+		keysets:     keysets,
 	}
 }
 
-func (c *artifactCache) Get(krtctx krt.HandlerContext, requestKey RequestKey) (Artifact, bool) {
-	artifact := krt.FetchOne(krtctx, c.artifacts, krt.FilterKey(JwksConfigMapName(c.storePrefix, requestKey)))
-	if artifact == nil {
-		return Artifact{}, false
+func (c *keysetCache) Get(krtctx krt.HandlerContext, requestKey RequestKey) (Keyset, bool) {
+	keyset := krt.FetchOne(krtctx, c.keysets, krt.FilterKey(JwksConfigMapName(c.storePrefix, requestKey)))
+	if keyset == nil {
+		return Keyset{}, false
 	}
-	return artifact.Artifact, true
+	return keyset.Keyset, true
 }

@@ -17,8 +17,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// fetcher fetches and periodically refreshes remote JWKS artifacts.
-// Fetched artifacts are stored in jwksCache and updates are sent to subscribers.
+// fetcher fetches and periodically refreshes remote JWKS keysets.
+// Fetched keysets are stored in jwksCache and updates are sent to subscribers.
 type fetcher struct {
 	mu                sync.Mutex
 	cache             *jwksCache

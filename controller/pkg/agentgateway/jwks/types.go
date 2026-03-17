@@ -11,7 +11,7 @@ type RequestKey = remotehttp.FetchKey
 type Request = remotehttp.Request
 type Transport = remotehttp.TransportFingerprint
 
-type Artifact struct {
+type Keyset struct {
 	RequestKey RequestKey `json:"requestKey"`
 	URL        string     `json:"url"`
 	FetchedAt  time.Time  `json:"fetchedAt"`
@@ -29,9 +29,4 @@ type JwksSource struct {
 
 func (s JwksSource) ResourceName() string {
 	return s.OwnerKey.String()
-}
-
-type storedArtifact struct {
-	Version int `json:"version"`
-	Artifact
 }

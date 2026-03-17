@@ -5,6 +5,7 @@ import (
 
 	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/ptr"
+	"istio.io/istio/pkg/slices"
 	"k8s.io/apimachinery/pkg/types"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
@@ -31,7 +32,7 @@ func (r *defaultResolver) serviceTargetSectionMatcher(
 		}
 	}
 
-	return newTargetSectionMatcher(dedupeStrings(candidates))
+	return newTargetSectionMatcher(slices.FilterDuplicates(candidates))
 }
 
 func (r *defaultResolver) servicePortName(
@@ -52,23 +53,4 @@ func (r *defaultResolver) servicePortName(
 		}
 	}
 	return ""
-}
-
-func dedupeStrings(values []string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(values))
-	deduped := make([]string, 0, len(values))
-	for _, value := range values {
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		deduped = append(deduped, value)
-	}
-	return deduped
 }

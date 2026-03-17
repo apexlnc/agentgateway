@@ -20,7 +20,7 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 )
 
-// ConfigMapController synchronizes persisted JWKS artifacts to ConfigMaps.
+// ConfigMapController synchronizes persisted JWKS keysets to ConfigMaps.
 
 var cmLogger = logging.New("jwks_store_config_map_controller")
 
@@ -46,7 +46,7 @@ var (
 
 type configMapSyncPlan struct {
 	upsertName  string
-	artifact    *Artifact
+	keyset      *Keyset
 	deleteNames []string
 }
 
@@ -69,6 +69,7 @@ func (jcm *ConfigMapController) Init(ctx context.Context) {
 
 	jcm.waitForSync = []cache.InformerSynced{
 		jcm.cmClient.HasSynced,
+		jcm.store.HasSynced,
 	}
 
 	jcm.jwksUpdates = jcm.store.SubscribeToUpdates()
@@ -129,8 +130,8 @@ func (jcm *ConfigMapController) Reconcile(req types.NamespacedName) error {
 	requestKey := RequestKey(req.Name)
 	plan := planConfigMapSync(requestKey, jcm.existingConfigMapsForRequestKey(req.Namespace, requestKey), jcm.storePrefix, jcm.store.JwksByRequestKey)
 
-	if plan.artifact != nil {
-		if err := jcm.upsertConfigMap(ctx, req.Namespace, plan.upsertName, *plan.artifact); err != nil {
+	if plan.keyset != nil {
+		if err := jcm.upsertConfigMap(ctx, req.Namespace, plan.upsertName, *plan.keyset); err != nil {
 			return err
 		}
 	}
@@ -186,12 +187,12 @@ func (jcm *ConfigMapController) existingConfigMapsForRequestKey(namespace string
 	return matches
 }
 
-func (jcm *ConfigMapController) upsertConfigMap(ctx context.Context, namespace, name string, artifact Artifact) error {
+func (jcm *ConfigMapController) upsertConfigMap(ctx context.Context, namespace, name string, keyset Keyset) error {
 	existingCm := jcm.cmClient.Get(name, namespace)
 	if existingCm == nil {
 		cmLogger.Debug("creating ConfigMap", "name", name)
 		newCm := jcm.newJwksStoreConfigMap(name)
-		if err := SetJwksInConfigMap(newCm, artifact); err != nil {
+		if err := SetJwksInConfigMap(newCm, keyset); err != nil {
 			cmLogger.Error("error updating ConfigMap", "error", err)
 			return err
 		}
@@ -204,7 +205,7 @@ func (jcm *ConfigMapController) upsertConfigMap(ctx context.Context, namespace, 
 	}
 
 	cmLogger.Debug("updating ConfigMap", "name", name)
-	if err := SetJwksInConfigMap(existingCm, artifact); err != nil {
+	if err := SetJwksInConfigMap(existingCm, keyset); err != nil {
 		cmLogger.Error("error updating ConfigMap", "error", err)
 		return err
 	}
@@ -226,10 +227,10 @@ func planConfigMapSync(
 	requestKey RequestKey,
 	existingCms []*corev1.ConfigMap,
 	storePrefix string,
-	lookup func(RequestKey) (Artifact, bool),
+	lookup func(RequestKey) (Keyset, bool),
 ) configMapSyncPlan {
-	if artifact, ok := lookup(requestKey); ok {
-		canonicalName := JwksConfigMapName(storePrefix, artifact.RequestKey)
+	if keyset, ok := lookup(requestKey); ok {
+		canonicalName := JwksConfigMapName(storePrefix, keyset.RequestKey)
 		deleteNames := make([]string, 0, len(existingCms))
 		for _, existingCm := range existingCms {
 			if existingCm.Name != canonicalName {
@@ -238,7 +239,7 @@ func planConfigMapSync(
 		}
 		return configMapSyncPlan{
 			upsertName:  canonicalName,
-			artifact:    &artifact,
+			keyset:      &keyset,
 			deleteNames: deleteNames,
 		}
 	}

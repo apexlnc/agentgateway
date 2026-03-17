@@ -34,7 +34,7 @@ func TestRemoveKeysetFromFetcher(t *testing.T) {
 	f := newFetcher(newCache())
 
 	assert.NoError(t, f.AddOrUpdateKeyset(source))
-	f.cache.artifacts[source.RequestKey] = Artifact{RequestKey: source.RequestKey, URL: source.Request.URL, JwksJSON: "jwks"}
+	f.cache.keysets[source.RequestKey] = Keyset{RequestKey: source.RequestKey, URL: source.Request.URL, JwksJSON: "jwks"}
 
 	f.RemoveKeyset(source.RequestKey)
 
@@ -105,9 +105,9 @@ func TestSuccessfulJwksFetch(t *testing.T) {
 		case actual := <-updates:
 			_, ok := actual[source.RequestKey]
 			assert.True(c, ok)
-			artifact, ok := f.cache.GetJwks(source.RequestKey)
+			keyset, ok := f.cache.GetJwks(source.RequestKey)
 			assert.True(c, ok)
-			assert.Equal(c, sampleJWKS, artifact.JwksJSON)
+			assert.Equal(c, sampleJWKS, keyset.JwksJSON)
 		default:
 			assert.Fail(c, "no updates")
 		}

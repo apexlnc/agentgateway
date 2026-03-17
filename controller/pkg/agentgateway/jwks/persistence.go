@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 
+	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/kclient"
 	"istio.io/istio/pkg/kube/krt"
 	corev1 "k8s.io/api/core/v1"
@@ -20,7 +21,6 @@ import (
 
 const configMapKey = "jwks-store"
 const jwksStoreComponentLabel = "app.kubernetes.io/component"
-const storedArtifactVersion = 1
 
 func JwksStoreLabelSelector(storePrefix string) string {
 	return jwksStoreComponentLabel + "=" + storePrefix
@@ -50,25 +50,41 @@ func newConfigMapSyncer(client apiclient.Client, storePrefix, deploymentNamespac
 	}
 }
 
-func JwksFromConfigMap(cm *corev1.ConfigMap) (Artifact, error) {
+func JwksFromConfigMap(cm *corev1.ConfigMap) (Keyset, error) {
 	jwksStore := cm.Data[configMapKey]
 
-	var stored storedArtifact
-	if err := json.Unmarshal([]byte(jwksStore), &stored); err != nil {
-		return Artifact{}, err
+	var keyset Keyset
+	if err := json.Unmarshal([]byte(jwksStore), &keyset); err == nil && keyset.RequestKey != "" {
+		return keyset, nil
 	}
-	if stored.Version != storedArtifactVersion {
-		return Artifact{}, fmt.Errorf("unsupported jwks artifact version %d", stored.Version)
+
+	// Fallback to legacy map format
+	var legacy map[string]string
+	if err := json.Unmarshal([]byte(jwksStore), &legacy); err != nil {
+		return Keyset{}, fmt.Errorf("failed to unmarshal current and legacy formats: %w", err)
 	}
-	return stored.Artifact, nil
+	if len(legacy) != 1 {
+		return Keyset{}, fmt.Errorf("unexpected legacy jwks payload: expected 1 entry, got %d", len(legacy))
+	}
+
+	for uri, jwksJSON := range legacy {
+		return Keyset{
+			RequestKey: Request{URL: uri}.Key(),
+			URL:        uri,
+			JwksJSON:   jwksJSON,
+		}, nil
+	}
+
+	// unreachable after len==1 check, but satisfies the compiler
+	return Keyset{}, errors.New("unexpected legacy jwks state")
 }
 
 func RequestKeyFromConfigMap(cm *corev1.ConfigMap) (RequestKey, error) {
-	artifact, err := JwksFromConfigMap(cm)
+	keyset, err := JwksFromConfigMap(cm)
 	if err != nil {
 		return "", err
 	}
-	return artifact.RequestKey, nil
+	return keyset.RequestKey, nil
 }
 
 func JwksConfigMapName(storePrefix string, requestKey RequestKey) string {
@@ -83,11 +99,8 @@ func JwksConfigMapNamespacedName(storePrefix, namespace string, requestKey Reque
 	}
 }
 
-func SetJwksInConfigMap(cm *corev1.ConfigMap, artifact Artifact) error {
-	b, err := json.Marshal(storedArtifact{
-		Version:  storedArtifactVersion,
-		Artifact: artifact,
-	})
+func SetJwksInConfigMap(cm *corev1.ConfigMap, keyset Keyset) error {
+	b, err := json.Marshal(keyset)
 	if err != nil {
 		return err
 	}
@@ -98,8 +111,10 @@ func SetJwksInConfigMap(cm *corev1.ConfigMap, artifact Artifact) error {
 	return nil
 }
 
-func (cs *configMapSyncer) LoadJwksFromConfigMaps(ctx context.Context) ([]Artifact, error) {
+func (cs *configMapSyncer) LoadJwksFromConfigMaps(ctx context.Context) ([]Keyset, error) {
 	log := log.FromContext(ctx)
+
+	kube.WaitForCacheSync("JWKS ConfigMaps", ctx.Done(), cs.cmCollection.HasSynced)
 
 	allPersistedJwks := cs.cmCollection.List()
 	if len(allPersistedJwks) == 0 {
@@ -107,16 +122,16 @@ func (cs *configMapSyncer) LoadJwksFromConfigMaps(ctx context.Context) ([]Artifa
 	}
 
 	errs := make([]error, 0)
-	artifacts := make([]Artifact, 0, len(allPersistedJwks))
+	keysets := make([]Keyset, 0, len(allPersistedJwks))
 	for _, cm := range allPersistedJwks {
-		artifact, err := JwksFromConfigMap(cm)
+		keyset, err := JwksFromConfigMap(cm)
 		if err != nil {
 			log.Error(err, "error deserializing jwks ConfigMap", "ConfigMap", cm.Name)
 			errs = append(errs, err)
 			continue
 		}
-		artifacts = append(artifacts, artifact)
+		keysets = append(keysets, keyset)
 	}
 
-	return artifacts, errors.Join(errs...)
+	return keysets, errors.Join(errs...)
 }

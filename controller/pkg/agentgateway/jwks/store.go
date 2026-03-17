@@ -25,6 +25,7 @@ type Store struct {
 	sourcesByOwner      map[OwnerKey]JwksSource
 	ownersByRequestKey  map[RequestKey]map[OwnerKey]JwksSource
 	l                   sync.Mutex
+	ready               chan struct{}
 }
 
 func NewStore(cli apiclient.Client, krtOptions krtutil.KrtOptions, jwksChanges <-chan JwksSource, storePrefix, deploymentNamespace string) *Store {
@@ -40,6 +41,7 @@ func NewStore(cli apiclient.Client, krtOptions krtutil.KrtOptions, jwksChanges <
 		configMapSyncer:     newConfigMapSyncer(cli, storePrefix, deploymentNamespace, krtOptions),
 		sourcesByOwner:      make(map[OwnerKey]JwksSource),
 		ownersByRequestKey:  make(map[RequestKey]map[OwnerKey]JwksSource),
+		ready:               make(chan struct{}),
 	}
 	return jwksStore
 }
@@ -65,6 +67,8 @@ func (s *Store) Start(ctx context.Context) error {
 		logger.Error("error loading jwks store state", "error", err)
 	}
 
+	close(s.ready)
+
 	go s.jwksFetcher.Run(ctx)
 	go s.updateJwksSources(ctx)
 
@@ -72,11 +76,20 @@ func (s *Store) Start(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) HasSynced() bool {
+	select {
+	case <-s.ready:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Store) SubscribeToUpdates() <-chan map[RequestKey]struct{} {
 	return s.jwksFetcher.SubscribeToUpdates()
 }
 
-func (s *Store) JwksByRequestKey(requestKey RequestKey) (Artifact, bool) {
+func (s *Store) JwksByRequestKey(requestKey RequestKey) (Keyset, bool) {
 	return s.jwksCache.GetJwks(requestKey)
 }
 

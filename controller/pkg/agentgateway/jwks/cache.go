@@ -9,44 +9,44 @@ import (
 	"github.com/go-jose/go-jose/v4"
 )
 
-// jwksCache stores fetched JWKS artifacts by request key.
+// jwksCache stores fetched JWKS keysets by request key.
 type jwksCache struct {
-	l         sync.Mutex
-	artifacts map[RequestKey]Artifact
+	l       sync.Mutex
+	keysets map[RequestKey]Keyset
 }
 
 func newCache() *jwksCache {
 	return &jwksCache{
-		artifacts: make(map[RequestKey]Artifact),
+		keysets: make(map[RequestKey]Keyset),
 	}
 }
 
-func (c *jwksCache) LoadJwksFromStores(stored []Artifact) error {
+func (c *jwksCache) LoadJwksFromStores(stored []Keyset) error {
 	newCache := newCache()
 	errs := make([]error, 0)
 
-	for _, artifact := range stored {
+	for _, keyset := range stored {
 		jwks := jose.JSONWebKeySet{}
-		if err := json.Unmarshal([]byte(artifact.JwksJSON), &jwks); err != nil {
+		if err := json.Unmarshal([]byte(keyset.JwksJSON), &jwks); err != nil {
 			errs = append(errs, err)
 			continue
 		}
 
-		newCache.artifacts[artifact.RequestKey] = artifact
+		newCache.keysets[keyset.RequestKey] = keyset
 	}
 
 	c.l.Lock()
-	c.artifacts = newCache.artifacts
+	c.keysets = newCache.keysets
 	c.l.Unlock()
 	return errors.Join(errs...)
 }
 
-func (c *jwksCache) GetJwks(requestKey RequestKey) (Artifact, bool) {
+func (c *jwksCache) GetJwks(requestKey RequestKey) (Keyset, bool) {
 	c.l.Lock()
 	defer c.l.Unlock()
 
-	artifact, ok := c.artifacts[requestKey]
-	return artifact, ok
+	keyset, ok := c.keysets[requestKey]
+	return keyset, ok
 }
 
 func (c *jwksCache) addJwks(requestKey RequestKey, requestURL string, jwks jose.JSONWebKeySet) error {
@@ -58,18 +58,18 @@ func (c *jwksCache) addJwks(requestKey RequestKey, requestURL string, jwks jose.
 	c.l.Lock()
 	defer c.l.Unlock()
 
-	artifact := Artifact{
+	keyset := Keyset{
 		RequestKey: requestKey,
 		URL:        requestURL,
 		FetchedAt:  time.Now(),
 		JwksJSON:   string(serializedJwks),
 	}
-	c.artifacts[requestKey] = artifact
+	c.keysets[requestKey] = keyset
 	return nil
 }
 
 func (c *jwksCache) deleteJwks(requestKey RequestKey) {
 	c.l.Lock()
-	delete(c.artifacts, requestKey)
+	delete(c.keysets, requestKey)
 	c.l.Unlock()
 }

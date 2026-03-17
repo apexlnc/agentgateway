@@ -135,6 +135,18 @@ func TestStoreMovingOwnerRecomputesPreviousSharedRequest(t *testing.T) {
 	}
 }
 
+func TestStoreHasSyncedReflectsReadyState(t *testing.T) {
+	store := &Store{
+		ready: make(chan struct{}),
+	}
+
+	assert.False(t, store.HasSynced())
+
+	close(store.ready)
+
+	assert.True(t, store.HasSynced())
+}
+
 func testOwner(name string) OwnerKey {
 	return JwksOwnerID{
 		Kind:      OwnerKindPolicy,
