@@ -1005,10 +1005,6 @@ impl Drop for DropOnLog {
 				log.llm_request.as_ref().map(|l| display(&l.provider)),
 			),
 			(
-				"gen_ai.system", // Kept for compatibility with v1.37
-				log.llm_request.as_ref().map(|l| display(&l.provider)),
-			),
-			(
 				"gen_ai.request.model",
 				log.llm_request.as_ref().map(|l| display(&l.request_model)),
 			),
