@@ -27,6 +27,7 @@ type fetcher struct {
 	schedule          fetchingSchedule
 	scheduled         map[RequestKey]*fetchAt
 	subscribers       []chan map[RequestKey]struct{}
+	wake              chan struct{}
 }
 
 type fetchState struct {
@@ -68,6 +69,7 @@ func newFetcher(cache *jwksCache) *fetcher {
 		schedule:          make([]*fetchAt, 0),
 		scheduled:         make(map[RequestKey]*fetchAt),
 		subscribers:       make([]chan map[RequestKey]struct{}, 0),
+		wake:              make(chan struct{}, 1),
 	}
 	heap.Init(&fetcher.schedule)
 
@@ -128,15 +130,43 @@ func nextRetryDelay(retryAttempt int) time.Duration {
 }
 
 func (f *fetcher) Run(ctx context.Context) {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
 
 	for {
+		f.maybeFetchJwks(ctx)
+
+		f.mu.Lock()
+		next := f.schedule.Peek()
+		var delay time.Duration
+		if next == nil {
+			delay = time.Hour
+		} else {
+			delay = time.Until(next.at)
+		}
+		f.mu.Unlock()
+
+		if delay < 0 {
+			delay = 0
+		}
+		timer.Reset(delay)
+
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			f.maybeFetchJwks(ctx)
+		case <-timer.C:
+		case <-f.wake:
+			// Drain the timer if it fired concurrently with wake so the next loop
+			// iteration can safely reset it after a request was added, updated, or removed.
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 		}
 	}
 }
@@ -231,6 +261,11 @@ func (f *fetcher) RemoveKeyset(requestKey RequestKey) {
 
 	f.cache.deleteJwks(requestKey)
 	f.notifySubscribers(map[RequestKey]struct{}{requestKey: {}})
+
+	select {
+	case f.wake <- struct{}{}:
+	default:
+	}
 }
 
 func (f *fetcher) fetchJwks(ctx context.Context, source JwksSource) (jose.JSONWebKeySet, error) {
@@ -278,6 +313,9 @@ func (f *fetcher) popDue(now time.Time) []fetchAt {
 			return due
 		}
 		fetch := heap.Pop(&f.schedule).(*fetchAt)
+		// The heap entry is no longer live once popped. Clear the index so a
+		// later reschedule creates or fixes the current heap node instead of
+		// trying to reuse a stale pointer that is no longer in the heap.
 		delete(f.scheduled, fetch.requestKey)
 		due = append(due, *fetch)
 	}
@@ -308,18 +346,22 @@ func (f *fetcher) scheduleAtLocked(requestKey RequestKey, generation uint64, at 
 		scheduled.generation = generation
 		scheduled.retryAttempt = retryAttempt
 		heap.Fix(&f.schedule, scheduled.index)
-		return
+	} else {
+		entry := &fetchAt{
+			at:           at,
+			requestKey:   requestKey,
+			generation:   generation,
+			retryAttempt: retryAttempt,
+			index:        -1,
+		}
+		heap.Push(&f.schedule, entry)
+		f.scheduled[requestKey] = entry
 	}
 
-	entry := &fetchAt{
-		at:           at,
-		requestKey:   requestKey,
-		generation:   generation,
-		retryAttempt: retryAttempt,
-		index:        -1,
+	select {
+	case f.wake <- struct{}{}:
+	default:
 	}
-	heap.Push(&f.schedule, entry)
-	f.scheduled[requestKey] = entry
 }
 
 func (f *fetcher) notifySubscribers(updates map[RequestKey]struct{}) {

@@ -3,6 +3,9 @@ package remotehttp
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
+
+	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 )
 
 type FetchKey string
@@ -17,7 +20,7 @@ func (r Request) Key() FetchKey {
 	}
 
 	writeHashPart(r.URL)
-	writeHashPart(string(transport.Verification))
+	writeHashPart(transportVerificationFingerprint(r.URL, transport.Verification))
 	writeHashPart(transport.ServerName)
 	writeHashPart(transport.CABundleHash)
 	for _, nextProto := range transport.NextProtos {
@@ -26,4 +29,18 @@ func (r Request) Key() FetchKey {
 
 	sum := hash.Sum(nil)
 	return FetchKey(hex.EncodeToString(sum[:]))
+}
+
+func transportVerificationFingerprint(url string, mode agentgateway.InsecureTLSMode) string {
+	switch mode {
+	case agentgateway.InsecureTLSModeAll:
+		return "insecure"
+	case agentgateway.InsecureTLSModeHostname:
+		return "hostname"
+	default:
+		if strings.HasPrefix(url, "http://") {
+			return ""
+		}
+		return "strict"
+	}
 }

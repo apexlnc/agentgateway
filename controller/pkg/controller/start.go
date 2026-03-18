@@ -203,20 +203,6 @@ func agwPluginFactory(cfg StartConfig, jwksLookup jwks.Lookup) func(ctx context.
 	}
 }
 
-func defaultProxyImageTag(globalSettings *apisettings.Settings) *string {
-	if globalSettings.ProxyImageTag != nil {
-		return globalSettings.ProxyImageTag
-	}
-
-	// version.Version is unprefixed semver-like data such as 1.0.1-dev. Downstream
-	// chart/deployer paths handle adding a single "v" when appropriate.
-	if version.Version != "" {
-		return ptr.Of(version.Version)
-	}
-
-	return ptr.Of(version.GitVersion)
-}
-
 func (c *ControllerBuilder) Build() (*syncer.Syncer, error) {
 	slog.Info("creating gateway controllers")
 
@@ -233,6 +219,20 @@ func (c *ControllerBuilder) Build() (*syncer.Syncer, error) {
 	agwXdsPort := globalSettings.AgentgatewayXdsServicePort
 	slog.Info("got agentgateway xds address for deployer", "agw_xds_host", xdsHost, "agw_xds_port", agwXdsPort)
 
+	// Best case: they explicit set at runtime
+	defaultTag := globalSettings.ProxyImageTag
+	if defaultTag == nil {
+		// Else, the binary is built with an explicit version
+		if version.Version != "" {
+			defaultTag = ptr.Of("v" + version.Version)
+		} else {
+			// Else, detect automatically based on the build.
+			// TODO: probably what we really want here is to have a file in the repo that has a floating version like v1.0.0-dev
+			// that is used here + for nightly builds.
+			defaultTag = ptr.Of(version.GitVersion)
+		}
+	}
+
 	gwCfg := GatewayConfig{
 		Client:            c.cfg.Client,
 		Mgr:               c.mgr,
@@ -240,7 +240,7 @@ func (c *ControllerBuilder) Build() (*syncer.Syncer, error) {
 		ImageDefaults: &agentgateway.Image{
 			Registry:   &globalSettings.ProxyImageRegistry,
 			Repository: &globalSettings.ProxyImageRepository,
-			Tag:        defaultProxyImageTag(globalSettings),
+			Tag:        defaultTag,
 		},
 		ControlPlane: deployer.ControlPlaneInfo{
 			XdsHost:      xdsHost,

@@ -25,7 +25,8 @@ func TestResolve(t *testing.T) {
 		backendRef          gwv1.BackendObjectReference
 		defaultPort         string
 		wantURL             string
-		wantVerification    remotehttp.VerificationMode
+		wantTLSConfig       bool
+		wantVerification    agentgateway.InsecureTLSMode
 		wantServerName      string
 		wantCABundleHash    bool
 		wantVerifyConnCheck bool
@@ -56,7 +57,8 @@ func TestResolve(t *testing.T) {
 			},
 			defaultPort:      "8443",
 			wantURL:          "https://oauth2-discovery.default.svc.cluster.local:8443/",
-			wantVerification: remotehttp.VerificationModeStrict,
+			wantTLSConfig:    true,
+			wantVerification: "",
 			wantServerName:   "oauth2-discovery.default.svc.cluster.local",
 		},
 		{
@@ -113,7 +115,8 @@ func TestResolve(t *testing.T) {
 				Kind:  ptr.Of(gwv1.Kind(wellknown.AgentgatewayBackendGVK.Kind)),
 			},
 			wantURL:          "https://dummy-idp.default:8443/",
-			wantVerification: remotehttp.VerificationModeStrict,
+			wantTLSConfig:    true,
+			wantVerification: "",
 			wantServerName:   "backend.example.com",
 		},
 		{
@@ -157,7 +160,7 @@ func TestResolve(t *testing.T) {
 								Kind:  gwv1.Kind("Service"),
 								Name:  gwv1.ObjectName("oauth2-discovery"),
 							},
-							SectionName: ptr.Of(gwv1.SectionName("https")),
+							SectionName: ptr.Of(gwv1.SectionName("8443")),
 						}},
 						Backend: &agentgateway.BackendFull{
 							BackendSimple: agentgateway.BackendSimple{
@@ -173,7 +176,67 @@ func TestResolve(t *testing.T) {
 				Port: ptr.Of(gwv1.PortNumber(8443)),
 			},
 			wantURL:          "https://oauth2-discovery.default.svc.cluster.local:8443/",
-			wantVerification: remotehttp.VerificationModeStrict,
+			wantTLSConfig:    true,
+			wantVerification: "",
+			wantServerName:   "port.example.com",
+		},
+		{
+			name: "service backend tls policy supports named port section match",
+			inputs: []any{
+				testService("oauth2-discovery", "default", []corev1.ServicePort{
+					{Name: "http", Port: 8080},
+					{Name: "https", Port: 8443},
+				}),
+				&gwv1.BackendTLSPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "whole-service",
+						Namespace:         "default",
+						CreationTimestamp: metav1.Unix(20, 0),
+					},
+					Spec: gwv1.BackendTLSPolicySpec{
+						TargetRefs: []gwv1.LocalPolicyTargetReferenceWithSectionName{{
+							LocalPolicyTargetReference: gwv1.LocalPolicyTargetReference{
+								Group: gwv1.Group(""),
+								Kind:  gwv1.Kind("Service"),
+								Name:  gwv1.ObjectName("oauth2-discovery"),
+							},
+						}},
+						Validation: gwv1.BackendTLSPolicyValidation{
+							Hostname:                gwv1.PreciseHostname("whole.example.com"),
+							WellKnownCACertificates: ptr.Of(systemCAs),
+						},
+					},
+				},
+				&gwv1.BackendTLSPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "port-specific",
+						Namespace:         "default",
+						CreationTimestamp: metav1.Unix(10, 0),
+					},
+					Spec: gwv1.BackendTLSPolicySpec{
+						TargetRefs: []gwv1.LocalPolicyTargetReferenceWithSectionName{{
+							LocalPolicyTargetReference: gwv1.LocalPolicyTargetReference{
+								Group: gwv1.Group(""),
+								Kind:  gwv1.Kind("Service"),
+								Name:  gwv1.ObjectName("oauth2-discovery"),
+							},
+							SectionName: ptr.Of(gwv1.SectionName("https")),
+						}},
+						Validation: gwv1.BackendTLSPolicyValidation{
+							Hostname:                gwv1.PreciseHostname("port.example.com"),
+							WellKnownCACertificates: ptr.Of(systemCAs),
+						},
+					},
+				},
+			},
+			backendRef: gwv1.BackendObjectReference{
+				Name: gwv1.ObjectName("oauth2-discovery"),
+				Kind: ptr.Of(gwv1.Kind("Service")),
+				Port: ptr.Of(gwv1.PortNumber(8443)),
+			},
+			wantURL:          "https://oauth2-discovery.default.svc.cluster.local:8443/",
+			wantTLSConfig:    true,
+			wantVerification: "",
 			wantServerName:   "port.example.com",
 		},
 		{
@@ -206,7 +269,8 @@ func TestResolve(t *testing.T) {
 				Port: ptr.Of(gwv1.PortNumber(8443)),
 			},
 			wantURL:             "https://oauth2-discovery.default.svc.cluster.local:8443/",
-			wantVerification:    remotehttp.VerificationModeHostname,
+			wantTLSConfig:       true,
+			wantVerification:    agentgateway.InsecureTLSModeHostname,
 			wantServerName:      "oauth2-discovery.default.svc.cluster.local",
 			wantVerifyConnCheck: true,
 		},
@@ -246,7 +310,8 @@ func TestResolve(t *testing.T) {
 				Port: ptr.Of(gwv1.PortNumber(8443)),
 			},
 			wantURL:          "https://oauth2-discovery.default.svc.cluster.local:8443/",
-			wantVerification: remotehttp.VerificationModeStrict,
+			wantTLSConfig:    true,
+			wantVerification: "",
 			wantCABundleHash: true,
 		},
 	}
@@ -266,7 +331,7 @@ func TestResolve(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, resolved)
 			require.Equal(t, tt.wantURL, resolved.Request.URL)
-			if tt.wantVerification == "" {
+			if !tt.wantTLSConfig {
 				require.Nil(t, resolved.TLSConfig)
 				return
 			}

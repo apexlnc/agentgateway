@@ -45,6 +45,7 @@ func (r *defaultResolver) resolveConnection(
 			string(kind),
 			string(backendRef.Name),
 			newTargetSectionMatcher(nil),
+			newTargetSectionMatcher(nil),
 			backend.Spec.Policies,
 		)
 		if err != nil {
@@ -62,7 +63,8 @@ func (r *defaultResolver) resolveConnection(
 			string(group),
 			string(kind),
 			string(backendRef.Name),
-			r.serviceTargetSectionMatcher(krtctx, refNamespace, string(backendRef.Name), backendRef.Port, defaultPort),
+			r.serviceTargetSectionMatcher(backendRef.Port, defaultPort),
+			r.backendTLSServiceTargetSectionMatcher(krtctx, refNamespace, string(backendRef.Name), backendRef.Port, defaultPort),
 			nil,
 		)
 		if err != nil {

@@ -1,16 +1,11 @@
 package remotehttp
 
-type VerificationMode string
-
-const (
-	VerificationModeStrict   VerificationMode = "strict"
-	VerificationModeHostname VerificationMode = "hostname"
-	VerificationModeInsecure VerificationMode = "insecure"
-)
+import "github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 
 type TransportFingerprint struct {
-	Verification VerificationMode `json:"verification,omitempty"`
-	ServerName   string           `json:"serverName,omitempty"`
-	CABundleHash string           `json:"caBundleHash,omitempty"`
-	NextProtos   []string         `json:"nextProtos,omitempty"`
+	// Zero value means strict/default verification.
+	Verification agentgateway.InsecureTLSMode `json:"verification,omitempty"`
+	ServerName   string                       `json:"serverName,omitempty"`
+	CABundleHash string                       `json:"caBundleHash,omitempty"`
+	NextProtos   []string                     `json:"nextProtos,omitempty"`
 }

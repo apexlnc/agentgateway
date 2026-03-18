@@ -233,6 +233,8 @@ func planConfigMapSync(
 		canonicalName := JwksConfigMapName(storePrefix, keyset.RequestKey)
 		deleteNames := make([]string, 0, len(existingCms))
 		for _, existingCm := range existingCms {
+			// Clean up any non-canonical persisted entries for this request key,
+			// including legacy ConfigMaps from pre-migration naming.
 			if existingCm.Name != canonicalName {
 				deleteNames = append(deleteNames, existingCm.Name)
 			}

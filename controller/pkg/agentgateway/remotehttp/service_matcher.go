@@ -11,6 +11,26 @@ import (
 )
 
 func (r *defaultResolver) serviceTargetSectionMatcher(
+	refPort *gwv1.PortNumber,
+	defaultPort string,
+) targetSectionMatcher {
+	candidates := make([]string, 0, 1)
+	appendPort := func(port int32) {
+		candidates = append(candidates, strconv.FormatInt(int64(port), 10))
+	}
+
+	if port := ptr.OrEmpty(refPort); port != 0 {
+		appendPort(int32(port))
+	} else if defaultPort != "" {
+		if parsed, err := strconv.ParseInt(defaultPort, 10, 32); err == nil {
+			appendPort(int32(parsed))
+		}
+	}
+
+	return newTargetSectionMatcher(slices.FilterDuplicates(candidates))
+}
+
+func (r *defaultResolver) backendTLSServiceTargetSectionMatcher(
 	krtctx krt.HandlerContext,
 	namespace, name string,
 	refPort *gwv1.PortNumber,

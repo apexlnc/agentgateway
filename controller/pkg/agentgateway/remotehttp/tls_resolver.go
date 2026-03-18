@@ -15,7 +15,7 @@ import (
 
 type resolvedTLS struct {
 	tlsConfig    *tls.Config
-	verification VerificationMode
+	verification agentgateway.InsecureTLSMode
 	serverName   string
 	caBundleHash string
 	nextProtos   []string
@@ -24,16 +24,17 @@ type resolvedTLS struct {
 func (r *defaultResolver) resolveTLS(
 	krtctx krt.HandlerContext,
 	namespace, group, kind, name string,
-	matcher targetSectionMatcher,
+	agwMatcher targetSectionMatcher,
+	backendTLSMatcher targetSectionMatcher,
 	backendPolicies *agentgateway.BackendFull,
 ) (*resolvedTLS, error) {
 	if backendPolicies != nil && backendPolicies.TLS != nil {
 		return resolvedTLSFromBackendTLS(krtctx, r.cfgmaps, namespace, backendPolicies.TLS)
 	}
-	if agwPolicy := r.fetchBestMatchingAgentgatewayPolicy(krtctx, namespace, group, kind, name, matcher); agwPolicy != nil && agwPolicy.Spec.Backend != nil && agwPolicy.Spec.Backend.TLS != nil {
+	if agwPolicy := r.fetchBestMatchingAgentgatewayPolicy(krtctx, namespace, group, kind, name, agwMatcher); agwPolicy != nil && agwPolicy.Spec.Backend != nil && agwPolicy.Spec.Backend.TLS != nil {
 		return resolvedTLSFromBackendTLS(krtctx, r.cfgmaps, namespace, agwPolicy.Spec.Backend.TLS)
 	}
-	if backendTLSPolicy := r.fetchBestMatchingBackendTLSPolicy(krtctx, namespace, group, kind, name, matcher); backendTLSPolicy != nil {
+	if backendTLSPolicy := r.fetchBestMatchingBackendTLSPolicy(krtctx, namespace, group, kind, name, backendTLSMatcher); backendTLSPolicy != nil {
 		return resolvedTLSFromBackendTLSPolicy(krtctx, r.cfgmaps, namespace, backendTLSPolicy)
 	}
 	return nil, nil
@@ -52,7 +53,7 @@ func resolvedTLSFromBackendTLSPolicy(
 
 	resolved := &resolvedTLS{
 		tlsConfig:    tlsConfig,
-		verification: VerificationModeStrict,
+		verification: "",
 		serverName:   tlsConfig.ServerName,
 	}
 
@@ -100,9 +101,9 @@ func resolvedTLSFromBackendTLS(
 	}
 
 	switch resolved.verification {
-	case VerificationModeInsecure:
+	case agentgateway.InsecureTLSModeAll:
 		resolved.tlsConfig.InsecureSkipVerify = true //nolint:gosec
-	case VerificationModeHostname:
+	case agentgateway.InsecureTLSModeHostname:
 		resolved.tlsConfig.InsecureSkipVerify = true //nolint:gosec
 		resolved.tlsConfig.VerifyConnection = verifyPeerChainWithoutHostname(resolved.tlsConfig.RootCAs)
 	}
@@ -110,14 +111,14 @@ func resolvedTLSFromBackendTLS(
 	return resolved, nil
 }
 
-func verificationMode(mode *agentgateway.InsecureTLSMode) VerificationMode {
+func verificationMode(mode *agentgateway.InsecureTLSMode) agentgateway.InsecureTLSMode {
 	switch ptr.OrDefault(mode, "") {
 	case agentgateway.InsecureTLSModeAll:
-		return VerificationModeInsecure
+		return agentgateway.InsecureTLSModeAll
 	case agentgateway.InsecureTLSModeHostname:
-		return VerificationModeHostname
+		return agentgateway.InsecureTLSModeHostname
 	default:
-		return VerificationModeStrict
+		return ""
 	}
 }
 
