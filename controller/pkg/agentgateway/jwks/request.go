@@ -1,7 +1,6 @@
 package jwks
 
 import (
-	"crypto/tls"
 	"errors"
 
 	"istio.io/istio/pkg/kube/krt"
@@ -34,17 +33,4 @@ func ResolveEndpoint(
 		BackendRef:       remoteProvider.BackendRef,
 		Path:             remoteProvider.JwksPath,
 	})
-}
-
-func BuildRequest(
-	krtctx krt.HandlerContext,
-	resolver remotehttp.Resolver,
-	policyName, defaultNS string,
-	remoteProvider *agentgateway.RemoteJWKS,
-) (Request, *tls.Config, error) {
-	endpoint, err := ResolveEndpoint(krtctx, resolver, policyName, defaultNS, remoteProvider)
-	if err != nil {
-		return Request{}, nil, err
-	}
-	return endpoint.Request, endpoint.TLSConfig, nil
 }

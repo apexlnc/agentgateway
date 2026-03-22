@@ -20,7 +20,7 @@ type Store struct {
 	deploymentNamespace string
 	jwksCache           *jwksCache
 	jwksFetcher         *fetcher
-	configMapSyncer     *configMapSyncer
+	persistedKeysets    *persistedKeysetReader
 	jwksChanges         <-chan JwksSource
 	sourcesByOwner      map[OwnerKey]JwksSource
 	ownersByRequestKey  map[RequestKey]map[OwnerKey]JwksSource
@@ -38,7 +38,7 @@ func NewStore(cli apiclient.Client, krtOptions krtutil.KrtOptions, jwksChanges <
 		jwksCache:           jwksCache,
 		jwksChanges:         jwksChanges,
 		jwksFetcher:         newFetcher(jwksCache),
-		configMapSyncer:     newConfigMapSyncer(cli, storePrefix, deploymentNamespace, krtOptions),
+		persistedKeysets:    newPersistedKeysetReader(cli, storePrefix, deploymentNamespace, krtOptions),
 		sourcesByOwner:      make(map[OwnerKey]JwksSource),
 		ownersByRequestKey:  make(map[RequestKey]map[OwnerKey]JwksSource),
 		ready:               make(chan struct{}),
@@ -59,7 +59,7 @@ type requestAction struct {
 func (s *Store) Start(ctx context.Context) error {
 	logger.Info("starting jwks store")
 
-	storedJwks, err := s.configMapSyncer.LoadJwksFromConfigMaps(ctx)
+	storedJwks, err := s.persistedKeysets.LoadPersistedKeysets(ctx)
 	if err != nil {
 		logger.Error("error loading jwks store from a ConfigMap", "error", err)
 	}

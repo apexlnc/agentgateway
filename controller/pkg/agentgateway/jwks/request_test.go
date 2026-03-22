@@ -20,7 +20,7 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/utils/fsutils"
 )
 
-func TestBuildRequest(t *testing.T) {
+func TestResolveEndpoint(t *testing.T) {
 	var mockCtx plugins.PolicyCtx
 
 	var tests = []struct {
@@ -160,18 +160,30 @@ func TestBuildRequest(t *testing.T) {
 			assert.NotNil(t, pol.Spec.Traffic.JWTAuthentication)
 			assert.Len(t, pol.Spec.Traffic.JWTAuthentication.Providers, 1)
 			assert.NotNil(t, pol.Spec.Traffic.JWTAuthentication.Providers[0].JWKS.Remote)
-			request, tlsConfig, err := jwks.BuildRequest(tt.ctx.Krt, runtimeWiring.RemoteHTTPResolver, "gw-policy", "default", pol.Spec.Traffic.JWTAuthentication.Providers[0].JWKS.Remote)
-			assert.Equal(t, tt.expectedUrl, request.URL)
-			if tt.expectedTls != nil {
-				assert.Equal(t, tt.expectedTls.ServerName, tlsConfig.ServerName)
-				assert.Equal(t, tt.expectedTls.NextProtos, tlsConfig.NextProtos)
-				assert.Equal(t, tt.expectedTls.InsecureSkipVerify, tlsConfig.InsecureSkipVerify)
-				assert.True(t, tt.expectedTls.RootCAs.Equal(tlsConfig.RootCAs)) // must use CertPool.Equal() for equality check
-			} else {
-				assert.Nil(t, tlsConfig)
+			endpoint, err := jwks.ResolveEndpoint(tt.ctx.Krt, runtimeWiring.RemoteHTTPResolver, "gw-policy", "default", pol.Spec.Traffic.JWTAuthentication.Providers[0].JWKS.Remote)
+			if tt.expectedError != nil {
+				assert.EqualError(t, err, tt.expectedError.Error())
+				assert.Nil(t, endpoint)
+				return
 			}
-			assert.Equal(t, tt.expectedError, err)
-			assert.Equal(t, jwks.RequestKey(request.Key()), request.Key())
+
+			if !assert.NoError(t, err) {
+				return
+			}
+			assert.NotNil(t, endpoint)
+			assert.Equal(t, tt.expectedUrl, endpoint.Request.URL)
+			if tt.expectedTls != nil {
+				if !assert.NotNil(t, endpoint.TLSConfig) {
+					return
+				}
+				assert.Equal(t, tt.expectedTls.ServerName, endpoint.TLSConfig.ServerName)
+				assert.Equal(t, tt.expectedTls.NextProtos, endpoint.TLSConfig.NextProtos)
+				assert.Equal(t, tt.expectedTls.InsecureSkipVerify, endpoint.TLSConfig.InsecureSkipVerify)
+				assert.True(t, tt.expectedTls.RootCAs.Equal(endpoint.TLSConfig.RootCAs)) // must use CertPool.Equal() for equality check
+			} else {
+				assert.Nil(t, endpoint.TLSConfig)
+			}
+			assert.Equal(t, endpoint.Key, endpoint.Request.Key())
 		})
 	}
 }

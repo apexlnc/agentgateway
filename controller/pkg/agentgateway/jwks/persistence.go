@@ -30,20 +30,22 @@ func JwksStoreConfigMapLabel(storePrefix string) map[string]string {
 	return map[string]string{jwksStoreComponentLabel: storePrefix}
 }
 
-type configMapSyncer struct {
+// persistedKeysetReader provides an informer-backed read view of persisted
+// JWKS ConfigMaps. It is separate from ConfigMapController, which owns writeback.
+type persistedKeysetReader struct {
 	storePrefix         string
 	deploymentNamespace string
 	cmCollection        krt.Collection[*corev1.ConfigMap]
 }
 
-func newConfigMapSyncer(client apiclient.Client, storePrefix, deploymentNamespace string, krtOptions krtutil.KrtOptions) *configMapSyncer {
+func newPersistedKeysetReader(client apiclient.Client, storePrefix, deploymentNamespace string, krtOptions krtutil.KrtOptions) *persistedKeysetReader {
 	cmCollection := krt.NewFilteredInformer[*corev1.ConfigMap](client,
 		kclient.Filter{
 			ObjectFilter:  client.ObjectFilter(),
 			LabelSelector: JwksStoreLabelSelector(storePrefix)},
-		krtOptions.ToOptions("config_map_syncer/ConfigMaps")...)
+		krtOptions.ToOptions("persisted_keyset_reader/ConfigMaps")...)
 
-	return &configMapSyncer{
+	return &persistedKeysetReader{
 		deploymentNamespace: deploymentNamespace,
 		storePrefix:         storePrefix,
 		cmCollection:        cmCollection,
@@ -111,7 +113,7 @@ func SetJwksInConfigMap(cm *corev1.ConfigMap, keyset Keyset) error {
 	return nil
 }
 
-func (cs *configMapSyncer) LoadJwksFromConfigMaps(ctx context.Context) ([]Keyset, error) {
+func (cs *persistedKeysetReader) LoadPersistedKeysets(ctx context.Context) ([]Keyset, error) {
 	log := log.FromContext(ctx)
 
 	kube.WaitForCacheSync("JWKS ConfigMaps", ctx.Done(), cs.cmCollection.HasSynced)

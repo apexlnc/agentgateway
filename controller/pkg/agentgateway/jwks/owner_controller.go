@@ -91,7 +91,7 @@ func (j *OwnerController) NeedLeaderElection() bool {
 	return true
 }
 
-func (j *OwnerController) JwksChanges() chan JwksSource {
+func (j *OwnerController) JwksChanges() <-chan JwksSource {
 	return j.jwksChanges
 }
 
