@@ -13,6 +13,7 @@ use crate::http::auth::BackendAuth;
 use crate::http::authorization::{HTTPAuthorizationSet, NetworkAuthorizationSet};
 use crate::http::backendtls::BackendTLS;
 use crate::http::ext_proc::InferenceRouting;
+use crate::http::oidc;
 use crate::http::{ext_authz, ext_proc, filters, health, remoteratelimit, retry, timeout};
 use crate::llm::policy::ResponseGuard;
 use crate::mcp::McpAuthorizationSet;
@@ -230,6 +231,7 @@ pub struct RoutePolicies {
 	pub remote_rate_limit: Option<remoteratelimit::RemoteRateLimit>,
 	pub authorization: Option<http::authorization::HTTPAuthorizationSet>,
 	pub jwt: Option<JwtAuthentication>,
+	pub oidc: Option<oidc::OidcPolicy>,
 	pub basic_auth: Option<http::basicauth::BasicAuthentication>,
 	pub api_key: Option<http::apikey::APIKeyAuthentication>,
 	pub ext_authz: Option<ext_authz::ExtAuthz>,
@@ -521,6 +523,9 @@ impl Store {
 				},
 				TrafficPolicy::JwtAuth(p) => {
 					pol.jwt.get_or_insert_with(|| p.clone());
+				},
+				TrafficPolicy::Oidc(p) => {
+					pol.oidc.get_or_insert_with(|| p.clone());
 				},
 				TrafficPolicy::BasicAuth(p) => {
 					pol.basic_auth.get_or_insert_with(|| p.clone());

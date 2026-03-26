@@ -658,6 +658,7 @@ impl Listener {
 				.into(),
 			hostname: s.hostname.clone().into(),
 			protocol,
+			oidc: None,
 			routes: Default::default(),
 			tcp_routes: Default::default(),
 		};
