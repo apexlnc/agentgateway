@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
@@ -71,7 +72,7 @@ func JwksFromConfigMap(cm *corev1.ConfigMap) (Keyset, error) {
 
 	for uri, jwksJSON := range legacy {
 		return Keyset{
-			RequestKey: Request{URL: uri}.Key(),
+			RequestKey: remotehttp.FetchTarget{URL: uri}.Key(),
 			URL:        uri,
 			JwksJSON:   jwksJSON,
 		}, nil
@@ -81,7 +82,7 @@ func JwksFromConfigMap(cm *corev1.ConfigMap) (Keyset, error) {
 	return Keyset{}, errors.New("unexpected legacy jwks state")
 }
 
-func RequestKeyFromConfigMap(cm *corev1.ConfigMap) (RequestKey, error) {
+func RequestKeyFromConfigMap(cm *corev1.ConfigMap) (remotehttp.FetchKey, error) {
 	keyset, err := JwksFromConfigMap(cm)
 	if err != nil {
 		return "", err
@@ -89,12 +90,12 @@ func RequestKeyFromConfigMap(cm *corev1.ConfigMap) (RequestKey, error) {
 	return keyset.RequestKey, nil
 }
 
-func JwksConfigMapName(storePrefix string, requestKey RequestKey) string {
+func JwksConfigMapName(storePrefix string, requestKey remotehttp.FetchKey) string {
 	sum := sha256.Sum256([]byte(requestKey))
 	return fmt.Sprintf("%s-%s", storePrefix, hex.EncodeToString(sum[:]))
 }
 
-func JwksConfigMapNamespacedName(storePrefix, namespace string, requestKey RequestKey) types.NamespacedName {
+func JwksConfigMapNamespacedName(storePrefix, namespace string, requestKey remotehttp.FetchKey) types.NamespacedName {
 	return types.NamespacedName{
 		Namespace: namespace,
 		Name:      JwksConfigMapName(storePrefix, requestKey),

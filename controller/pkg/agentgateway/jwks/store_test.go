@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
 func TestStoreKeepsSharedRequestAliveUntilLastOwnerIsRemoved(t *testing.T) {
@@ -12,22 +14,22 @@ func TestStoreKeepsSharedRequestAliveUntilLastOwnerIsRemoved(t *testing.T) {
 		storePrefix:         DefaultJwksStorePrefix,
 		deploymentNamespace: "agentgateway-system",
 		sourcesByOwner:      make(map[OwnerKey]JwksSource),
-		ownersByRequestKey:  make(map[RequestKey]map[OwnerKey]JwksSource),
+		ownersByRequestKey:  make(map[remotehttp.FetchKey]map[OwnerKey]JwksSource),
 	}
 
-	req := Request{URL: "https://issuer.example/jwks"}
-	key := req.Key()
+	target := remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}
+	key := target.Key()
 
 	first := JwksSource{
 		OwnerKey:   testOwner("one"),
 		RequestKey: key,
-		Request:    req,
+		Target:     target,
 		TTL:        10 * time.Minute,
 	}
 	second := JwksSource{
 		OwnerKey:   testOwner("two"),
 		RequestKey: key,
-		Request:    req,
+		Target:     target,
 		TTL:        5 * time.Minute,
 	}
 
@@ -62,14 +64,14 @@ func TestStoreMovingOwnerRemovesOrphanedPreviousRequest(t *testing.T) {
 		storePrefix:         DefaultJwksStorePrefix,
 		deploymentNamespace: "agentgateway-system",
 		sourcesByOwner:      make(map[OwnerKey]JwksSource),
-		ownersByRequestKey:  make(map[RequestKey]map[OwnerKey]JwksSource),
+		ownersByRequestKey:  make(map[remotehttp.FetchKey]map[OwnerKey]JwksSource),
 	}
 
 	owner := testOwner("one")
-	requestA := Request{URL: "https://issuer.example/a"}
-	requestB := Request{URL: "https://issuer.example/b"}
-	sourceA := JwksSource{OwnerKey: owner, RequestKey: requestA.Key(), Request: requestA, TTL: 10 * time.Minute}
-	sourceB := JwksSource{OwnerKey: owner, RequestKey: requestB.Key(), Request: requestB, TTL: 15 * time.Minute}
+	targetA := remotehttp.FetchTarget{URL: "https://issuer.example/a"}
+	targetB := remotehttp.FetchTarget{URL: "https://issuer.example/b"}
+	sourceA := JwksSource{OwnerKey: owner, RequestKey: targetA.Key(), Target: targetA, TTL: 10 * time.Minute}
+	sourceB := JwksSource{OwnerKey: owner, RequestKey: targetB.Key(), Target: targetB, TTL: 15 * time.Minute}
 
 	store.applyOwnerUpdate(sourceA)
 	update := store.applyOwnerUpdate(sourceB)
@@ -90,24 +92,24 @@ func TestStoreMovingOwnerRecomputesPreviousSharedRequest(t *testing.T) {
 		storePrefix:         DefaultJwksStorePrefix,
 		deploymentNamespace: "agentgateway-system",
 		sourcesByOwner:      make(map[OwnerKey]JwksSource),
-		ownersByRequestKey:  make(map[RequestKey]map[OwnerKey]JwksSource),
+		ownersByRequestKey:  make(map[remotehttp.FetchKey]map[OwnerKey]JwksSource),
 	}
 
-	requestA := Request{URL: "https://issuer.example/shared"}
-	requestB := Request{URL: "https://issuer.example/new"}
-	keyA := requestA.Key()
-	keyB := requestB.Key()
+	targetA := remotehttp.FetchTarget{URL: "https://issuer.example/shared"}
+	targetB := remotehttp.FetchTarget{URL: "https://issuer.example/new"}
+	keyA := targetA.Key()
+	keyB := targetB.Key()
 
 	movingOwner := JwksSource{
 		OwnerKey:   testOwner("one"),
 		RequestKey: keyA,
-		Request:    requestA,
+		Target:     targetA,
 		TTL:        5 * time.Minute,
 	}
 	stayingOwner := JwksSource{
 		OwnerKey:   testOwner("two"),
 		RequestKey: keyA,
-		Request:    requestA,
+		Target:     targetA,
 		TTL:        10 * time.Minute,
 	}
 
@@ -116,7 +118,7 @@ func TestStoreMovingOwnerRecomputesPreviousSharedRequest(t *testing.T) {
 	update := store.applyOwnerUpdate(JwksSource{
 		OwnerKey:   movingOwner.OwnerKey,
 		RequestKey: keyB,
-		Request:    requestB,
+		Target:     targetB,
 		TTL:        movingOwner.TTL,
 	})
 
@@ -152,6 +154,6 @@ func testOwner(name string) OwnerKey {
 		Kind:      OwnerKindPolicy,
 		Namespace: "default",
 		Name:      name,
-		Path:      "spec.targetRefs[0].traffic.jwtAuthentication.providers[0].jwks.remote",
+		Path:      "spec.traffic.jwtAuthentication.providers[0].jwks.remote",
 	}
 }

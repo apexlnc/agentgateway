@@ -8,7 +8,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	jwks "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
+	remotehttp "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	jose "github.com/go-jose/go-jose/v4"
 	gomock "github.com/golang/mock/gomock"
 )
@@ -37,7 +37,7 @@ func (m *MockJwksHttpClient) EXPECT() *MockJwksHttpClientMockRecorder {
 }
 
 // FetchJwks mocks base method.
-func (m *MockJwksHttpClient) FetchJwks(ctx context.Context, req jwks.Request) (jose.JSONWebKeySet, error) {
+func (m *MockJwksHttpClient) FetchJwks(ctx context.Context, req remotehttp.FetchTarget) (jose.JSONWebKeySet, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "FetchJwks", ctx, req)
 	ret0, _ := ret[0].(jose.JSONWebKeySet)

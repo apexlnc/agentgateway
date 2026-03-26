@@ -4,6 +4,9 @@ import (
 	"context"
 	"sync"
 
+	"istio.io/istio/pkg/util/sets"
+
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
 	"github.com/agentgateway/agentgateway/controller/pkg/common"
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
@@ -23,7 +26,7 @@ type Store struct {
 	persistedKeysets    *persistedKeysetReader
 	jwksChanges         <-chan JwksSource
 	sourcesByOwner      map[OwnerKey]JwksSource
-	ownersByRequestKey  map[RequestKey]map[OwnerKey]JwksSource
+	ownersByRequestKey  map[remotehttp.FetchKey]map[OwnerKey]JwksSource
 	l                   sync.Mutex
 	ready               chan struct{}
 }
@@ -40,7 +43,7 @@ func NewStore(cli apiclient.Client, krtOptions krtutil.KrtOptions, jwksChanges <
 		jwksFetcher:         newFetcher(jwksCache),
 		persistedKeysets:    newPersistedKeysetReader(cli, storePrefix, deploymentNamespace, krtOptions),
 		sourcesByOwner:      make(map[OwnerKey]JwksSource),
-		ownersByRequestKey:  make(map[RequestKey]map[OwnerKey]JwksSource),
+		ownersByRequestKey:  make(map[remotehttp.FetchKey]map[OwnerKey]JwksSource),
 		ready:               make(chan struct{}),
 	}
 	return jwksStore
@@ -51,7 +54,7 @@ type storeUpdate struct {
 }
 
 type requestAction struct {
-	requestKey RequestKey
+	requestKey remotehttp.FetchKey
 	upsert     *JwksSource
 	delete     bool
 }
@@ -85,11 +88,11 @@ func (s *Store) HasSynced() bool {
 	}
 }
 
-func (s *Store) SubscribeToUpdates() <-chan map[RequestKey]struct{} {
+func (s *Store) SubscribeToUpdates() <-chan sets.Set[remotehttp.FetchKey] {
 	return s.jwksFetcher.SubscribeToUpdates()
 }
 
-func (s *Store) JwksByRequestKey(requestKey RequestKey) (Keyset, bool) {
+func (s *Store) JwksByRequestKey(requestKey remotehttp.FetchKey) (Keyset, bool) {
 	return s.jwksCache.GetJwks(requestKey)
 }
 
@@ -116,7 +119,7 @@ func (s *Store) updateJwksSources(ctx context.Context) {
 
 				logger.Debug("updating keyset", "request_key", action.upsert.RequestKey, "config_map", JwksConfigMapName(s.storePrefix, action.upsert.RequestKey))
 				if err := s.jwksFetcher.AddOrUpdateKeyset(*action.upsert); err != nil {
-					logger.Error("error adding/updating a jwks keyset", "error", err, "request_key", action.upsert.RequestKey, "uri", action.upsert.Request.URL)
+					logger.Error("error adding/updating a jwks keyset", "error", err, "request_key", action.upsert.RequestKey, "uri", action.upsert.Target.URL)
 				}
 			}
 		case <-ctx.Done():
@@ -161,7 +164,7 @@ func (s *Store) removeOwner(ownerKey OwnerKey) storeUpdate {
 	return storeUpdate{actions: []requestAction{s.reconcileRequestLocked(existing.RequestKey)}}
 }
 
-func (s *Store) deleteOwnerLocked(ownerKey OwnerKey, requestKey RequestKey) {
+func (s *Store) deleteOwnerLocked(ownerKey OwnerKey, requestKey remotehttp.FetchKey) {
 	delete(s.sourcesByOwner, ownerKey)
 	owners := s.ownersByRequestKey[requestKey]
 	delete(owners, ownerKey)
@@ -170,7 +173,7 @@ func (s *Store) deleteOwnerLocked(ownerKey OwnerKey, requestKey RequestKey) {
 	}
 }
 
-func (s *Store) reconcileRequestLocked(requestKey RequestKey) requestAction {
+func (s *Store) reconcileRequestLocked(requestKey remotehttp.FetchKey) requestAction {
 	owners := s.ownersByRequestKey[requestKey]
 	if len(owners) == 0 {
 		return requestAction{requestKey: requestKey, delete: true}

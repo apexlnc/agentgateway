@@ -10,7 +10,7 @@ import (
 
 type FetchKey string
 
-func (r Request) Key() FetchKey {
+func (r FetchTarget) Key() FetchKey {
 	transport := r.Transport
 
 	hash := sha256.New()

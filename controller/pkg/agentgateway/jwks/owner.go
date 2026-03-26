@@ -47,41 +47,27 @@ func (o RemoteJwksOwner) Equals(other RemoteJwksOwner) bool {
 }
 
 func OwnersFromPolicy(policy *agentgateway.AgentgatewayPolicy) []RemoteJwksOwner {
+	if len(policy.Spec.TargetRefs) == 0 {
+		return nil
+	}
+
 	var owners []RemoteJwksOwner
 
-	for targetIdx := range policy.Spec.TargetRefs {
-		if policy.Spec.Traffic != nil && policy.Spec.Traffic.JWTAuthentication != nil {
-			for providerIdx, provider := range policy.Spec.Traffic.JWTAuthentication.Providers {
-				if provider.JWKS.Remote == nil {
-					continue
-				}
-				owners = append(owners, RemoteJwksOwner{
-					ID: JwksOwnerID{
-						Kind:      OwnerKindPolicy,
-						Namespace: policy.Namespace,
-						Name:      policy.Name,
-						Path:      fmt.Sprintf("spec.targetRefs[%d].traffic.jwtAuthentication.providers[%d].jwks.remote", targetIdx, providerIdx),
-					},
-					DefaultNamespace: policy.Namespace,
-					Remote:           *provider.JWKS.Remote,
-					TTL:              ttlForRemote(*provider.JWKS.Remote),
-				})
+	if policy.Spec.Traffic != nil && policy.Spec.Traffic.JWTAuthentication != nil {
+		for providerIdx, provider := range policy.Spec.Traffic.JWTAuthentication.Providers {
+			if provider.JWKS.Remote == nil {
+				continue
 			}
+			owners = append(owners, PolicyJWTProviderLookupOwner(policy.Namespace, policy.Name, providerIdx, *provider.JWKS.Remote))
 		}
+	}
 
-		if policy.Spec.Backend != nil && policy.Spec.Backend.MCP != nil && policy.Spec.Backend.MCP.Authentication != nil {
-			owners = append(owners, RemoteJwksOwner{
-				ID: JwksOwnerID{
-					Kind:      OwnerKindPolicy,
-					Namespace: policy.Namespace,
-					Name:      policy.Name,
-					Path:      fmt.Sprintf("spec.targetRefs[%d].backend.mcp.authentication.jwks", targetIdx),
-				},
-				DefaultNamespace: policy.Namespace,
-				Remote:           policy.Spec.Backend.MCP.Authentication.JWKS,
-				TTL:              ttlForRemote(policy.Spec.Backend.MCP.Authentication.JWKS),
-			})
-		}
+	if policy.Spec.Backend != nil && policy.Spec.Backend.MCP != nil && policy.Spec.Backend.MCP.Authentication != nil {
+		owners = append(owners, PolicyBackendMCPAuthenticationLookupOwner(
+			policy.Namespace,
+			policy.Name,
+			policy.Spec.Backend.MCP.Authentication.JWKS,
+		))
 	}
 
 	return owners
@@ -92,17 +78,11 @@ func OwnersFromBackend(backend *agentgateway.AgentgatewayBackend) []RemoteJwksOw
 		return nil
 	}
 
-	return []RemoteJwksOwner{{
-		ID: JwksOwnerID{
-			Kind:      OwnerKindBackend,
-			Namespace: backend.Namespace,
-			Name:      backend.Name,
-			Path:      "spec.policies.mcp.authentication.jwks",
-		},
-		DefaultNamespace: backend.Namespace,
-		Remote:           backend.Spec.Policies.MCP.Authentication.JWKS,
-		TTL:              ttlForRemote(backend.Spec.Policies.MCP.Authentication.JWKS),
-	}}
+	return []RemoteJwksOwner{backendMCPAuthenticationOwner(
+		backend.Namespace,
+		backend.Name,
+		backend.Spec.Policies.MCP.Authentication.JWKS,
+	)}
 }
 
 func PolicyJWTProviderLookupOwner(namespace, name string, providerIndex int, remote agentgateway.RemoteJWKS) RemoteJwksOwner {
@@ -126,6 +106,20 @@ func PolicyBackendMCPAuthenticationLookupOwner(namespace, name string, remote ag
 			Namespace: namespace,
 			Name:      name,
 			Path:      "spec.backend.mcp.authentication.jwks",
+		},
+		DefaultNamespace: namespace,
+		Remote:           remote,
+		TTL:              ttlForRemote(remote),
+	}
+}
+
+func backendMCPAuthenticationOwner(namespace, name string, remote agentgateway.RemoteJWKS) RemoteJwksOwner {
+	return RemoteJwksOwner{
+		ID: JwksOwnerID{
+			Kind:      OwnerKindBackend,
+			Namespace: namespace,
+			Name:      name,
+			Path:      "spec.policies.mcp.authentication.jwks",
 		},
 		DefaultNamespace: namespace,
 		Remote:           remote,

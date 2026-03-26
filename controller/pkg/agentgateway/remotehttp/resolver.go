@@ -29,7 +29,7 @@ type ResolveInput struct {
 }
 
 type Resolver interface {
-	Resolve(krtctx krt.HandlerContext, input ResolveInput) (*ResolvedEndpoint, error)
+	Resolve(krtctx krt.HandlerContext, input ResolveInput) (*ResolvedTarget, error)
 }
 
 type defaultResolver struct {
@@ -54,33 +54,33 @@ func NewResolver(inputs Inputs) Resolver {
 	}
 }
 
-func (r *defaultResolver) Resolve(krtctx krt.HandlerContext, input ResolveInput) (*ResolvedEndpoint, error) {
+func (r *defaultResolver) Resolve(krtctx krt.HandlerContext, input ResolveInput) (*ResolvedTarget, error) {
 	path := strings.TrimPrefix(input.Path, "/")
 	resolved, err := r.resolveConnection(krtctx, input.ParentName, input.DefaultNamespace, input.BackendRef, input.DefaultPort)
 	if err != nil {
 		return nil, err
 	}
 
-	request := Request{}
+	target := FetchTarget{}
 	if resolved.tls == nil {
-		request.URL = fmt.Sprintf("http://%s/%s", resolved.connectHost, path)
-		return &ResolvedEndpoint{
-			Key:     request.Key(),
-			Request: request,
+		target.URL = fmt.Sprintf("http://%s/%s", resolved.connectHost, path)
+		return &ResolvedTarget{
+			Key:    target.Key(),
+			Target: target,
 		}, nil
 	}
 
-	request.URL = fmt.Sprintf("https://%s/%s", resolved.connectHost, path)
-	request.Transport = TransportFingerprint{
+	target.URL = fmt.Sprintf("https://%s/%s", resolved.connectHost, path)
+	target.Transport = TransportFingerprint{
 		Verification: resolved.tls.verification,
 		ServerName:   resolved.tls.serverName,
 		CABundleHash: resolved.tls.caBundleHash,
 		NextProtos:   append([]string(nil), resolved.tls.nextProtos...),
 	}
 
-	return &ResolvedEndpoint{
-		Key:       request.Key(),
-		Request:   request,
+	return &ResolvedTarget{
+		Key:       target.Key(),
+		Target:    target,
 		TLSConfig: resolved.tls.tlsConfig,
 	}, nil
 }

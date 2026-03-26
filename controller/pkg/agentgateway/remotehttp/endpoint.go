@@ -2,13 +2,13 @@ package remotehttp
 
 import "crypto/tls"
 
-type Request struct {
+type FetchTarget struct {
 	URL       string               `json:"url"`
 	Transport TransportFingerprint `json:"transport,omitempty"`
 }
 
-type ResolvedEndpoint struct {
+type ResolvedTarget struct {
 	Key       FetchKey
-	Request   Request
+	Target    FetchTarget
 	TLSConfig *tls.Config
 }

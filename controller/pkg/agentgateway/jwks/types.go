@@ -7,21 +7,17 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
-type RequestKey = remotehttp.FetchKey
-type Request = remotehttp.Request
-type Transport = remotehttp.TransportFingerprint
-
 type Keyset struct {
-	RequestKey RequestKey `json:"requestKey"`
-	URL        string     `json:"url"`
-	FetchedAt  time.Time  `json:"fetchedAt"`
-	JwksJSON   string     `json:"jwks"`
+	RequestKey remotehttp.FetchKey `json:"requestKey"`
+	URL        string              `json:"url"`
+	FetchedAt  time.Time           `json:"fetchedAt"`
+	JwksJSON   string              `json:"jwks"`
 }
 
 type JwksSource struct {
 	OwnerKey   OwnerKey
-	RequestKey RequestKey
-	Request    Request
+	RequestKey remotehttp.FetchKey
+	Target     remotehttp.FetchTarget
 	TLSConfig  *tls.Config
 	TTL        time.Duration
 	Deleted    bool

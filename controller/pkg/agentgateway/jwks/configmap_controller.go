@@ -8,6 +8,7 @@ import (
 	"golang.org/x/time/rate"
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/kclient"
+	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 )
@@ -28,7 +30,7 @@ type ConfigMapController struct {
 	apiClient           apiclient.Client
 	cmClient            kclient.Client[*corev1.ConfigMap]
 	eventQueue          controllers.Queue
-	jwksUpdates         <-chan map[RequestKey]struct{}
+	jwksUpdates         <-chan sets.Set[remotehttp.FetchKey]
 	store               *Store
 	deploymentNamespace string
 	storePrefix         string
@@ -127,7 +129,7 @@ func (jcm *ConfigMapController) Reconcile(req types.NamespacedName) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	requestKey := RequestKey(req.Name)
+	requestKey := remotehttp.FetchKey(req.Name)
 	plan := planConfigMapSync(requestKey, jcm.existingConfigMapsForRequestKey(req.Namespace, requestKey), jcm.storePrefix, jcm.store.JwksByRequestKey)
 
 	if plan.keyset != nil {
@@ -172,7 +174,7 @@ func (jcm *ConfigMapController) enqueueExistingConfigMaps() {
 	}
 }
 
-func (jcm *ConfigMapController) existingConfigMapsForRequestKey(namespace string, requestKey RequestKey) []*corev1.ConfigMap {
+func (jcm *ConfigMapController) existingConfigMapsForRequestKey(namespace string, requestKey remotehttp.FetchKey) []*corev1.ConfigMap {
 	var matches []*corev1.ConfigMap
 	for _, cm := range jcm.cmClient.List(namespace, labels.Everything()) {
 		storedRequestKey, err := RequestKeyFromConfigMap(cm)
@@ -216,7 +218,7 @@ func (jcm *ConfigMapController) upsertConfigMap(ctx context.Context, namespace, 
 	return nil
 }
 
-func requestQueueKey(namespace string, requestKey RequestKey) types.NamespacedName {
+func requestQueueKey(namespace string, requestKey remotehttp.FetchKey) types.NamespacedName {
 	return types.NamespacedName{
 		Namespace: namespace,
 		Name:      string(requestKey),
@@ -224,10 +226,10 @@ func requestQueueKey(namespace string, requestKey RequestKey) types.NamespacedNa
 }
 
 func planConfigMapSync(
-	requestKey RequestKey,
+	requestKey remotehttp.FetchKey,
 	existingCms []*corev1.ConfigMap,
 	storePrefix string,
-	lookup func(RequestKey) (Keyset, bool),
+	lookup func(remotehttp.FetchKey) (Keyset, bool),
 ) configMapSyncPlan {
 	if keyset, ok := lookup(requestKey); ok {
 		canonicalName := JwksConfigMapName(storePrefix, keyset.RequestKey)

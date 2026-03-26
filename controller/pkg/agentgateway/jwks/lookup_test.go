@@ -33,13 +33,13 @@ func (alwaysSynced) HasSynced() bool {
 
 func TestLookupFailsClosedWhenKeysetIsMissing(t *testing.T) {
 	stop := test.NewStop(t)
-	request := Request{URL: "https://issuer.example/jwks"}
+	target := remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}
 	lookupIndex := NewLookup(
 		krt.NewStaticCollection[*corev1.ConfigMap](alwaysSynced{}, nil),
 		staticLookupResolver{resolved: &ResolvedJwksRequest{
-			Endpoint: remotehttp.ResolvedEndpoint{
-				Key:     request.Key(),
-				Request: request,
+			Target: remotehttp.ResolvedTarget{
+				Key:    target.Key(),
+				Target: target,
 			},
 		}},
 		DefaultJwksStorePrefix,
@@ -55,15 +55,15 @@ func TestLookupFailsClosedWhenKeysetIsMissing(t *testing.T) {
 
 func TestLookupReturnsPersistedKeyset(t *testing.T) {
 	stop := test.NewStop(t)
-	request := Request{URL: "https://issuer.example/jwks"}
+	target := remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}
 	keyset := Keyset{
-		RequestKey: request.Key(),
-		URL:        request.URL,
+		RequestKey: target.Key(),
+		URL:        target.URL,
 		JwksJSON:   `{"keys":[]}`,
 	}
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      JwksConfigMapName(DefaultJwksStorePrefix, request.Key()),
+			Name:      JwksConfigMapName(DefaultJwksStorePrefix, target.Key()),
 			Namespace: "agentgateway-system",
 		},
 	}
@@ -72,9 +72,9 @@ func TestLookupReturnsPersistedKeyset(t *testing.T) {
 	lookupIndex := NewLookup(
 		krt.NewStaticCollection[*corev1.ConfigMap](alwaysSynced{}, []*corev1.ConfigMap{cm}),
 		staticLookupResolver{resolved: &ResolvedJwksRequest{
-			Endpoint: remotehttp.ResolvedEndpoint{
-				Key:     request.Key(),
-				Request: request,
+			Target: remotehttp.ResolvedTarget{
+				Key:    target.Key(),
+				Target: target,
 			},
 		}},
 		DefaultJwksStorePrefix,

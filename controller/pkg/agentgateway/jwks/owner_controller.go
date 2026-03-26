@@ -104,9 +104,9 @@ func (j *OwnerController) resolveOwner(krtctx krt.HandlerContext, owner RemoteJw
 
 	return &JwksSource{
 		OwnerKey:   resolved.OwnerID,
-		RequestKey: resolved.Endpoint.Key,
-		Request:    resolved.Endpoint.Request,
-		TLSConfig:  resolved.Endpoint.TLSConfig,
+		RequestKey: resolved.Target.Key,
+		Target:     resolved.Target.Target,
+		TLSConfig:  resolved.Target.TLSConfig,
 		TTL:        resolved.TTL,
 	}
 }

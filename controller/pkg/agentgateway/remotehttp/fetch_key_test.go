@@ -9,20 +9,20 @@ import (
 func TestRequestKeyIncludesTransportSemantics(t *testing.T) {
 	t.Parallel()
 
-	strict := Request{
+	strict := FetchTarget{
 		URL: "https://issuer.example/jwks",
 		Transport: TransportFingerprint{
 			CABundleHash: "ca-a",
 		},
 	}
-	hostname := Request{
+	hostname := FetchTarget{
 		URL: "https://issuer.example/jwks",
 		Transport: TransportFingerprint{
 			Verification: agentgateway.InsecureTLSModeHostname,
 			CABundleHash: "ca-a",
 		},
 	}
-	differentCA := Request{
+	differentCA := FetchTarget{
 		URL: "https://issuer.example/jwks",
 		Transport: TransportFingerprint{
 			CABundleHash: "ca-b",
@@ -42,20 +42,20 @@ func TestRequestKeyPreservesVerificationFingerprintCompatibility(t *testing.T) {
 
 	url := "https://issuer.example/jwks"
 
-	strict := Request{
+	strict := FetchTarget{
 		URL: url,
 		Transport: TransportFingerprint{
 			CABundleHash: "ca-a",
 		},
 	}
-	hostname := Request{
+	hostname := FetchTarget{
 		URL: url,
 		Transport: TransportFingerprint{
 			Verification: agentgateway.InsecureTLSModeHostname,
 			CABundleHash: "ca-a",
 		},
 	}
-	insecure := Request{
+	insecure := FetchTarget{
 		URL: url,
 		Transport: TransportFingerprint{
 			Verification: agentgateway.InsecureTLSModeAll,
@@ -77,7 +77,7 @@ func TestRequestKeyPreservesVerificationFingerprintCompatibility(t *testing.T) {
 func TestRequestKeyPreservesPlainHTTPCompatibility(t *testing.T) {
 	t.Parallel()
 
-	request := Request{
+	request := FetchTarget{
 		URL: "http://keycloak.default.svc.cluster.local:7080/realms/mcp/protocol/openid-connect/certs",
 	}
 
@@ -89,13 +89,13 @@ func TestRequestKeyPreservesPlainHTTPCompatibility(t *testing.T) {
 func TestRequestKeyPreservesALPNOrder(t *testing.T) {
 	t.Parallel()
 
-	first := Request{
+	first := FetchTarget{
 		URL: "https://issuer.example/jwks",
 		Transport: TransportFingerprint{
 			NextProtos: []string{"h2", "http/1.1"},
 		},
 	}
-	second := Request{
+	second := FetchTarget{
 		URL: "https://issuer.example/jwks",
 		Transport: TransportFingerprint{
 			NextProtos: []string{"http/1.1", "h2"},

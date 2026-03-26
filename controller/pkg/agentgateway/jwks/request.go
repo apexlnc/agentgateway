@@ -19,7 +19,7 @@ func ResolveEndpoint(
 	resolver remotehttp.Resolver,
 	policyName, defaultNS string,
 	remoteProvider *agentgateway.RemoteJWKS,
-) (*remotehttp.ResolvedEndpoint, error) {
+) (*remotehttp.ResolvedTarget, error) {
 	if resolver == nil {
 		return nil, errResolverNotInitialized
 	}

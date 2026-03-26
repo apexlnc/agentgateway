@@ -171,7 +171,7 @@ func TestResolveEndpoint(t *testing.T) {
 				return
 			}
 			assert.NotNil(t, endpoint)
-			assert.Equal(t, tt.expectedUrl, endpoint.Request.URL)
+			assert.Equal(t, tt.expectedUrl, endpoint.Target.URL)
 			if tt.expectedTls != nil {
 				if !assert.NotNil(t, endpoint.TLSConfig) {
 					return
@@ -183,7 +183,7 @@ func TestResolveEndpoint(t *testing.T) {
 			} else {
 				assert.Nil(t, endpoint.TLSConfig)
 			}
-			assert.Equal(t, endpoint.Key, endpoint.Request.Key())
+			assert.Equal(t, endpoint.Key, endpoint.Target.Key())
 		})
 	}
 }

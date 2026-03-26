@@ -5,15 +5,17 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
 func TestPlanConfigMapSyncKeepsCanonicalConfigMap(t *testing.T) {
 	keyset := Keyset{
-		RequestKey: Request{URL: "https://issuer.example/jwks"}.Key(),
+		RequestKey: remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}.Key(),
 		URL:        "https://issuer.example/jwks",
 		JwksJSON:   `{"keys":[]}`,
 	}
-	plan := planConfigMapSync(keyset.RequestKey, nil, DefaultJwksStorePrefix, func(requestKey RequestKey) (Keyset, bool) {
+	plan := planConfigMapSync(keyset.RequestKey, nil, DefaultJwksStorePrefix, func(requestKey remotehttp.FetchKey) (Keyset, bool) {
 		if requestKey == keyset.RequestKey {
 			return keyset, true
 		}
@@ -29,14 +31,14 @@ func TestPlanConfigMapSyncKeepsCanonicalConfigMap(t *testing.T) {
 
 func TestPlanConfigMapSyncDeletesInactiveConfigMap(t *testing.T) {
 	keyset := Keyset{
-		RequestKey: Request{URL: "https://issuer.example/jwks"}.Key(),
+		RequestKey: remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}.Key(),
 		URL:        "https://issuer.example/jwks",
 		JwksJSON:   `{"keys":[]}`,
 	}
 	cmName := JwksConfigMapName(DefaultJwksStorePrefix, keyset.RequestKey)
 	existingCm := configMapWithKeyset(t, cmName, "agentgateway-system", keyset)
 
-	plan := planConfigMapSync(keyset.RequestKey, []*corev1.ConfigMap{existingCm}, DefaultJwksStorePrefix, func(RequestKey) (Keyset, bool) {
+	plan := planConfigMapSync(keyset.RequestKey, []*corev1.ConfigMap{existingCm}, DefaultJwksStorePrefix, func(remotehttp.FetchKey) (Keyset, bool) {
 		return Keyset{}, false
 	})
 
@@ -46,9 +48,9 @@ func TestPlanConfigMapSyncDeletesInactiveConfigMap(t *testing.T) {
 }
 
 func TestPlanConfigMapSyncNoopsWhenConfigMapIsAlreadyGone(t *testing.T) {
-	requestKey := Request{URL: "https://issuer.example/jwks"}.Key()
+	requestKey := remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}.Key()
 
-	plan := planConfigMapSync(requestKey, nil, DefaultJwksStorePrefix, func(RequestKey) (Keyset, bool) {
+	plan := planConfigMapSync(requestKey, nil, DefaultJwksStorePrefix, func(remotehttp.FetchKey) (Keyset, bool) {
 		return Keyset{}, false
 	})
 
@@ -59,7 +61,7 @@ func TestPlanConfigMapSyncNoopsWhenConfigMapIsAlreadyGone(t *testing.T) {
 
 func TestPlanConfigMapSyncDeletesNonCanonicalConfigMapsForActiveRequest(t *testing.T) {
 	keyset := Keyset{
-		RequestKey: Request{URL: "https://issuer.example/jwks"}.Key(),
+		RequestKey: remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}.Key(),
 		URL:        "https://issuer.example/jwks",
 		JwksJSON:   `{"keys":[]}`,
 	}
@@ -72,7 +74,7 @@ func TestPlanConfigMapSyncDeletesNonCanonicalConfigMapsForActiveRequest(t *testi
 			configMapWithKeyset(t, legacyName, "agentgateway-system", keyset),
 		},
 		DefaultJwksStorePrefix,
-		func(requestKey RequestKey) (Keyset, bool) {
+		func(requestKey remotehttp.FetchKey) (Keyset, bool) {
 			if requestKey == keyset.RequestKey {
 				return keyset, true
 			}

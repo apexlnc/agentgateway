@@ -14,7 +14,10 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"istio.io/istio/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
 // fetcher fetches and periodically refreshes remote JWKS keysets.
@@ -23,10 +26,10 @@ type fetcher struct {
 	mu                sync.Mutex
 	cache             *jwksCache
 	defaultJwksClient JwksHttpClient
-	requests          map[RequestKey]fetchState
+	requests          map[remotehttp.FetchKey]fetchState
 	schedule          fetchingSchedule
-	scheduled         map[RequestKey]*fetchAt
-	subscribers       []chan map[RequestKey]struct{}
+	scheduled         map[remotehttp.FetchKey]*fetchAt
+	subscribers       []chan sets.Set[remotehttp.FetchKey]
 	wake              chan struct{}
 }
 
@@ -46,12 +49,12 @@ const (
 
 //go:generate mockgen -destination mocks/mock_jwks_http_client.go -package mocks -source ./jwks_fetcher.go
 type JwksHttpClient interface {
-	FetchJwks(ctx context.Context, req Request) (jose.JSONWebKeySet, error)
+	FetchJwks(ctx context.Context, target remotehttp.FetchTarget) (jose.JSONWebKeySet, error)
 }
 
 type fetchAt struct {
 	at           time.Time
-	requestKey   RequestKey
+	requestKey   remotehttp.FetchKey
 	generation   uint64
 	retryAttempt int
 	index        int
@@ -65,10 +68,10 @@ func newFetcher(cache *jwksCache) *fetcher {
 	fetcher := &fetcher{
 		cache:             cache,
 		defaultJwksClient: &jwksHttpClientImpl{Client: makeClient(nil)},
-		requests:          make(map[RequestKey]fetchState),
+		requests:          make(map[remotehttp.FetchKey]fetchState),
 		schedule:          make([]*fetchAt, 0),
-		scheduled:         make(map[RequestKey]*fetchAt),
-		subscribers:       make([]chan map[RequestKey]struct{}, 0),
+		scheduled:         make(map[remotehttp.FetchKey]*fetchAt),
+		subscribers:       make([]chan sets.Set[remotehttp.FetchKey], 0),
 		wake:              make(chan struct{}, 1),
 	}
 	heap.Init(&fetcher.schedule)
@@ -178,19 +181,19 @@ func (f *fetcher) maybeFetchJwks(ctx context.Context) {
 		return
 	}
 
-	updates := make(map[RequestKey]struct{})
+	updates := sets.New[remotehttp.FetchKey]()
 	for _, fetch := range due {
 		state, ok := f.lookup(fetch.requestKey)
 		if !ok || state.generation != fetch.generation {
 			continue
 		}
 
-		logger.Debug("fetching remote jwks", "request_key", fetch.requestKey, "jwks_uri", state.source.Request.URL)
+		logger.Debug("fetching remote jwks", "request_key", fetch.requestKey, "jwks_uri", state.source.Target.URL)
 
 		jwks, err := f.fetchJwks(ctx, state.source)
 		if err != nil {
 			next := nextRetryDelay(fetch.retryAttempt)
-			logger.Error("error fetching jwks", "request_key", fetch.requestKey, "jwks_uri", state.source.Request.URL, "error", err, "retryAttempt", fetch.retryAttempt, "next", next.String())
+			logger.Error("error fetching jwks", "request_key", fetch.requestKey, "jwks_uri", state.source.Target.URL, "error", err, "retryAttempt", fetch.retryAttempt, "next", next.String())
 			f.scheduleAt(fetch.requestKey, state.generation, now.Add(next), fetch.retryAttempt+1)
 			continue
 		}
@@ -200,34 +203,34 @@ func (f *fetcher) maybeFetchJwks(ctx context.Context) {
 			continue
 		}
 
-		if err := f.cache.addJwks(fetch.requestKey, state.source.Request.URL, jwks); err != nil {
-			logger.Error("error adding jwks", "request_key", fetch.requestKey, "jwks_uri", state.source.Request.URL, "error", err)
+		if err := f.cache.addJwks(fetch.requestKey, state.source.Target.URL, jwks); err != nil {
+			logger.Error("error adding jwks", "request_key", fetch.requestKey, "jwks_uri", state.source.Target.URL, "error", err)
 			next := nextRetryDelay(fetch.retryAttempt)
 			f.scheduleAt(fetch.requestKey, state.generation, now.Add(next), fetch.retryAttempt+1)
 			continue
 		}
 
 		f.scheduleAt(fetch.requestKey, state.generation, now.Add(state.source.TTL), 0)
-		updates[fetch.requestKey] = struct{}{}
+		updates.Insert(fetch.requestKey)
 	}
 
-	if len(updates) > 0 {
+	if !updates.IsEmpty() {
 		f.notifySubscribers(updates)
 	}
 }
 
-func (f *fetcher) SubscribeToUpdates() <-chan map[RequestKey]struct{} {
+func (f *fetcher) SubscribeToUpdates() <-chan sets.Set[remotehttp.FetchKey] {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	subscriber := make(chan map[RequestKey]struct{}, 1)
+	subscriber := make(chan sets.Set[remotehttp.FetchKey], 1)
 	f.subscribers = append(f.subscribers, subscriber)
 
 	return subscriber
 }
 
 func (f *fetcher) AddOrUpdateKeyset(source JwksSource) error {
-	if _, err := url.Parse(source.Request.URL); err != nil {
+	if _, err := url.Parse(source.Target.URL); err != nil {
 		return fmt.Errorf("error parsing jwks url %w", err)
 	}
 
@@ -243,7 +246,7 @@ func (f *fetcher) AddOrUpdateKeyset(source JwksSource) error {
 	return nil
 }
 
-func (f *fetcher) RemoveKeyset(requestKey RequestKey) {
+func (f *fetcher) RemoveKeyset(requestKey remotehttp.FetchKey) {
 	f.mu.Lock()
 	_, ok := f.requests[requestKey]
 	if ok {
@@ -260,7 +263,7 @@ func (f *fetcher) RemoveKeyset(requestKey RequestKey) {
 	}
 
 	f.cache.deleteJwks(requestKey)
-	f.notifySubscribers(map[RequestKey]struct{}{requestKey: {}})
+	f.notifySubscribers(sets.New(requestKey))
 
 	select {
 	case f.wake <- struct{}{}:
@@ -270,16 +273,16 @@ func (f *fetcher) RemoveKeyset(requestKey RequestKey) {
 
 func (f *fetcher) fetchJwks(ctx context.Context, source JwksSource) (jose.JSONWebKeySet, error) {
 	if source.TLSConfig != nil {
-		return (&jwksHttpClientImpl{Client: makeClient(source.TLSConfig)}).FetchJwks(ctx, source.Request)
+		return (&jwksHttpClientImpl{Client: makeClient(source.TLSConfig)}).FetchJwks(ctx, source.Target)
 	}
-	return f.defaultJwksClient.FetchJwks(ctx, source.Request)
+	return f.defaultJwksClient.FetchJwks(ctx, source.Target)
 }
 
-func (c *jwksHttpClientImpl) FetchJwks(ctx context.Context, req Request) (jose.JSONWebKeySet, error) {
+func (c *jwksHttpClientImpl) FetchJwks(ctx context.Context, target remotehttp.FetchTarget) (jose.JSONWebKeySet, error) {
 	log := log.FromContext(ctx)
-	log.Info("fetching jwks", "url", req.URL)
+	log.Info("fetching jwks", "url", target.URL)
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, req.URL, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.URL, nil)
 	if err != nil {
 		return jose.JSONWebKeySet{}, fmt.Errorf("could not build request to get JWKS: %w", err)
 	}
@@ -291,7 +294,7 @@ func (c *jwksHttpClientImpl) FetchJwks(ctx context.Context, req Request) (jose.J
 	defer response.Body.Close() //nolint:errcheck
 
 	if response.StatusCode != http.StatusOK {
-		return jose.JSONWebKeySet{}, fmt.Errorf("unexpected status code from jwks endpoint at %s: %d", req.URL, response.StatusCode)
+		return jose.JSONWebKeySet{}, fmt.Errorf("unexpected status code from jwks endpoint at %s: %d", target.URL, response.StatusCode)
 	}
 
 	var jwks jose.JSONWebKeySet
@@ -321,7 +324,7 @@ func (f *fetcher) popDue(now time.Time) []fetchAt {
 	}
 }
 
-func (f *fetcher) lookup(requestKey RequestKey) (fetchState, bool) {
+func (f *fetcher) lookup(requestKey remotehttp.FetchKey) (fetchState, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -329,14 +332,14 @@ func (f *fetcher) lookup(requestKey RequestKey) (fetchState, bool) {
 	return state, ok
 }
 
-func (f *fetcher) scheduleAt(requestKey RequestKey, generation uint64, at time.Time, retryAttempt int) {
+func (f *fetcher) scheduleAt(requestKey remotehttp.FetchKey, generation uint64, at time.Time, retryAttempt int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.scheduleAtLocked(requestKey, generation, at, retryAttempt)
 }
 
-func (f *fetcher) scheduleAtLocked(requestKey RequestKey, generation uint64, at time.Time, retryAttempt int) {
+func (f *fetcher) scheduleAtLocked(requestKey remotehttp.FetchKey, generation uint64, at time.Time, retryAttempt int) {
 	if _, ok := f.requests[requestKey]; !ok {
 		return
 	}
@@ -364,7 +367,7 @@ func (f *fetcher) scheduleAtLocked(requestKey RequestKey, generation uint64, at 
 	}
 }
 
-func (f *fetcher) notifySubscribers(updates map[RequestKey]struct{}) {
+func (f *fetcher) notifySubscribers(updates sets.Set[remotehttp.FetchKey]) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -372,19 +375,16 @@ func (f *fetcher) notifySubscribers(updates map[RequestKey]struct{}) {
 		merged := cloneRequestKeySet(updates)
 		select {
 		case existing := <-subscriber:
-			for requestKey := range existing {
-				merged[requestKey] = struct{}{}
-			}
+			merged.Merge(existing)
 		default:
 		}
 		subscriber <- merged
 	}
 }
 
-func cloneRequestKeySet(updates map[RequestKey]struct{}) map[RequestKey]struct{} {
-	cloned := make(map[RequestKey]struct{}, len(updates))
-	for requestKey := range updates {
-		cloned[requestKey] = struct{}{}
+func cloneRequestKeySet(updates sets.Set[remotehttp.FetchKey]) sets.Set[remotehttp.FetchKey] {
+	if updates == nil {
+		return sets.New[remotehttp.FetchKey]()
 	}
-	return cloned
+	return updates.Copy()
 }

@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
 func TestJwksFromConfigMapAcceptsLegacyPayload(t *testing.T) {
@@ -18,7 +20,7 @@ func TestJwksFromConfigMapAcceptsLegacyPayload(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Equal(t, "https://issuer.example/jwks", keyset.URL)
-	assert.Equal(t, Request{URL: "https://issuer.example/jwks"}.Key(), keyset.RequestKey)
+	assert.Equal(t, remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}.Key(), keyset.RequestKey)
 }
 
 func TestJwksFromConfigMapRejectsMultiEntryLegacyPayload(t *testing.T) {
@@ -49,7 +51,7 @@ func TestJwksFromConfigMapRejectsEmptyLegacyPayload(t *testing.T) {
 
 func TestSetAndReadConfigMapRoundTrip(t *testing.T) {
 	original := Keyset{
-		RequestKey: Request{URL: "https://issuer.example/jwks"}.Key(),
+		RequestKey: remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}.Key(),
 		URL:        "https://issuer.example/jwks",
 		JwksJSON:   `{"keys":[]}`,
 	}

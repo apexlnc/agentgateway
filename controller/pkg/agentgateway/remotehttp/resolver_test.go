@@ -330,15 +330,15 @@ func TestResolve(t *testing.T) {
 			})
 			require.NoError(t, err)
 			require.NotNil(t, resolved)
-			require.Equal(t, tt.wantURL, resolved.Request.URL)
+			require.Equal(t, tt.wantURL, resolved.Target.URL)
 			if !tt.wantTLSConfig {
 				require.Nil(t, resolved.TLSConfig)
 				return
 			}
 
-			require.Equal(t, tt.wantVerification, resolved.Request.Transport.Verification)
-			require.Equal(t, tt.wantServerName, resolved.Request.Transport.ServerName)
-			require.Equal(t, tt.wantCABundleHash, resolved.Request.Transport.CABundleHash != "")
+			require.Equal(t, tt.wantVerification, resolved.Target.Transport.Verification)
+			require.Equal(t, tt.wantServerName, resolved.Target.Transport.ServerName)
+			require.Equal(t, tt.wantCABundleHash, resolved.Target.Transport.CABundleHash != "")
 			require.NotNil(t, resolved.TLSConfig)
 			require.Equal(t, tt.wantServerName, resolved.TLSConfig.ServerName)
 			require.Equal(t, tt.wantVerifyConnCheck, resolved.TLSConfig.VerifyConnection != nil)

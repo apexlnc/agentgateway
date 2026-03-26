@@ -9,9 +9,9 @@ import (
 )
 
 type ResolvedJwksRequest struct {
-	OwnerID  JwksOwnerID
-	Endpoint remotehttp.ResolvedEndpoint
-	TTL      time.Duration
+	OwnerID JwksOwnerID
+	Target  remotehttp.ResolvedTarget
+	TTL     time.Duration
 }
 
 type Resolver interface {
@@ -33,8 +33,8 @@ func (r *defaultResolver) ResolveOwner(krtctx krt.HandlerContext, owner RemoteJw
 	}
 
 	return &ResolvedJwksRequest{
-		OwnerID:  owner.ID,
-		Endpoint: *endpoint,
-		TTL:      owner.TTL,
+		OwnerID: owner.ID,
+		Target:  *endpoint,
+		TTL:     owner.TTL,
 	}, nil
 }

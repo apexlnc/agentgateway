@@ -9,7 +9,7 @@ import (
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/shared"
 )
 
-func TestOwnersFromPolicyUseAttachmentScopedPaths(t *testing.T) {
+func TestOwnersFromPolicyUseCanonicalSpecScopedPaths(t *testing.T) {
 	policy := &agentgateway.AgentgatewayPolicy{}
 	policy.Namespace = "default"
 	policy.Name = "example"
@@ -33,9 +33,24 @@ func TestOwnersFromPolicyUseAttachmentScopedPaths(t *testing.T) {
 	}
 
 	owners := OwnersFromPolicy(policy)
-	assert.Len(t, owners, 8)
-	assert.Equal(t, "AgentgatewayPolicy/default/example#spec.targetRefs[0].traffic.jwtAuthentication.providers[1].jwks.remote", owners[0].ID.String())
-	assert.Equal(t, "AgentgatewayPolicy/default/example#spec.targetRefs[0].backend.mcp.authentication.jwks", owners[1].ID.String())
-	assert.Equal(t, "AgentgatewayPolicy/default/example#spec.targetRefs[3].traffic.jwtAuthentication.providers[1].jwks.remote", owners[6].ID.String())
-	assert.Equal(t, "AgentgatewayPolicy/default/example#spec.targetRefs[3].backend.mcp.authentication.jwks", owners[7].ID.String())
+	assert.Len(t, owners, 2)
+	assert.Equal(t, "AgentgatewayPolicy/default/example#spec.traffic.jwtAuthentication.providers[1].jwks.remote", owners[0].ID.String())
+	assert.Equal(t, "AgentgatewayPolicy/default/example#spec.backend.mcp.authentication.jwks", owners[1].ID.String())
+	assert.Equal(t, PolicyJWTProviderLookupOwner(policy.Namespace, policy.Name, 1, *policy.Spec.Traffic.JWTAuthentication.Providers[1].JWKS.Remote), owners[0])
+	assert.Equal(t, PolicyBackendMCPAuthenticationLookupOwner(policy.Namespace, policy.Name, policy.Spec.Backend.MCP.Authentication.JWKS), owners[1])
+}
+
+func TestOwnersFromPolicyRequireAtLeastOneTargetRef(t *testing.T) {
+	policy := &agentgateway.AgentgatewayPolicy{}
+	policy.Namespace = "default"
+	policy.Name = "example"
+	policy.Spec.Traffic = &agentgateway.Traffic{
+		JWTAuthentication: &agentgateway.JWTAuthentication{
+			Providers: []agentgateway.JWTProvider{{
+				JWKS: agentgateway.JWKS{Remote: &agentgateway.RemoteJWKS{}},
+			}},
+		},
+	}
+
+	assert.Nil(t, OwnersFromPolicy(policy))
 }

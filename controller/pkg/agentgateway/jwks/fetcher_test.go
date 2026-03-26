@@ -9,6 +9,9 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/assert"
+	"istio.io/istio/pkg/util/sets"
+
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
 func TestAddKeysetToFetcher(t *testing.T) {
@@ -34,7 +37,7 @@ func TestRemoveKeysetFromFetcher(t *testing.T) {
 	f := newFetcher(newCache())
 
 	assert.NoError(t, f.AddOrUpdateKeyset(source))
-	f.cache.keysets[source.RequestKey] = Keyset{RequestKey: source.RequestKey, URL: source.Request.URL, JwksJSON: "jwks"}
+	f.cache.keysets[source.RequestKey] = Keyset{RequestKey: source.RequestKey, URL: source.Target.URL, JwksJSON: "jwks"}
 
 	f.RemoveKeyset(source.RequestKey)
 
@@ -95,7 +98,7 @@ func TestSuccessfulJwksFetch(t *testing.T) {
 
 	f.defaultJwksClient = stubJwksClient{
 		t:           t,
-		expectedReq: source.Request,
+		expectedReq: source.Target,
 		result:      expectedJwks,
 	}
 	go f.maybeFetchJwks(ctx)
@@ -103,8 +106,7 @@ func TestSuccessfulJwksFetch(t *testing.T) {
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		select {
 		case actual := <-updates:
-			_, ok := actual[source.RequestKey]
-			assert.True(c, ok)
+			assert.True(c, actual.Contains(source.RequestKey))
 			keyset, ok := f.cache.GetJwks(source.RequestKey)
 			assert.True(c, ok)
 			assert.Equal(c, sampleJWKS, keyset.JwksJSON)
@@ -130,7 +132,7 @@ func TestFetchJwksWithError(t *testing.T) {
 
 	f.defaultJwksClient = stubJwksClient{
 		t:           t,
-		expectedReq: source.Request,
+		expectedReq: source.Target,
 		err:         fmt.Errorf("boom!"),
 	}
 	go f.maybeFetchJwks(ctx)
@@ -168,7 +170,7 @@ func TestFetcherDiscardedFetchDoesNotRepopulateRemovedKeyset(t *testing.T) {
 	release := make(chan struct{})
 	f.defaultJwksClient = stubJwksClient{
 		t:           t,
-		expectedReq: source.Request,
+		expectedReq: source.Target,
 		result:      expectedJwks,
 		started:     started,
 		release:     release,
@@ -195,14 +197,12 @@ func TestNotifySubscribersMergesPendingRequestKeyUpdates(t *testing.T) {
 	first := testSource()
 	second := testSourceWithURL("https://test/other-jwks")
 
-	f.notifySubscribers(map[RequestKey]struct{}{first.RequestKey: {}})
-	f.notifySubscribers(map[RequestKey]struct{}{second.RequestKey: {}})
+	f.notifySubscribers(sets.New(first.RequestKey))
+	f.notifySubscribers(sets.New(second.RequestKey))
 
 	actual := <-updates
-	_, hasFirst := actual[first.RequestKey]
-	_, hasSecond := actual[second.RequestKey]
-	assert.True(t, hasFirst)
-	assert.True(t, hasSecond)
+	assert.True(t, actual.Contains(first.RequestKey))
+	assert.True(t, actual.Contains(second.RequestKey))
 }
 
 func TestNextRetryDelayCapsWithoutOverflow(t *testing.T) {
@@ -216,7 +216,7 @@ func testSource() JwksSource {
 }
 
 func testSourceWithURL(requestURL string) JwksSource {
-	request := Request{URL: requestURL}
+	target := remotehttp.FetchTarget{URL: requestURL}
 	return JwksSource{
 		OwnerKey: JwksOwnerID{
 			Kind:      OwnerKindPolicy,
@@ -224,22 +224,22 @@ func testSourceWithURL(requestURL string) JwksSource {
 			Name:      "test",
 			Path:      "spec.traffic.jwtAuthentication.providers[0].jwks.remote",
 		},
-		RequestKey: request.Key(),
-		Request:    request,
+		RequestKey: target.Key(),
+		Target:     target,
 		TTL:        5 * time.Minute,
 	}
 }
 
 type stubJwksClient struct {
 	t           *testing.T
-	expectedReq Request
+	expectedReq remotehttp.FetchTarget
 	result      jose.JSONWebKeySet
 	err         error
 	started     chan<- struct{}
 	release     <-chan struct{}
 }
 
-func (s stubJwksClient) FetchJwks(_ context.Context, req Request) (jose.JSONWebKeySet, error) {
+func (s stubJwksClient) FetchJwks(_ context.Context, req remotehttp.FetchTarget) (jose.JSONWebKeySet, error) {
 	assert.Equal(s.t, s.expectedReq, req)
 	if s.started != nil {
 		close(s.started)
