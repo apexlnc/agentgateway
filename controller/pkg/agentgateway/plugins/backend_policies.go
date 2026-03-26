@@ -436,13 +436,13 @@ func translateBackendMCPAuthentication(ctx PolicyCtx, policy *agentgateway.Agent
 	}
 
 	var errs []error
-	translatedInlineJwks, err := ctx.JWKSLookup.InlineForOwner(
+	translatedInlineJwks, err := ctx.References.InlineJWKS(
 		ctx.Krt,
 		jwks.PolicyBackendMCPAuthenticationLookupOwner(policy.Namespace, policy.Name, authnPolicy.JWKS),
 	)
 	if err != nil {
 		logger.Error("failed resolving jwks", "error", err)
-		return nil, err
+		errs = append(errs, err)
 	}
 
 	var extraResourceMetadata map[string]*structpb.Value

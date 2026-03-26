@@ -177,10 +177,13 @@ func Syncer(t *testing.T, ctx plugins.PolicyCtx, includeStatusKinds ...string) (
 		fc,
 		ctx.Collections,
 		agwPluginFactory(ctx.Collections),
-		runtimeWiring.JWKSLookup,
 		nil,
 		opts,
 		nil,
+		syncer.WithBuildReferenceTypes(func(agw *plugins.AgwCollections, base plugins.ReferenceTypes) plugins.ReferenceTypes {
+			base.InlineJWKS = runtimeWiring.JWKSLookup.InlineForOwner
+			return base
+		}),
 	)
 	fc.RunAndWait(stop)
 	sq := &TestStatusQueue{
@@ -201,8 +204,7 @@ func Syncer(t *testing.T, ctx plugins.PolicyCtx, includeStatusKinds ...string) (
 // agwPluginFactory is a factory function that returns the agent gateway plugins
 // It is based on agwPluginFactory(cfg)(ctx, cfg.AgwCollections) in start.go
 func agwPluginFactory(agwCollections *plugins.AgwCollections) plugins.AgwPlugin {
-	runtimeWiring := BuildRuntimeWiring(agwCollections)
-	agwPlugins := controller.BuiltinAgwPlugins(agwCollections, runtimeWiring.JWKSLookup)
+	agwPlugins := controller.Plugins(agwCollections)
 	mergedPlugins := plugins.MergePlugins(agwPlugins...)
 	return mergedPlugins
 }
@@ -213,13 +215,13 @@ func BuildMockPolicyContext(t test.Failer, inputs []any) plugins.PolicyCtx {
 	return plugins.PolicyCtx{
 		Krt:         krt.TestingDummyContext{},
 		Collections: collections,
-		References:  BuildMockReferenceIndex(collections),
-		JWKSLookup:  runtimeWiring.JWKSLookup,
+		References:  BuildMockReferenceIndex(collections, runtimeWiring),
 	}
 }
 
-func BuildMockReferenceIndex(collections *plugins.AgwCollections) plugins.ReferenceIndex {
+func BuildMockReferenceIndex(collections *plugins.AgwCollections, runtimeWiring RuntimeWiring) plugins.ReferenceIndex {
 	referenceTypes := plugins.DefaultReferenceTypes(collections)
+	referenceTypes.InlineJWKS = runtimeWiring.JWKSLookup.InlineForOwner
 
 	routeAttachments := krt.NewStaticCollection[*plugins.RouteAttachment](nil, nil)
 	routeAttachmentsIndex := krt.NewIndex(routeAttachments, "test-route-attachments", func(o *plugins.RouteAttachment) []agwutils.TypedNamespacedName {

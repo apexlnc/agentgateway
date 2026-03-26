@@ -85,7 +85,7 @@ func ConvertStatusCollection[T controllers.Object, S any](col krt.Collection[krt
 }
 
 // NewAgentPlugin creates a new AgentgatewayPolicy plugin.
-func NewAgentPlugin(agw *AgwCollections, jwksLookup jwks.Lookup) AgwPlugin {
+func NewAgentPlugin(agw *AgwCollections) AgwPlugin {
 	backendReferences := krt.NewManyCollection(agw.AgentgatewayPolicies, func(ctx krt.HandlerContext, policy *agentgateway.AgentgatewayPolicy) []*PolicyAttachment {
 		return BackendReferencesFromPolicy(policy)
 	})
@@ -97,7 +97,7 @@ func NewAgentPlugin(agw *AgwCollections, jwksLookup jwks.Lookup) AgwPlugin {
 						*gwv1.PolicyStatus,
 						[]AgwPolicy,
 					) {
-						return TranslateAgentgatewayPolicy(krtctx, policyCR, agw, input.References, jwksLookup)
+						return TranslateAgentgatewayPolicy(krtctx, policyCR, agw, input.References)
 					}, agw.KrtOpts.ToOptions("AgentgatewayPolicy")...)
 					return ConvertStatusCollection(policyStatusCol), policyCol
 				},
@@ -113,7 +113,6 @@ type PolicyCtx struct {
 	Krt         krt.HandlerContext
 	Collections *AgwCollections
 	References  ReferenceIndex
-	JWKSLookup  jwks.Lookup
 }
 
 type ResolvedTarget struct {
@@ -124,15 +123,10 @@ type ResolvedTarget struct {
 }
 
 // TranslateAgentgatewayPolicy generates policies for a single traffic policy
-func TranslateAgentgatewayPolicy(ctx krt.HandlerContext, policy *agentgateway.AgentgatewayPolicy, agw *AgwCollections, references ReferenceIndex, jwksLookup jwks.Lookup) (*gwv1.PolicyStatus, []AgwPolicy) {
+func TranslateAgentgatewayPolicy(ctx krt.HandlerContext, policy *agentgateway.AgentgatewayPolicy, agw *AgwCollections, references ReferenceIndex) (*gwv1.PolicyStatus, []AgwPolicy) {
 	var agwPolicies []AgwPolicy
 
-	pctx := PolicyCtx{
-		Krt:         ctx,
-		Collections: agw,
-		References:  references,
-		JWKSLookup:  jwksLookup,
-	}
+	pctx := PolicyCtx{Krt: ctx, Collections: agw, References: references}
 	var ancestors []gwv1.PolicyAncestorStatus
 	var attachmentErrors []string
 	// TODO: add selectors
@@ -579,7 +573,7 @@ func processJWTAuthenticationPolicy(ctx PolicyCtx, jwt *agentgateway.JWTAuthenti
 			continue
 		}
 		if r := pp.JWKS.Remote; r != nil {
-			inline, err := ctx.JWKSLookup.InlineForOwner(
+			inline, err := ctx.References.InlineJWKS(
 				ctx.Krt,
 				jwks.PolicyJWTProviderLookupOwner(policy.Namespace, policy.Name, idx, *r),
 			)

@@ -107,7 +107,12 @@ func NewControllerBuilder(ctx context.Context, cfg StartConfig) (*ControllerBuil
 	//metrics.StartResourceSyncMetricsProcessing(ctx)
 
 	runtimeDeps := newRuntimeDeps(cfg.AgwCollections)
-	agwMergedPlugins := agwPluginFactory(cfg, runtimeDeps.JWKSLookup)(ctx, cfg.AgwCollections)
+	agwMergedPlugins := agwPluginFactory(cfg)(ctx, cfg.AgwCollections)
+	syncerOptions := append([]syncer.AgentgatewaySyncerOption{}, cfg.AgentgatewaySyncerOptions...)
+	syncerOptions = append(syncerOptions, syncer.WithBuildReferenceTypes(func(agw *agwplugins.AgwCollections, base agwplugins.ReferenceTypes) agwplugins.ReferenceTypes {
+		base.InlineJWKS = runtimeDeps.JWKSLookup.InlineForOwner
+		return base
+	}))
 
 	// Compute the extra GVKs list to provide at initialization time
 	var gvks []schema.GroupVersionKind
@@ -120,11 +125,10 @@ func NewControllerBuilder(ctx context.Context, cfg StartConfig) (*ControllerBuil
 		cfg.Client,
 		cfg.AgwCollections,
 		agwMergedPlugins,
-		runtimeDeps.JWKSLookup,
 		cfg.AdditionalGatewayClasses,
 		cfg.KrtOptions,
 		gvks,
-		cfg.AgentgatewaySyncerOptions...,
+		syncerOptions...,
 	)
 
 	if err := cfg.Manager.Add(agwSyncer); err != nil {
@@ -193,9 +197,9 @@ func newRuntimeDeps(agw *agwplugins.AgwCollections) runtimeDeps {
 	}
 }
 
-func agwPluginFactory(cfg StartConfig, jwksLookup jwks.Lookup) func(ctx context.Context, agw *agwplugins.AgwCollections) agwplugins.AgwPlugin {
+func agwPluginFactory(cfg StartConfig) func(ctx context.Context, agw *agwplugins.AgwCollections) agwplugins.AgwPlugin {
 	return func(ctx context.Context, agw *agwplugins.AgwCollections) agwplugins.AgwPlugin {
-		plugins := BuiltinAgwPlugins(agw, jwksLookup)
+		plugins := Plugins(agw)
 		if cfg.ExtraAgwPlugins != nil {
 			plugins = append(plugins, cfg.ExtraAgwPlugins(ctx, agw)...)
 		}

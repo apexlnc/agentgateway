@@ -28,7 +28,6 @@ import (
 	"github.com/agentgateway/agentgateway/api"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	agwir "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/ir"
-	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/plugins"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/translator"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/utils"
@@ -57,7 +56,6 @@ type Syncer struct {
 	agwCollections *plugins.AgwCollections
 	client         apiclient.Client
 	agwPlugins     plugins.AgwPlugin
-	jwksLookup     jwks.Lookup
 
 	// Configuration
 	controllerName           string
@@ -90,7 +88,6 @@ func NewAgwSyncer(
 	client apiclient.Client,
 	agwCollections *plugins.AgwCollections,
 	agwPlugins plugins.AgwPlugin,
-	jwksLookup jwks.Lookup,
 	additionalGatewayClasses map[string]*deployer.GatewayClassInfo,
 	krtopts krtutil.KrtOptions,
 	extraGVKs []schema.GroupVersionKind,
@@ -101,7 +98,6 @@ func NewAgwSyncer(
 		agwCollections:           agwCollections,
 		controllerName:           controllerName,
 		agwPlugins:               agwPlugins,
-		jwksLookup:               jwksLookup,
 		additionalGatewayClasses: additionalGatewayClasses,
 		client:                   client,
 		statusCollections:        status.NewStatusCollections(extraGVKs),
@@ -565,7 +561,6 @@ func (s *Syncer) newAgwBackendCollection(
 			Krt:         ctx,
 			Collections: s.agwCollections,
 			References:  references,
-			JWKSLookup:  s.jwksLookup,
 		}
 		return agentgatewaybackend.TranslateAgwBackend(pc, backend, references)
 	}, krtopts.ToOptions("Backends")...)
