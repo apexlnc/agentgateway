@@ -155,7 +155,6 @@ type testOutput[Status any, Output any] struct {
 
 type RuntimeWiring struct {
 	RemoteHTTPResolver remotehttp.Resolver
-	JWKSResolver       jwks.Resolver
 	JWKSLookup         jwks.Lookup
 }
 
@@ -215,13 +214,13 @@ func BuildMockPolicyContext(t test.Failer, inputs []any) plugins.PolicyCtx {
 	return plugins.PolicyCtx{
 		Krt:         krt.TestingDummyContext{},
 		Collections: collections,
-		References:  BuildMockReferenceIndex(collections, runtimeWiring),
+		References:  BuildMockReferenceIndex(collections, runtimeWiring.JWKSLookup),
 	}
 }
 
-func BuildMockReferenceIndex(collections *plugins.AgwCollections, runtimeWiring RuntimeWiring) plugins.ReferenceIndex {
+func BuildMockReferenceIndex(collections *plugins.AgwCollections, jwksLookup jwks.Lookup) plugins.ReferenceIndex {
 	referenceTypes := plugins.DefaultReferenceTypes(collections)
-	referenceTypes.InlineJWKS = runtimeWiring.JWKSLookup.InlineForOwner
+	referenceTypes.InlineJWKS = jwksLookup.InlineForOwner
 
 	routeAttachments := krt.NewStaticCollection[*plugins.RouteAttachment](nil, nil)
 	routeAttachmentsIndex := krt.NewIndex(routeAttachments, "test-route-attachments", func(o *plugins.RouteAttachment) []agwutils.TypedNamespacedName {
@@ -287,7 +286,6 @@ func BuildRuntimeWiring(collections *plugins.AgwCollections) RuntimeWiring {
 
 	return RuntimeWiring{
 		RemoteHTTPResolver: remoteHTTPResolver,
-		JWKSResolver:       jwksResolver,
 		JWKSLookup:         jwksLookup,
 	}
 }

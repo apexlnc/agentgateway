@@ -28,6 +28,7 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 	"github.com/agentgateway/agentgateway/controller/pkg/syncer"
+	"github.com/agentgateway/agentgateway/controller/pkg/syncer/backend"
 	"github.com/agentgateway/agentgateway/controller/pkg/utils/kubeutils"
 	"github.com/agentgateway/agentgateway/controller/pkg/utils/namespaces"
 	"github.com/agentgateway/agentgateway/controller/pkg/version"
@@ -172,6 +173,16 @@ func NewControllerBuilder(ctx context.Context, cfg StartConfig) (*ControllerBuil
 }
 
 // Plugins registers all built-in policy plugins
+func Plugins(agw *agwplugins.AgwCollections) []agwplugins.AgwPlugin {
+	return []agwplugins.AgwPlugin{
+		agwplugins.NewAgentPlugin(agw),
+		agwplugins.NewInferencePlugin(agw),
+		agwplugins.NewA2APlugin(agw),
+		agwplugins.NewBackendTLSPlugin(agw),
+		agentgatewaybackend.NewBackendPlugin(agw),
+	}
+}
+
 type runtimeDeps struct {
 	JWKSLookup jwks.Lookup
 }
