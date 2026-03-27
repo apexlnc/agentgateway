@@ -26,7 +26,6 @@ import (
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/agentgateway/agentgateway/api"
-	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	agwir "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/ir"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/plugins"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/translator"
@@ -35,7 +34,6 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/deployer"
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
-	agentgatewaybackend "github.com/agentgateway/agentgateway/controller/pkg/syncer/backend"
 	"github.com/agentgateway/agentgateway/controller/pkg/syncer/krtxds"
 	"github.com/agentgateway/agentgateway/controller/pkg/syncer/nack"
 	"github.com/agentgateway/agentgateway/controller/pkg/syncer/status"
@@ -531,39 +529,6 @@ func (s *Syncer) buildListenerFromGateway(obj *translator.GatewayListener) *agwi
 		Namespace: obj.ParentGateway.Namespace,
 		Name:      obj.ParentGateway.Name,
 	}, translator.AgwListener{l}))
-}
-
-// newAgwBackendPolicyReferences creates the ADP backend collection for agent gateway resources
-func (s *Syncer) newAgwBackendPolicyReferences(
-	finalBackends krt.Collection[*agentgateway.AgentgatewayBackend],
-	krtopts krtutil.KrtOptions,
-) krt.Collection[*plugins.PolicyAttachment] {
-	policyReferences := krt.NewManyCollection(finalBackends, func(ctx krt.HandlerContext, backend *agentgateway.AgentgatewayBackend) []*plugins.PolicyAttachment {
-		return agentgatewaybackend.BuildAgwBackendReferences(backend)
-	}, krtopts.ToOptions("BackendPolicyAttachments")...)
-	return policyReferences
-}
-
-// newAgwBackendCollection creates the ADP backend collection for agent gateway resources
-func (s *Syncer) newAgwBackendCollection(
-	finalBackends krt.Collection[*agentgateway.AgentgatewayBackend],
-	references plugins.ReferenceIndex,
-	krtopts krtutil.KrtOptions,
-) (
-	krt.StatusCollection[*agentgateway.AgentgatewayBackend, agentgateway.AgentgatewayBackendStatus],
-	krt.Collection[agwir.AgwResource],
-) {
-	return krt.NewStatusManyCollection(finalBackends, func(ctx krt.HandlerContext, backend *agentgateway.AgentgatewayBackend) (
-		*agentgateway.AgentgatewayBackendStatus,
-		[]agwir.AgwResource,
-	) {
-		pc := plugins.PolicyCtx{
-			Krt:         ctx,
-			Collections: s.agwCollections,
-			References:  references,
-		}
-		return agentgatewaybackend.TranslateAgwBackend(pc, backend, references)
-	}, krtopts.ToOptions("Backends")...)
 }
 
 // getProtocolAndTLSConfig extracts protocol and TLS configuration from a gateway
