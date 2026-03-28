@@ -319,9 +319,9 @@ func TestResolve(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := testutils.BuildMockPolicyContext(t, tt.inputs)
-			runtimeWiring := testutils.BuildRuntimeWiring(ctx.Collections)
+			resolver := testutils.BuildRemoteHTTPResolver(ctx.Collections)
 
-			resolved, err := runtimeWiring.RemoteHTTPResolver.Resolve(ctx.Krt, remotehttp.ResolveInput{
+			resolved, err := resolver.Resolve(ctx.Krt, remotehttp.ResolveInput{
 				ParentName:       "gw-policy",
 				DefaultNamespace: "default",
 				BackendRef:       tt.backendRef,

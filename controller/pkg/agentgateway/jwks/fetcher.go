@@ -47,7 +47,6 @@ const (
 	clientTimeout     = 10 * time.Second
 )
 
-//go:generate mockgen -destination mocks/mock_jwks_http_client.go -package mocks -source ./jwks_fetcher.go
 type JwksHttpClient interface {
 	FetchJwks(ctx context.Context, target remotehttp.FetchTarget) (jose.JSONWebKeySet, error)
 }

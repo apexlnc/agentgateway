@@ -153,17 +153,12 @@ type testOutput[Status any, Output any] struct {
 	Output []Output `json:"output"`
 }
 
-type RuntimeWiring struct {
-	RemoteHTTPResolver remotehttp.Resolver
-	JWKSLookup         jwks.Lookup
-}
-
 func Syncer(t *testing.T, ctx plugins.PolicyCtx, includeStatusKinds ...string) (*TestStatusQueue, *syncer.Syncer) {
 	fc := fake.NewClient(t)
 	stop := test.NewStop(t)
 	debugger := new(krt.DebugHandler)
 	opts := krtutil.NewKrtOptions(stop, debugger)
-	runtimeWiring := BuildRuntimeWiring(ctx.Collections)
+	jwksLookup := BuildJWKSLookup(ctx.Collections)
 	t.Cleanup(func() {
 		if t.Failed() {
 			b, _ := yaml.Marshal(debugger)
@@ -180,7 +175,7 @@ func Syncer(t *testing.T, ctx plugins.PolicyCtx, includeStatusKinds ...string) (
 		opts,
 		nil,
 		syncer.WithBuildReferenceTypes(func(agw *plugins.AgwCollections, base plugins.ReferenceTypes) plugins.ReferenceTypes {
-			base.InlineJWKS = runtimeWiring.JWKSLookup.InlineForOwner
+			base.InlineJWKS = jwksLookup.InlineForOwner
 			return base
 		}),
 	)
@@ -210,11 +205,10 @@ func agwPluginFactory(agwCollections *plugins.AgwCollections) plugins.AgwPlugin 
 
 func BuildMockPolicyContext(t test.Failer, inputs []any) plugins.PolicyCtx {
 	collections := BuildMockCollection(t, inputs)
-	runtimeWiring := BuildRuntimeWiring(collections)
 	return plugins.PolicyCtx{
 		Krt:         krt.TestingDummyContext{},
 		Collections: collections,
-		References:  BuildMockReferenceIndex(collections, runtimeWiring.JWKSLookup),
+		References:  BuildMockReferenceIndex(collections, BuildJWKSLookup(collections)),
 	}
 }
 
@@ -268,24 +262,22 @@ func BuildMockCollection(t test.Failer, inputs []any) *plugins.AgwCollections {
 	return col
 }
 
-func BuildRuntimeWiring(collections *plugins.AgwCollections) RuntimeWiring {
-	remoteHTTPResolver := remotehttp.NewResolver(remotehttp.Inputs{
+func BuildRemoteHTTPResolver(collections *plugins.AgwCollections) remotehttp.Resolver {
+	return remotehttp.NewResolver(remotehttp.Inputs{
 		ConfigMaps:           collections.ConfigMaps,
 		Services:             collections.Services,
 		Backends:             collections.Backends,
 		AgentgatewayPolicies: collections.AgentgatewayPolicies,
 		BackendTLSPolicies:   collections.BackendTLSPolicies,
 	})
-	jwksResolver := jwks.NewResolver(remoteHTTPResolver)
-	jwksLookup := jwks.NewLookup(
+}
+
+func BuildJWKSLookup(collections *plugins.AgwCollections) jwks.Lookup {
+	jwksResolver := jwks.NewResolver(BuildRemoteHTTPResolver(collections))
+	return jwks.NewLookup(
 		collections.ConfigMaps,
 		jwksResolver,
 		jwks.DefaultJwksStorePrefix,
 		collections.SystemNamespace,
 	)
-
-	return RuntimeWiring{
-		RemoteHTTPResolver: remoteHTTPResolver,
-		JWKSLookup:         jwksLookup,
-	}
 }
