@@ -11,6 +11,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/utils"
 )
 
 func caBundleFromConfigMaps(
@@ -57,26 +59,18 @@ func caBundleFromConfigMapNames(
 		if cfgmap == nil {
 			return nil, "", fmt.Errorf("ConfigMap %s not found", nn)
 		}
-		caCRT, ok := caCertsFromConfigMap(cfgmap)
-		if !ok {
-			return nil, "", fmt.Errorf("error extracting CA cert from ConfigMap %s", nn)
+		caCRT, err := utils.CACertsFromConfigMap(cfgmap)
+		if err != nil {
+			return nil, "", fmt.Errorf("error extracting CA cert from ConfigMap %s: %w", nn, err)
 		}
-		if !certPool.AppendCertsFromPEM([]byte(caCRT)) {
-			return nil, "", fmt.Errorf("error extracting CA cert from ConfigMap %s", nn)
+		if !certPool.AppendCertsFromPEM(caCRT) {
+			return nil, "", fmt.Errorf("error appending CA cert from ConfigMap %s", nn)
 		}
 		_, _ = h.Write([]byte(nn.String()))
 		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(caCRT))
+		_, _ = h.Write(caCRT)
 		_, _ = h.Write([]byte{0})
 	}
 
 	return certPool, hex.EncodeToString(h.Sum(nil)), nil
-}
-
-func caCertsFromConfigMap(cm *corev1.ConfigMap) (string, bool) {
-	caCrts, ok := cm.Data["ca.crt"]
-	if !ok {
-		return "", false
-	}
-	return caCrts, true
 }

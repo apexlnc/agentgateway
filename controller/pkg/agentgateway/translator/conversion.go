@@ -2,8 +2,6 @@ package translator
 
 import (
 	"cmp"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"maps"
@@ -1212,14 +1210,14 @@ var dummyTls = &TLSInfo{
 }
 
 func validateTLS(certInfo *TLSInfo) *ConfigError {
-	if _, err := tls.X509KeyPair(certInfo.Cert, certInfo.Key); err != nil {
+	if err := utils.ValidateTLSKeyPair(certInfo.Cert, certInfo.Key); err != nil {
 		return &ConfigError{
 			Reason:  InvalidTLS,
 			Message: fmt.Sprintf("invalid certificate reference, the certificate is malformed: %v", err),
 		}
 	}
 	if certInfo.CaCert != nil {
-		if !x509.NewCertPool().AppendCertsFromPEM(certInfo.Cert) {
+		if _, err := utils.NormalizeCACerts(certInfo.CaCert); err != nil {
 			return &ConfigError{
 				Reason:  InvalidTLSCA,
 				Message: fmt.Sprintf("invalid CA certificate reference, the bundle is malformed"),
