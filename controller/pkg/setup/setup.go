@@ -24,6 +24,7 @@ import (
 	apisettings "github.com/agentgateway/agentgateway/controller/api/settings"
 	"github.com/agentgateway/agentgateway/controller/pkg/admin"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	agwplugins "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/plugins"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
@@ -346,6 +347,22 @@ func buildJwksStore(ctx context.Context, mgr manager.Manager, apiClient apiclien
 		AgentgatewayPolicies: agwCollections.AgentgatewayPolicies,
 		BackendTLSPolicies:   agwCollections.BackendTLSPolicies,
 	})
+	oidcResolver := oidc.NewResolver(remoteHTTPResolver)
+	oidcOwnerCtrl := oidc.NewOwnerController(apiClient, oidc.OwnerControllerInputs{
+		AgentgatewayPolicies: agwCollections.AgentgatewayPolicies,
+		Resolver:             oidcResolver,
+		KrtOpts:              agwCollections.KrtOpts,
+	})
+	if err := mgr.Add(oidcOwnerCtrl); err != nil {
+		return err
+	}
+	oidcOwnerCtrl.Init(ctx)
+
+	oidcStore := oidc.NewStore(oidcOwnerCtrl.ProviderChanges())
+	if err := mgr.Add(oidcStore); err != nil {
+		return err
+	}
+
 	jwksResolver := jwks.NewResolver(remoteHTTPResolver)
 	jwksOwnerCtrl := jwks.NewOwnerController(apiClient, jwks.OwnerControllerInputs{
 		AgentgatewayPolicies: agwCollections.AgentgatewayPolicies,
@@ -358,7 +375,7 @@ func buildJwksStore(ctx context.Context, mgr manager.Manager, apiClient apiclien
 	}
 	jwksOwnerCtrl.Init(ctx)
 
-	jwksStore := jwks.NewStore(apiClient, agwCollections.KrtOpts, jwksOwnerCtrl.JwksChanges(), jwks.DefaultJwksStorePrefix, namespaces.GetPodNamespace())
+	jwksStore := jwks.NewStore(apiClient, agwCollections.KrtOpts, jwksOwnerCtrl.JwksChanges(), oidcStore, jwks.DefaultJwksStorePrefix, namespaces.GetPodNamespace())
 	if err := mgr.Add(jwksStore); err != nil {
 		return err
 	}

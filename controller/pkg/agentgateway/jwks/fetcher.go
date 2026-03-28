@@ -17,6 +17,7 @@ import (
 	"istio.io/istio/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
@@ -25,6 +26,7 @@ import (
 type fetcher struct {
 	mu                sync.Mutex
 	cache             *jwksCache
+	providers         oidc.ProviderReader
 	defaultJwksClient JwksHttpClient
 	requests          map[remotehttp.FetchKey]fetchState
 	schedule          fetchingSchedule
@@ -64,8 +66,13 @@ type jwksHttpClientImpl struct {
 }
 
 func newFetcher(cache *jwksCache) *fetcher {
+	return newFetcherWithProviders(cache, nil)
+}
+
+func newFetcherWithProviders(cache *jwksCache, providers oidc.ProviderReader) *fetcher {
 	fetcher := &fetcher{
 		cache:             cache,
+		providers:         providers,
 		defaultJwksClient: &jwksHttpClientImpl{Client: makeClient(nil)},
 		requests:          make(map[remotehttp.FetchKey]fetchState),
 		schedule:          make([]*fetchAt, 0),
@@ -187,12 +194,12 @@ func (f *fetcher) maybeFetchJwks(ctx context.Context) {
 			continue
 		}
 
-		logger.Debug("fetching remote jwks", "request_key", fetch.requestKey, "jwks_uri", state.source.Target.URL)
+		logger.Debug("fetching jwks", "request_key", fetch.requestKey, "target", state.source.Target.URL, "discovery", state.source.Discovery)
 
-		jwks, err := f.fetchJwks(ctx, state.source)
+		requestURL, jwks, err := f.fetchJwks(ctx, state.source)
 		if err != nil {
 			next := nextRetryDelay(fetch.retryAttempt)
-			logger.Error("error fetching jwks", "request_key", fetch.requestKey, "jwks_uri", state.source.Target.URL, "error", err, "retryAttempt", fetch.retryAttempt, "next", next.String())
+			logger.Error("error fetching jwks", "request_key", fetch.requestKey, "target", state.source.Target.URL, "error", err, "retryAttempt", fetch.retryAttempt, "next", next.String())
 			f.scheduleAt(fetch.requestKey, state.generation, now.Add(next), fetch.retryAttempt+1)
 			continue
 		}
@@ -202,8 +209,8 @@ func (f *fetcher) maybeFetchJwks(ctx context.Context) {
 			continue
 		}
 
-		if err := f.cache.addJwks(fetch.requestKey, state.source.Target.URL, jwks); err != nil {
-			logger.Error("error adding jwks", "request_key", fetch.requestKey, "jwks_uri", state.source.Target.URL, "error", err)
+		if err := f.cache.addJwks(fetch.requestKey, requestURL, jwks); err != nil {
+			logger.Error("error adding jwks", "request_key", fetch.requestKey, "jwks_uri", requestURL, "error", err)
 			next := nextRetryDelay(fetch.retryAttempt)
 			f.scheduleAt(fetch.requestKey, state.generation, now.Add(next), fetch.retryAttempt+1)
 			continue
@@ -270,11 +277,46 @@ func (f *fetcher) RemoveKeyset(requestKey remotehttp.FetchKey) {
 	}
 }
 
-func (f *fetcher) fetchJwks(ctx context.Context, source JwksSource) (jose.JSONWebKeySet, error) {
-	if source.TLSConfig != nil {
-		return (&jwksHttpClientImpl{Client: makeClient(source.TLSConfig)}).FetchJwks(ctx, source.Target)
+func (f *fetcher) fetchJwks(ctx context.Context, source JwksSource) (string, jose.JSONWebKeySet, error) {
+	target := source.Target
+	tlsConfig := source.TLSConfig
+	if source.Discovery {
+		if f.providers == nil {
+			return "", jose.JSONWebKeySet{}, fmt.Errorf("oidc lookup is not configured for %q", source.OwnerKey.String())
+		}
+		provider, ok := f.providers.ProviderByRequestKey(source.RequestKey)
+		if !ok {
+			return "", jose.JSONWebKeySet{}, fmt.Errorf("oidc provider config for %q isn't available (not yet fetched or fetch failed)", source.Target.URL)
+		}
+		if err := oidc.ValidateProviderForIssuer(source.Issuer, provider); err != nil {
+			return "", jose.JSONWebKeySet{}, err
+		}
+		var err error
+		target, err = oidc.DiscoveredJWKSTarget(source.Issuer, provider)
+		if err != nil {
+			return "", jose.JSONWebKeySet{}, err
+		}
+		shareAuthority, err := oidc.URLsShareAuthority(source.Target.URL, target.URL)
+		if err != nil {
+			return "", jose.JSONWebKeySet{}, err
+		}
+		if !shareAuthority {
+			tlsConfig = nil
+		}
 	}
-	return f.defaultJwksClient.FetchJwks(ctx, source.Target)
+
+	jwks, err := f.fetchJwksFromTarget(ctx, tlsConfig, target)
+	if err != nil {
+		return "", jose.JSONWebKeySet{}, err
+	}
+	return target.URL, jwks, nil
+}
+
+func (f *fetcher) fetchJwksFromTarget(ctx context.Context, tlsConfig *tls.Config, target remotehttp.FetchTarget) (jose.JSONWebKeySet, error) {
+	if tlsConfig != nil {
+		return (&jwksHttpClientImpl{Client: makeClient(tlsConfig)}).FetchJwks(ctx, target)
+	}
+	return f.defaultJwksClient.FetchJwks(ctx, target)
 }
 
 func (c *jwksHttpClientImpl) FetchJwks(ctx context.Context, target remotehttp.FetchTarget) (jose.JSONWebKeySet, error) {

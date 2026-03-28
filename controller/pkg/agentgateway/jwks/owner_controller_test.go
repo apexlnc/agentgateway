@@ -36,7 +36,9 @@ func TestOwnersFromPolicyUseCanonicalSpecScopedPaths(t *testing.T) {
 	assert.Len(t, owners, 2)
 	assert.Equal(t, "AgentgatewayPolicy/default/example#spec.traffic.jwtAuthentication.providers[1].jwks.remote", owners[0].ID.String())
 	assert.Equal(t, "AgentgatewayPolicy/default/example#spec.backend.mcp.authentication.jwks", owners[1].ID.String())
-	assert.Equal(t, PolicyJWTProviderLookupOwner(policy.Namespace, policy.Name, 1, *policy.Spec.Traffic.JWTAuthentication.Providers[1].JWKS.Remote), owners[0])
+	owner, ok := PolicyJWTProviderLookupOwner(policy.Namespace, policy.Name, 1, policy.Spec.Traffic.JWTAuthentication.Providers[1])
+	assert.True(t, ok)
+	assert.Equal(t, owner, owners[0])
 	assert.Equal(t, PolicyBackendMCPAuthenticationLookupOwner(policy.Namespace, policy.Name, policy.Spec.Backend.MCP.Authentication.JWKS), owners[1])
 }
 

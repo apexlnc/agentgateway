@@ -6,6 +6,7 @@ import (
 
 	"istio.io/istio/pkg/util/sets"
 
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
 	"github.com/agentgateway/agentgateway/controller/pkg/common"
@@ -31,7 +32,7 @@ type Store struct {
 	ready               chan struct{}
 }
 
-func NewStore(cli apiclient.Client, krtOptions krtutil.KrtOptions, jwksChanges <-chan JwksSource, storePrefix, deploymentNamespace string) *Store {
+func NewStore(cli apiclient.Client, krtOptions krtutil.KrtOptions, jwksChanges <-chan JwksSource, providerLookup oidc.ProviderReader, storePrefix, deploymentNamespace string) *Store {
 	logger.Info("creating jwks store")
 
 	jwksCache := newCache()
@@ -40,7 +41,7 @@ func NewStore(cli apiclient.Client, krtOptions krtutil.KrtOptions, jwksChanges <
 		deploymentNamespace: deploymentNamespace,
 		jwksCache:           jwksCache,
 		jwksChanges:         jwksChanges,
-		jwksFetcher:         newFetcher(jwksCache),
+		jwksFetcher:         newFetcherWithProviders(jwksCache, providerLookup),
 		persistedKeysets:    newPersistedKeysetReader(cli, storePrefix, deploymentNamespace, krtOptions),
 		sourcesByOwner:      make(map[OwnerKey]JwksSource),
 		ownersByRequestKey:  make(map[remotehttp.FetchKey]map[OwnerKey]JwksSource),

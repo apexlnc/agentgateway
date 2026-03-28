@@ -20,6 +20,8 @@ type JwksSource struct {
 	Target     remotehttp.FetchTarget
 	TLSConfig  *tls.Config
 	TTL        time.Duration
+	Issuer     string
+	Discovery  bool
 	Deleted    bool
 }
 

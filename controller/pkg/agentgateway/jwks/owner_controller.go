@@ -108,5 +108,7 @@ func (j *OwnerController) resolveOwner(krtctx krt.HandlerContext, owner RemoteJw
 		Target:     resolved.Target.Target,
 		TLSConfig:  resolved.Target.TLSConfig,
 		TTL:        resolved.TTL,
+		Issuer:     resolved.Issuer,
+		Discovery:  resolved.Discovery,
 	}
 }

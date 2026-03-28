@@ -31,7 +31,9 @@ type OwnerKey = JwksOwnerID
 type RemoteJwksOwner struct {
 	ID               JwksOwnerID
 	DefaultNamespace string
-	Remote           agentgateway.RemoteJWKS
+	Issuer           string
+	Remote           *agentgateway.RemoteJWKS
+	Discovery        *agentgateway.OIDCDiscovery
 	TTL              time.Duration
 }
 
@@ -42,8 +44,10 @@ func (o RemoteJwksOwner) ResourceName() string {
 func (o RemoteJwksOwner) Equals(other RemoteJwksOwner) bool {
 	return o.ID == other.ID &&
 		o.DefaultNamespace == other.DefaultNamespace &&
+		o.Issuer == other.Issuer &&
 		o.TTL == other.TTL &&
-		reflect.DeepEqual(o.Remote, other.Remote)
+		reflect.DeepEqual(o.Remote, other.Remote) &&
+		reflect.DeepEqual(o.Discovery, other.Discovery)
 }
 
 func OwnersFromPolicy(policy *agentgateway.AgentgatewayPolicy) []RemoteJwksOwner {
@@ -55,10 +59,11 @@ func OwnersFromPolicy(policy *agentgateway.AgentgatewayPolicy) []RemoteJwksOwner
 
 	if policy.Spec.Traffic != nil && policy.Spec.Traffic.JWTAuthentication != nil {
 		for providerIdx, provider := range policy.Spec.Traffic.JWTAuthentication.Providers {
-			if provider.JWKS.Remote == nil {
+			owner, ok := PolicyJWTProviderLookupOwner(policy.Namespace, policy.Name, providerIdx, provider)
+			if !ok {
 				continue
 			}
-			owners = append(owners, PolicyJWTProviderLookupOwner(policy.Namespace, policy.Name, providerIdx, *provider.JWKS.Remote))
+			owners = append(owners, owner)
 		}
 	}
 
@@ -85,17 +90,36 @@ func OwnersFromBackend(backend *agentgateway.AgentgatewayBackend) []RemoteJwksOw
 	)}
 }
 
-func PolicyJWTProviderLookupOwner(namespace, name string, providerIndex int, remote agentgateway.RemoteJWKS) RemoteJwksOwner {
-	return RemoteJwksOwner{
-		ID: JwksOwnerID{
-			Kind:      OwnerKindPolicy,
-			Namespace: namespace,
-			Name:      name,
-			Path:      fmt.Sprintf("spec.traffic.jwtAuthentication.providers[%d].jwks.remote", providerIndex),
-		},
-		DefaultNamespace: namespace,
-		Remote:           remote,
-		TTL:              ttlForRemote(remote),
+func PolicyJWTProviderLookupOwner(namespace, name string, providerIndex int, provider agentgateway.JWTProvider) (RemoteJwksOwner, bool) {
+	switch {
+	case provider.JWKS.Remote != nil:
+		return RemoteJwksOwner{
+			ID: JwksOwnerID{
+				Kind:      OwnerKindPolicy,
+				Namespace: namespace,
+				Name:      name,
+				Path:      fmt.Sprintf("spec.traffic.jwtAuthentication.providers[%d].jwks.remote", providerIndex),
+			},
+			DefaultNamespace: namespace,
+			Issuer:           string(provider.Issuer),
+			Remote:           provider.JWKS.Remote.DeepCopy(),
+			TTL:              ttlForRemote(*provider.JWKS.Remote),
+		}, true
+	case provider.JWKS.Discovery != nil:
+		return RemoteJwksOwner{
+			ID: JwksOwnerID{
+				Kind:      OwnerKindPolicy,
+				Namespace: namespace,
+				Name:      name,
+				Path:      fmt.Sprintf("spec.traffic.jwtAuthentication.providers[%d].jwks.discovery", providerIndex),
+			},
+			DefaultNamespace: namespace,
+			Issuer:           string(provider.Issuer),
+			Discovery:        provider.JWKS.Discovery.DeepCopy(),
+			TTL:              ttlForDiscovery(*provider.JWKS.Discovery),
+		}, true
+	default:
+		return RemoteJwksOwner{}, false
 	}
 }
 
@@ -108,7 +132,7 @@ func PolicyBackendMCPAuthenticationLookupOwner(namespace, name string, remote ag
 			Path:      "spec.backend.mcp.authentication.jwks",
 		},
 		DefaultNamespace: namespace,
-		Remote:           remote,
+		Remote:           remote.DeepCopy(),
 		TTL:              ttlForRemote(remote),
 	}
 }
@@ -122,7 +146,7 @@ func backendMCPAuthenticationOwner(namespace, name string, remote agentgateway.R
 			Path:      "spec.policies.mcp.authentication.jwks",
 		},
 		DefaultNamespace: namespace,
-		Remote:           remote,
+		Remote:           remote.DeepCopy(),
 		TTL:              ttlForRemote(remote),
 	}
 }
@@ -132,4 +156,11 @@ func ttlForRemote(remote agentgateway.RemoteJWKS) time.Duration {
 		return 5 * time.Minute
 	}
 	return remote.CacheDuration.Duration
+}
+
+func ttlForDiscovery(discovery agentgateway.OIDCDiscovery) time.Duration {
+	if discovery.CacheDuration == nil {
+		return 5 * time.Minute
+	}
+	return discovery.CacheDuration.Duration
 }

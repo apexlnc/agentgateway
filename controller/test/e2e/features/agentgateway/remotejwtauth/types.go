@@ -50,6 +50,7 @@ var (
 
 	testCases = map[string]*base.TestCase{
 		"TestRoutePolicySvc":                    manifestCase(secureRoutePolicyManifestSvc),
+		"TestRoutePolicySvcDiscovery":           manifestCase(secureRoutePolicyManifestSvcDiscovery),
 		"TestRoutePolicySvcCaCert":              manifestWithCABundleCase(secureRoutePolicyManifestSvc),
 		"TestRoutePolicyBackend":                manifestCase(insecureRouteManifest, secureRoutePolicyManifestBackend),
 		"TestRoutePolicyBackendAndTlsPolicy":    manifestCase(secureRoutePolicyManifestBackendAndTLSPolicy),
@@ -68,6 +69,7 @@ var (
 	secureGatewayPolicyWithRBACManifest            = getTestFile("secured-gateway-policy-with-rbac.yaml")
 	secureRoutePolicyManifestBackend               = getTestFile("secured-route-with-backend.yaml")
 	secureRoutePolicyManifestBackendAndTLSPolicy   = getTestFile("secured-route-with-backend-and-ref.yaml")
+	secureRoutePolicyManifestSvcDiscovery          = getTestFile("secured-route-with-svc-discovery.yaml")
 	secureRoutePolicyManifestSvc                   = getTestFile("secured-route-with-svc.yaml")
 	secureRoutePolicyWithRBACManifest              = getTestFile("secured-route-with-rbac.yaml")
 )
