@@ -282,7 +282,7 @@ func (f *fetcher) fetchJwks(ctx context.Context, source JwksSource) (string, jos
 	tlsConfig := source.TLSConfig
 	if source.Discovery {
 		if f.providers == nil {
-			return "", jose.JSONWebKeySet{}, fmt.Errorf("oidc lookup is not configured for %q", source.OwnerKey.String())
+			return "", jose.JSONWebKeySet{}, fmt.Errorf("oidc lookup is not configured for request %q (%s)", source.RequestKey, source.Target.URL)
 		}
 		provider, ok := f.providers.ProviderByRequestKey(source.RequestKey)
 		if !ok {

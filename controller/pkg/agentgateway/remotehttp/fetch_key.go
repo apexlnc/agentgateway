@@ -10,6 +10,10 @@ import (
 
 type FetchKey string
 
+func (k FetchKey) String() string {
+	return string(k)
+}
+
 func (r FetchTarget) Key() FetchKey {
 	transport := r.Transport
 

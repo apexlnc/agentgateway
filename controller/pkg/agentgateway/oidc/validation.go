@@ -1,6 +1,9 @@
 package oidc
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 func ValidateProviderConfig(provider ProviderConfig) error {
 	if _, err := ParseIssuerURL(provider.Issuer); err != nil {
@@ -28,8 +31,26 @@ func ValidateProviderConfig(provider ProviderConfig) error {
 }
 
 func ValidateProviderForIssuer(issuer string, provider ProviderConfig) error {
-	if provider.Issuer != issuer {
+	match, err := IssuersEquivalent(issuer, provider.Issuer)
+	if err != nil {
+		return err
+	}
+	if !match {
 		return fmt.Errorf("discovered issuer %q does not match configured issuer %q", provider.Issuer, issuer)
 	}
 	return ValidateProviderConfig(provider)
+}
+
+func IssuersEquivalent(left, right string) (bool, error) {
+	leftURL, err := ParseIssuerURL(left)
+	if err != nil {
+		return false, err
+	}
+	rightURL, err := ParseIssuerURL(right)
+	if err != nil {
+		return false, err
+	}
+
+	return sameAuthority(leftURL, rightURL) &&
+		strings.TrimRight(leftURL.EscapedPath(), "/") == strings.TrimRight(rightURL.EscapedPath(), "/"), nil
 }

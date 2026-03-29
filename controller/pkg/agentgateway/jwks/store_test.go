@@ -1,140 +1,204 @@
 package jwks
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"istio.io/istio/pkg/kube/krt"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
+	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/shared"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
+	apifake "github.com/agentgateway/agentgateway/controller/pkg/apiclient/fake"
+	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
 
-func TestStoreKeepsSharedRequestAliveUntilLastOwnerIsRemoved(t *testing.T) {
-	store := &Store{
-		storePrefix:         DefaultJwksStorePrefix,
-		deploymentNamespace: "agentgateway-system",
-		sourcesByOwner:      make(map[OwnerKey]JwksSource),
-		ownersByRequestKey:  make(map[remotehttp.FetchKey]map[OwnerKey]JwksSource),
-	}
-
-	target := remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}
-	key := target.Key()
-
-	first := JwksSource{
-		OwnerKey:   testOwner("one"),
-		RequestKey: key,
-		Target:     target,
-		TTL:        10 * time.Minute,
-	}
-	second := JwksSource{
-		OwnerKey:   testOwner("two"),
-		RequestKey: key,
-		Target:     target,
-		TTL:        5 * time.Minute,
-	}
-
-	store.applyOwnerUpdate(first)
-	update := store.applyOwnerUpdate(second)
-	if assert.Len(t, update.actions, 1) {
-		assert.False(t, update.actions[0].delete)
-		if assert.NotNil(t, update.actions[0].upsert) {
-			assert.Equal(t, 5*time.Minute, update.actions[0].upsert.TTL)
-		}
-	}
-
-	update = store.removeOwner(first.OwnerKey)
-	if assert.Len(t, update.actions, 1) {
-		assert.False(t, update.actions[0].delete)
-		if assert.NotNil(t, update.actions[0].upsert) {
-			assert.Equal(t, key, update.actions[0].upsert.RequestKey)
-			assert.Equal(t, second.TTL, update.actions[0].upsert.TTL)
-		}
-	}
-
-	update = store.removeOwner(second.OwnerKey)
-	if assert.Len(t, update.actions, 1) {
-		assert.True(t, update.actions[0].delete)
-		assert.Nil(t, update.actions[0].upsert)
-		assert.Equal(t, key, update.actions[0].requestKey)
-	}
-}
-
-func TestStoreMovingOwnerRemovesOrphanedPreviousRequest(t *testing.T) {
-	store := &Store{
-		storePrefix:         DefaultJwksStorePrefix,
-		deploymentNamespace: "agentgateway-system",
-		sourcesByOwner:      make(map[OwnerKey]JwksSource),
-		ownersByRequestKey:  make(map[remotehttp.FetchKey]map[OwnerKey]JwksSource),
-	}
-
-	owner := testOwner("one")
-	targetA := remotehttp.FetchTarget{URL: "https://issuer.example/a"}
-	targetB := remotehttp.FetchTarget{URL: "https://issuer.example/b"}
-	sourceA := JwksSource{OwnerKey: owner, RequestKey: targetA.Key(), Target: targetA, TTL: 10 * time.Minute}
-	sourceB := JwksSource{OwnerKey: owner, RequestKey: targetB.Key(), Target: targetB, TTL: 15 * time.Minute}
-
-	store.applyOwnerUpdate(sourceA)
-	update := store.applyOwnerUpdate(sourceB)
-
-	if assert.Len(t, update.actions, 2) {
-		assert.True(t, update.actions[0].delete)
-		assert.Equal(t, sourceA.RequestKey, update.actions[0].requestKey)
-		assert.False(t, update.actions[1].delete)
-		if assert.NotNil(t, update.actions[1].upsert) {
-			assert.Equal(t, sourceB.RequestKey, update.actions[1].upsert.RequestKey)
-			assert.Equal(t, sourceB.TTL, update.actions[1].upsert.TTL)
-		}
-	}
-}
-
-func TestStoreMovingOwnerRecomputesPreviousSharedRequest(t *testing.T) {
-	store := &Store{
-		storePrefix:         DefaultJwksStorePrefix,
-		deploymentNamespace: "agentgateway-system",
-		sourcesByOwner:      make(map[OwnerKey]JwksSource),
-		ownersByRequestKey:  make(map[remotehttp.FetchKey]map[OwnerKey]JwksSource),
-	}
-
-	targetA := remotehttp.FetchTarget{URL: "https://issuer.example/shared"}
-	targetB := remotehttp.FetchTarget{URL: "https://issuer.example/new"}
-	keyA := targetA.Key()
-	keyB := targetB.Key()
-
-	movingOwner := JwksSource{
-		OwnerKey:   testOwner("one"),
-		RequestKey: keyA,
-		Target:     targetA,
-		TTL:        5 * time.Minute,
-	}
-	stayingOwner := JwksSource{
-		OwnerKey:   testOwner("two"),
-		RequestKey: keyA,
-		Target:     targetA,
-		TTL:        10 * time.Minute,
-	}
-
-	store.applyOwnerUpdate(movingOwner)
-	store.applyOwnerUpdate(stayingOwner)
-	update := store.applyOwnerUpdate(JwksSource{
-		OwnerKey:   movingOwner.OwnerKey,
-		RequestKey: keyB,
-		Target:     targetB,
-		TTL:        movingOwner.TTL,
+func TestSharedJwksRequestsCollapseMinTTLAcrossOwners(t *testing.T) {
+	krtOpts := testKrtOptions(t)
+	policies := krt.NewStaticCollection(alwaysSynced{}, []*agentgateway.AgentgatewayPolicy{
+		testRemotePolicy("one", "https://issuer.example/jwks", 10*time.Minute),
+	})
+	backends := krt.NewStaticCollection(alwaysSynced{}, []*agentgateway.AgentgatewayBackend{
+		testBackend("shared-backend", "https://issuer.example/jwks", 5*time.Minute),
 	})
 
-	if assert.Len(t, update.actions, 2) {
-		assert.False(t, update.actions[0].delete)
-		if assert.NotNil(t, update.actions[0].upsert) {
-			assert.Equal(t, keyA, update.actions[0].upsert.RequestKey)
-			assert.Equal(t, stayingOwner.TTL, update.actions[0].upsert.TTL)
-		}
+	collections := NewCollections(CollectionInputs{
+		AgentgatewayPolicies: policies,
+		Backends:             backends,
+		Resolver: jwksResolverFunc(func(owner RemoteJwksOwner) (*ResolvedJwksRequest, error) {
+			return resolvedJwksRequest(owner, "https://issuer.example/jwks"), nil
+		}),
+		KrtOpts: krtOpts,
+	})
 
-		assert.False(t, update.actions[1].delete)
-		if assert.NotNil(t, update.actions[1].upsert) {
-			assert.Equal(t, keyB, update.actions[1].upsert.RequestKey)
-			assert.Equal(t, movingOwner.TTL, update.actions[1].upsert.TTL)
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		requests := collections.SharedRequests.List()
+		if !assert.Len(c, requests, 1) {
+			return
 		}
+		assert.Equal(c, remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}.Key(), requests[0].RequestKey)
+		assert.Equal(c, 5*time.Minute, requests[0].TTL)
+		assert.False(c, requests[0].Discovery)
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestSharedJwksRequestsRetargetOwnerAcrossRequestKeys(t *testing.T) {
+	krtOpts := testKrtOptions(t)
+	policies := dynamicRemotePolicies(t, []*agentgateway.AgentgatewayPolicy{
+		testRemotePolicy("moving", "https://issuer.example/a", 5*time.Minute),
+		testRemotePolicy("staying", "https://issuer.example/a", 10*time.Minute),
+	}, krtOpts)
+
+	collections := NewCollections(CollectionInputs{
+		AgentgatewayPolicies: policies,
+		Backends:             krt.NewStaticCollection[*agentgateway.AgentgatewayBackend](alwaysSynced{}, nil),
+		Resolver: jwksResolverFunc(func(owner RemoteJwksOwner) (*ResolvedJwksRequest, error) {
+			if owner.Remote == nil {
+				return nil, assert.AnError
+			}
+			return resolvedJwksRequest(owner, owner.Remote.JwksPath), nil
+		}),
+		KrtOpts: krtOpts,
+	})
+
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		requests := collections.SharedRequests.List()
+		if !assert.Len(c, requests, 1) {
+			return
+		}
+		assert.Equal(c, 5*time.Minute, requests[0].TTL)
+	}, 2*time.Second, 20*time.Millisecond)
+
+	updatedPolicies := []*agentgateway.AgentgatewayPolicy{
+		testRemotePolicy("moving", "https://issuer.example/b", 5*time.Minute),
+		testRemotePolicy("staying", "https://issuer.example/a", 10*time.Minute),
 	}
+	policies.Reset(updatedPolicies)
+
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		requests := jwksRequestsByKey(collections.SharedRequests.List())
+		if !assert.Len(c, requests, 2) {
+			return
+		}
+		assert.Equal(c, 10*time.Minute, requests[remotehttp.FetchTarget{URL: "https://issuer.example/a"}.Key()].TTL)
+		assert.Equal(c, 5*time.Minute, requests[remotehttp.FetchTarget{URL: "https://issuer.example/b"}.Key()].TTL)
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestSharedJwksRequestsRemoveLastOwnerDeletesRequest(t *testing.T) {
+	krtOpts := testKrtOptions(t)
+	policies := dynamicRemotePolicies(t, []*agentgateway.AgentgatewayPolicy{
+		testRemotePolicy("one", "https://issuer.example/jwks", 5*time.Minute),
+	}, krtOpts)
+
+	collections := NewCollections(CollectionInputs{
+		AgentgatewayPolicies: policies,
+		Backends:             krt.NewStaticCollection[*agentgateway.AgentgatewayBackend](alwaysSynced{}, nil),
+		Resolver: jwksResolverFunc(func(owner RemoteJwksOwner) (*ResolvedJwksRequest, error) {
+			if owner.Remote == nil {
+				return nil, assert.AnError
+			}
+			return resolvedJwksRequest(owner, owner.Remote.JwksPath), nil
+		}),
+		KrtOpts: krtOpts,
+	})
+
+	assert.Eventually(t, func() bool {
+		return len(collections.SharedRequests.List()) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+
+	policies.Reset(nil)
+
+	assert.Eventually(t, func() bool {
+		return len(collections.SharedRequests.List()) == 0
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestStoreTracksSharedRequestCollectionLifecycle(t *testing.T) {
+	krtOpts := testKrtOptions(t)
+	requests := dynamicSharedJwksRequests(t, []SharedJwksRequest{
+		testSharedJwksRequest("https://issuer.example/a", 5*time.Minute),
+	}, krtOpts)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	client := apifake.NewClient(t)
+	store := NewStore(client, krtOpts, requests, nil, DefaultJwksStorePrefix, "agentgateway-system")
+	client.RunAndWait(ctx.Done())
+	go func() {
+		_ = store.Start(ctx)
+	}()
+
+	assert.Eventually(t, store.HasSynced, 2*time.Second, 20*time.Millisecond)
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		state, ok := store.jwksFetcher.lookup(remotehttp.FetchTarget{URL: "https://issuer.example/a"}.Key())
+		if !assert.True(c, ok) {
+			return
+		}
+		assert.Equal(c, 5*time.Minute, state.source.TTL)
+	}, 2*time.Second, 20*time.Millisecond)
+
+	updatedRequests := []SharedJwksRequest{
+		testSharedJwksRequest("https://issuer.example/b", 10*time.Minute),
+	}
+	requests.Reset(updatedRequests)
+
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		_, oldExists := store.jwksFetcher.lookup(remotehttp.FetchTarget{URL: "https://issuer.example/a"}.Key())
+		newState, newExists := store.jwksFetcher.lookup(remotehttp.FetchTarget{URL: "https://issuer.example/b"}.Key())
+		assert.False(c, oldExists)
+		if !assert.True(c, newExists) {
+			return
+		}
+		assert.Equal(c, 10*time.Minute, newState.source.TTL)
+	}, 2*time.Second, 20*time.Millisecond)
+
+	requests.Reset(nil)
+
+	assert.Eventually(t, func() bool {
+		_, ok := store.jwksFetcher.lookup(remotehttp.FetchTarget{URL: "https://issuer.example/b"}.Key())
+		return !ok
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestStoreLoadsPersistedKeysetsBeforeServing(t *testing.T) {
+	krtOpts := testKrtOptions(t)
+	target := remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}
+	keyset := Keyset{
+		RequestKey: target.Key(),
+		URL:        target.URL,
+		JwksJSON:   `{"keys":[]}`,
+	}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      JwksConfigMapName(DefaultJwksStorePrefix, keyset.RequestKey),
+			Namespace: "agentgateway-system",
+			Labels:    JwksStoreConfigMapLabel(DefaultJwksStorePrefix),
+		},
+	}
+	assert.NoError(t, SetJwksInConfigMap(cm, keyset))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	client := apifake.NewClient(t, cm)
+	requests := krt.NewStaticCollection[SharedJwksRequest](alwaysSynced{}, nil)
+	store := NewStore(client, krtOpts, requests, nil, DefaultJwksStorePrefix, "agentgateway-system")
+	client.RunAndWait(ctx.Done())
+	go func() {
+		_ = store.Start(ctx)
+	}()
+
+	assert.Eventually(t, store.HasSynced, 2*time.Second, 20*time.Millisecond)
+	actual, ok := store.JwksByRequestKey(keyset.RequestKey)
+	assert.True(t, ok)
+	assert.Equal(t, keyset, actual)
 }
 
 func TestStoreHasSyncedReflectsReadyState(t *testing.T) {
@@ -149,11 +213,110 @@ func TestStoreHasSyncedReflectsReadyState(t *testing.T) {
 	assert.True(t, store.HasSynced())
 }
 
-func testOwner(name string) OwnerKey {
-	return JwksOwnerID{
-		Kind:      OwnerKindPolicy,
-		Namespace: "default",
-		Name:      name,
-		Path:      "spec.traffic.jwtAuthentication.providers[0].jwks.remote",
+type jwksResolverFunc func(owner RemoteJwksOwner) (*ResolvedJwksRequest, error)
+
+func (f jwksResolverFunc) ResolveOwner(_ krt.HandlerContext, owner RemoteJwksOwner) (*ResolvedJwksRequest, error) {
+	return f(owner)
+}
+
+func testKrtOptions(t *testing.T) krtutil.KrtOptions {
+	t.Helper()
+	return krtutil.NewKrtOptions(t.Context().Done(), new(krt.DebugHandler))
+}
+
+func testRemotePolicy(name, uri string, ttl time.Duration) *agentgateway.AgentgatewayPolicy {
+	return &agentgateway.AgentgatewayPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      name,
+		},
+		Spec: agentgateway.AgentgatewayPolicySpec{
+			TargetRefs: make([]shared.LocalPolicyTargetReferenceWithSectionName, 1),
+			Traffic: &agentgateway.Traffic{
+				JWTAuthentication: &agentgateway.JWTAuthentication{
+					Providers: []agentgateway.JWTProvider{{
+						JWKS: agentgateway.JWKS{
+							Remote: &agentgateway.RemoteJWKS{
+								JwksPath:      uri,
+								CacheDuration: &metav1.Duration{Duration: ttl},
+							},
+						},
+					}},
+				},
+			},
+		},
 	}
+}
+
+func testBackend(name, uri string, ttl time.Duration) *agentgateway.AgentgatewayBackend {
+	return &agentgateway.AgentgatewayBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      name,
+		},
+		Spec: agentgateway.AgentgatewayBackendSpec{
+			MCP: &agentgateway.MCPBackend{},
+			Policies: &agentgateway.BackendFull{
+				MCP: &agentgateway.BackendMCP{
+					Authentication: &agentgateway.MCPAuthentication{
+						JWKS: agentgateway.RemoteJWKS{
+							JwksPath:      uri,
+							CacheDuration: &metav1.Duration{Duration: ttl},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func dynamicRemotePolicies(
+	t *testing.T,
+	initial []*agentgateway.AgentgatewayPolicy,
+	krtOpts krtutil.KrtOptions,
+) krt.StaticCollection[*agentgateway.AgentgatewayPolicy] {
+	t.Helper()
+
+	return krt.NewStaticCollection(alwaysSynced{}, initial, krtOpts.ToOptions("JwksPolicies")...)
+}
+
+func dynamicSharedJwksRequests(
+	t *testing.T,
+	initial []SharedJwksRequest,
+	krtOpts krtutil.KrtOptions,
+) krt.StaticCollection[SharedJwksRequest] {
+	t.Helper()
+
+	return krt.NewStaticCollection(alwaysSynced{}, initial, krtOpts.ToOptions("SharedJwksRequestsInput")...)
+}
+
+func resolvedJwksRequest(owner RemoteJwksOwner, requestURL string) *ResolvedJwksRequest {
+	target := remotehttp.FetchTarget{URL: requestURL}
+	return &ResolvedJwksRequest{
+		OwnerID: owner.ID,
+		Issuer:  owner.Issuer,
+		Target: remotehttp.ResolvedTarget{
+			Key:    target.Key(),
+			Target: target,
+		},
+		TTL:       owner.TTL,
+		Discovery: owner.Discovery != nil,
+	}
+}
+
+func testSharedJwksRequest(requestURL string, ttl time.Duration) SharedJwksRequest {
+	target := remotehttp.FetchTarget{URL: requestURL}
+	return SharedJwksRequest{
+		RequestKey: target.Key(),
+		Target:     target,
+		TTL:        ttl,
+	}
+}
+
+func jwksRequestsByKey(requests []SharedJwksRequest) map[remotehttp.FetchKey]SharedJwksRequest {
+	out := make(map[remotehttp.FetchKey]SharedJwksRequest, len(requests))
+	for _, request := range requests {
+		out[request.RequestKey] = request
+	}
+	return out
 }

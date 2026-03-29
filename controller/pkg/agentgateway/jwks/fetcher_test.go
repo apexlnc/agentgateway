@@ -258,6 +258,21 @@ func TestFetchJwksWithError(t *testing.T) {
 	assert.Equal(t, source.RequestKey, retry.requestKey)
 }
 
+func TestDiscoveryFetchWithoutProviderLookupUsesRequestContextInError(t *testing.T) {
+	f := newFetcherWithProviders(newCache(), nil)
+	target := remotehttp.FetchTarget{URL: "https://idp.internal/.well-known/openid-configuration"}
+	source := SharedJwksRequest{
+		RequestKey: target.Key(),
+		Target:     target,
+		Issuer:     "https://issuer.example",
+		Discovery:  true,
+	}.JwksSource()
+
+	_, _, err := f.fetchJwks(t.Context(), source)
+
+	assert.EqualError(t, err, fmt.Sprintf("oidc lookup is not configured for request %q (%s)", target.Key(), target.URL))
+}
+
 func TestFetcherDiscardedFetchDoesNotRepopulateRemovedKeyset(t *testing.T) {
 	ctx := t.Context()
 

@@ -2,8 +2,9 @@ package jwks
 
 import (
 	"context"
-	"sync"
 
+	"istio.io/istio/pkg/kube/controllers"
+	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/util/sets"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
@@ -25,39 +26,23 @@ type Store struct {
 	jwksCache           *jwksCache
 	jwksFetcher         *fetcher
 	persistedKeysets    *persistedKeysetReader
-	jwksChanges         <-chan JwksSource
-	sourcesByOwner      map[OwnerKey]JwksSource
-	ownersByRequestKey  map[remotehttp.FetchKey]map[OwnerKey]JwksSource
-	l                   sync.Mutex
+	requests            krt.Collection[SharedJwksRequest]
 	ready               chan struct{}
 }
 
-func NewStore(cli apiclient.Client, krtOptions krtutil.KrtOptions, jwksChanges <-chan JwksSource, providerLookup oidc.ProviderReader, storePrefix, deploymentNamespace string) *Store {
+func NewStore(cli apiclient.Client, krtOptions krtutil.KrtOptions, requests krt.Collection[SharedJwksRequest], providerLookup oidc.ProviderReader, storePrefix, deploymentNamespace string) *Store {
 	logger.Info("creating jwks store")
 
 	jwksCache := newCache()
-	jwksStore := &Store{
+	return &Store{
 		storePrefix:         storePrefix,
 		deploymentNamespace: deploymentNamespace,
 		jwksCache:           jwksCache,
-		jwksChanges:         jwksChanges,
+		requests:            requests,
 		jwksFetcher:         newFetcherWithProviders(jwksCache, providerLookup),
 		persistedKeysets:    newPersistedKeysetReader(cli, storePrefix, deploymentNamespace, krtOptions),
-		sourcesByOwner:      make(map[OwnerKey]JwksSource),
-		ownersByRequestKey:  make(map[remotehttp.FetchKey]map[OwnerKey]JwksSource),
 		ready:               make(chan struct{}),
 	}
-	return jwksStore
-}
-
-type storeUpdate struct {
-	actions []requestAction
-}
-
-type requestAction struct {
-	requestKey remotehttp.FetchKey
-	upsert     *JwksSource
-	delete     bool
 }
 
 func (s *Store) Start(ctx context.Context) error {
@@ -71,10 +56,35 @@ func (s *Store) Start(ctx context.Context) error {
 		logger.Error("error loading jwks store state", "error", err)
 	}
 
-	close(s.ready)
+	registration := s.requests.Register(func(event krt.Event[SharedJwksRequest]) {
+		switch event.Event {
+		case controllers.EventAdd, controllers.EventUpdate:
+			if event.New == nil {
+				return
+			}
+
+			request := event.New.JwksSource()
+			logger.Debug("updating keyset", "request_key", request.RequestKey, "config_map", JwksConfigMapName(s.storePrefix, request.RequestKey))
+			if err := s.jwksFetcher.AddOrUpdateKeyset(request); err != nil {
+				logger.Error("error adding/updating a jwks keyset", "error", err, "request_key", request.RequestKey, "uri", request.Target.URL)
+			}
+		case controllers.EventDelete:
+			if event.Old == nil {
+				return
+			}
+
+			logger.Debug("deleting keyset", "request_key", event.Old.RequestKey, "config_map", JwksConfigMapName(s.storePrefix, event.Old.RequestKey))
+			s.jwksFetcher.RemoveKeyset(event.Old.RequestKey)
+		}
+	})
+	defer registration.UnregisterHandler()
 
 	go s.jwksFetcher.Run(ctx)
-	go s.updateJwksSources(ctx)
+
+	if !registration.WaitUntilSynced(ctx.Done()) {
+		return nil
+	}
+	close(s.ready)
 
 	<-ctx.Done()
 	return nil
@@ -95,113 +105,6 @@ func (s *Store) SubscribeToUpdates() <-chan sets.Set[remotehttp.FetchKey] {
 
 func (s *Store) JwksByRequestKey(requestKey remotehttp.FetchKey) (Keyset, bool) {
 	return s.jwksCache.GetJwks(requestKey)
-}
-
-func (s *Store) updateJwksSources(ctx context.Context) {
-	for {
-		select {
-		case jwksUpdate := <-s.jwksChanges:
-			var update storeUpdate
-			if jwksUpdate.Deleted {
-				update = s.removeOwner(jwksUpdate.OwnerKey)
-			} else {
-				update = s.applyOwnerUpdate(jwksUpdate)
-			}
-
-			for _, action := range update.actions {
-				if action.delete {
-					logger.Debug("deleting keyset", "request_key", action.requestKey, "config_map", JwksConfigMapName(s.storePrefix, action.requestKey))
-					s.jwksFetcher.RemoveKeyset(action.requestKey)
-					continue
-				}
-				if action.upsert == nil {
-					continue
-				}
-
-				logger.Debug("updating keyset", "request_key", action.upsert.RequestKey, "config_map", JwksConfigMapName(s.storePrefix, action.upsert.RequestKey))
-				if err := s.jwksFetcher.AddOrUpdateKeyset(*action.upsert); err != nil {
-					logger.Error("error adding/updating a jwks keyset", "error", err, "request_key", action.upsert.RequestKey, "uri", action.upsert.Target.URL)
-				}
-			}
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-func (s *Store) applyOwnerUpdate(source JwksSource) storeUpdate {
-	s.l.Lock()
-	defer s.l.Unlock()
-
-	update := storeUpdate{actions: make([]requestAction, 0, 2)}
-	if existing, ok := s.sourcesByOwner[source.OwnerKey]; ok && existing.RequestKey != source.RequestKey {
-		s.deleteOwnerLocked(existing.OwnerKey, existing.RequestKey)
-		update.actions = append(update.actions, s.reconcileRequestLocked(existing.RequestKey))
-	}
-
-	s.sourcesByOwner[source.OwnerKey] = source
-	owners := s.ownersByRequestKey[source.RequestKey]
-	if owners == nil {
-		owners = make(map[OwnerKey]JwksSource)
-		s.ownersByRequestKey[source.RequestKey] = owners
-	}
-	owners[source.OwnerKey] = source
-
-	update.actions = append(update.actions, s.reconcileRequestLocked(source.RequestKey))
-
-	return update
-}
-
-func (s *Store) removeOwner(ownerKey OwnerKey) storeUpdate {
-	s.l.Lock()
-	defer s.l.Unlock()
-
-	existing, ok := s.sourcesByOwner[ownerKey]
-	if !ok {
-		return storeUpdate{}
-	}
-
-	s.deleteOwnerLocked(ownerKey, existing.RequestKey)
-	return storeUpdate{actions: []requestAction{s.reconcileRequestLocked(existing.RequestKey)}}
-}
-
-func (s *Store) deleteOwnerLocked(ownerKey OwnerKey, requestKey remotehttp.FetchKey) {
-	delete(s.sourcesByOwner, ownerKey)
-	owners := s.ownersByRequestKey[requestKey]
-	delete(owners, ownerKey)
-	if len(owners) == 0 {
-		delete(s.ownersByRequestKey, requestKey)
-	}
-}
-
-func (s *Store) reconcileRequestLocked(requestKey remotehttp.FetchKey) requestAction {
-	owners := s.ownersByRequestKey[requestKey]
-	if len(owners) == 0 {
-		return requestAction{requestKey: requestKey, delete: true}
-	}
-
-	shared := sharedSource(owners)
-	return requestAction{requestKey: requestKey, upsert: &shared}
-}
-
-func sharedSource(owners map[OwnerKey]JwksSource) JwksSource {
-	var (
-		shared JwksSource
-		first  = true
-	)
-
-	for _, source := range owners {
-		if first {
-			shared = source
-			first = false
-			continue
-		}
-		if source.TTL < shared.TTL {
-			shared.TTL = source.TTL
-		}
-	}
-
-	return shared
 }
 
 func (r *Store) NeedLeaderElection() bool {

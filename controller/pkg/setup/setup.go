@@ -348,34 +348,26 @@ func buildJwksStore(ctx context.Context, mgr manager.Manager, apiClient apiclien
 		BackendTLSPolicies:   agwCollections.BackendTLSPolicies,
 	})
 	oidcResolver := oidc.NewResolver(remoteHTTPResolver)
-	oidcOwnerCtrl := oidc.NewOwnerController(apiClient, oidc.OwnerControllerInputs{
+	oidcCollections := oidc.NewCollections(oidc.CollectionInputs{
 		AgentgatewayPolicies: agwCollections.AgentgatewayPolicies,
 		Resolver:             oidcResolver,
 		KrtOpts:              agwCollections.KrtOpts,
 	})
-	if err := mgr.Add(oidcOwnerCtrl); err != nil {
-		return err
-	}
-	oidcOwnerCtrl.Init(ctx)
 
-	oidcStore := oidc.NewStore(oidcOwnerCtrl.ProviderChanges())
+	oidcStore := oidc.NewStore(oidcCollections.SharedRequests)
 	if err := mgr.Add(oidcStore); err != nil {
 		return err
 	}
 
 	jwksResolver := jwks.NewResolver(remoteHTTPResolver)
-	jwksOwnerCtrl := jwks.NewOwnerController(apiClient, jwks.OwnerControllerInputs{
+	jwksCollections := jwks.NewCollections(jwks.CollectionInputs{
 		AgentgatewayPolicies: agwCollections.AgentgatewayPolicies,
 		Backends:             agwCollections.Backends,
 		Resolver:             jwksResolver,
 		KrtOpts:              agwCollections.KrtOpts,
 	})
-	if err := mgr.Add(jwksOwnerCtrl); err != nil {
-		return err
-	}
-	jwksOwnerCtrl.Init(ctx)
 
-	jwksStore := jwks.NewStore(apiClient, agwCollections.KrtOpts, jwksOwnerCtrl.JwksChanges(), oidcStore, jwks.DefaultJwksStorePrefix, namespaces.GetPodNamespace())
+	jwksStore := jwks.NewStore(apiClient, agwCollections.KrtOpts, jwksCollections.SharedRequests, oidcStore, jwks.DefaultJwksStorePrefix, namespaces.GetPodNamespace())
 	if err := mgr.Add(jwksStore); err != nil {
 		return err
 	}
