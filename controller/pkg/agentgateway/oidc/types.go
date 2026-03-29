@@ -9,7 +9,8 @@ import (
 )
 
 // ProviderReader exposes last-known provider metadata by request key to
-// downstream consumers such as jwks.
+// downstream consumers such as jwks while keeping discovery as a separate
+// controller-side subsystem from key materialization.
 type ProviderReader interface {
 	ProviderByRequestKey(requestKey remotehttp.FetchKey) (ProviderConfig, bool)
 }

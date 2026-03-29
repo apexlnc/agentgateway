@@ -34,11 +34,11 @@ func TestAddKeysetToFetcher(t *testing.T) {
 
 	fetch := f.schedule.Peek()
 	assert.NotNil(t, fetch)
-	assert.Equal(t, expected.RequestKey, fetch.requestKey)
+	assert.Equal(t, expected.RequestKey, fetch.RequestKey)
 	state, ok := f.requests[expected.RequestKey]
 	assert.True(t, ok)
 	assert.Equal(t, expected, state.source)
-	assert.Len(t, f.schedule, 1)
+	assert.Equal(t, 1, f.schedule.Len())
 }
 
 func TestRemoveKeysetFromFetcher(t *testing.T) {
@@ -52,7 +52,7 @@ func TestRemoveKeysetFromFetcher(t *testing.T) {
 
 	f.mu.Lock()
 	_, ok := f.requests[source.RequestKey]
-	assert.Empty(t, f.schedule)
+	assert.Equal(t, 0, f.schedule.Len())
 	f.mu.Unlock()
 	assert.False(t, ok)
 	_, ok = f.cache.GetJwks(source.RequestKey)
@@ -69,11 +69,11 @@ func TestAddOrUpdateKeysetReplacesExistingScheduleEntry(t *testing.T) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	assert.Len(t, f.schedule, 1)
+	assert.Equal(t, 1, f.schedule.Len())
 	fetch := f.schedule.Peek()
 	assert.NotNil(t, fetch)
-	assert.Equal(t, source.RequestKey, fetch.requestKey)
-	assert.Equal(t, uint64(2), fetch.generation)
+	assert.Equal(t, source.RequestKey, fetch.RequestKey)
+	assert.Equal(t, uint64(2), fetch.Generation)
 }
 
 func TestFetcherWithEmptyJwksFetchSchedule(t *testing.T) {
@@ -117,7 +117,7 @@ func TestSuccessfulJwksFetch(t *testing.T) {
 	assert.Equal(t, sampleJWKS, keyset.JwksJSON)
 
 	retry := awaitJwksRetry(t, f)
-	assert.WithinDuration(t, time.Now().Add(5*time.Minute), retry.at, 3*time.Second)
+	assert.WithinDuration(t, time.Now().Add(5*time.Minute), retry.At, 3*time.Second)
 }
 
 func TestSuccessfulDiscoveryBackedJwksFetch(t *testing.T) {
@@ -228,7 +228,7 @@ func TestFetchJwksWithError(t *testing.T) {
 	}, 250*time.Millisecond, 10*time.Millisecond)
 
 	retry := awaitJwksRetryAttempt(t, f, source.RequestKey, 1)
-	assert.WithinDuration(t, time.Now().Add(200*time.Millisecond), retry.at, 2*time.Second)
+	assert.WithinDuration(t, time.Now().Add(200*time.Millisecond), retry.At, 2*time.Second)
 }
 
 func TestDiscoveryFetchWithoutProviderLookupUsesRequestContextInError(t *testing.T) {
@@ -413,8 +413,8 @@ func awaitJwksRetryAttempt(t *testing.T, f *fetcher, requestKey remotehttp.Fetch
 	var retry fetchAt
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		retry = awaitJwksRetryNoWait(f)
-		assert.Equal(c, requestKey, retry.requestKey)
-		assert.Equal(c, retryAttempt, retry.retryAttempt)
+		assert.Equal(c, requestKey, retry.RequestKey)
+		assert.Equal(c, retryAttempt, retry.RetryAttempt)
 	}, testEventuallyTimeout, testEventuallyPoll)
 
 	return retry

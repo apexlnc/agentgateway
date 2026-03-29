@@ -17,6 +17,11 @@ const RunnableName = "oidc-store"
 
 // Store bridges KRT-derived shared discovery requests to the concrete runtime
 // that fetches and caches provider metadata for downstream consumers.
+//
+// Provider metadata is intentionally runtime-only here: for the current JWT
+// flow, JWKS remains the durable last-known-good artifact and is persisted by
+// the jwks subsystem. OIDC stays separate so other controller-side OIDC
+// consumers can reuse discovery without depending on JWKS internals.
 type Store struct {
 	providerCache   *providerCache
 	providerFetcher *fetcher

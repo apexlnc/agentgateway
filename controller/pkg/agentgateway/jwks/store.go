@@ -22,6 +22,11 @@ const RunnableName = "jwks-store"
 
 // Store bridges KRT-derived shared JWKS requests to the runtime that fetches,
 // persists, and serves keysets to translation.
+//
+// For JWT auth, JWKS is the persisted last-known-good boundary. Discovery
+// metadata is resolved through the oidc subsystem at runtime, but the
+// controller only persists the final key material needed by translation and
+// the dataplane.
 type Store struct {
 	storePrefix         string
 	deploymentNamespace string

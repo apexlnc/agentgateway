@@ -57,7 +57,7 @@ func TestFetcherRejectsIssuerMismatchBeforeCaching(t *testing.T) {
 
 	awaitNoProviderConfig(t, f.cache, source.RequestKey)
 	retry := awaitProviderRetryAttempt(t, f, source.RequestKey, 1)
-	assert.WithinDuration(t, time.Now().Add(200*time.Millisecond), retry.at, 2*time.Second)
+	assert.WithinDuration(t, time.Now().Add(200*time.Millisecond), retry.At, 2*time.Second)
 }
 
 func testProviderSource(issuer string) ProviderSource {
@@ -137,8 +137,8 @@ func awaitProviderRetryAttempt(t *testing.T, f *fetcher, requestKey remotehttp.F
 	var retry fetchAt
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		retry = awaitProviderRetryNoWait(f)
-		assert.Equal(c, requestKey, retry.requestKey)
-		assert.Equal(c, retryAttempt, retry.retryAttempt)
+		assert.Equal(c, requestKey, retry.RequestKey)
+		assert.Equal(c, retryAttempt, retry.RetryAttempt)
 	}, testEventuallyTimeout, testEventuallyPoll)
 
 	return retry
