@@ -38,10 +38,6 @@ func (s *testingSuite) TestRoutePolicySvcCaCert() {
 	s.TestRoutePolicySvc()
 }
 
-func (s *testingSuite) TestRoutePolicySvcDiscovery() {
-	s.assertProtectedRoute(secureRouteName, secureRouteHost, []string{jwtOrgOne})
-}
-
 func (s *testingSuite) TestRoutePolicySvc() {
 	s.assertProtectedRoute(secureRouteName, secureRouteHost, []string{jwtOrgOne})
 }

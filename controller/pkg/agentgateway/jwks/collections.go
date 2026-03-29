@@ -1,12 +1,12 @@
 package jwks
 
 import (
-	"sort"
+	"cmp"
 
 	"istio.io/istio/pkg/kube/krt"
+	"istio.io/istio/pkg/slices"
 
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
-	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
@@ -52,8 +52,6 @@ func NewCollections(inputs CollectionInputs) Collections {
 			Target:     resolved.Target.Target,
 			TLSConfig:  resolved.Target.TLSConfig,
 			TTL:        resolved.TTL,
-			Issuer:     resolved.Issuer,
-			Discovery:  resolved.Discovery,
 		}
 	}, inputs.KrtOpts.ToOptions("JwksSources")...)
 
@@ -80,8 +78,8 @@ func collapseJwksSources(grouped krt.IndexObject[remotehttp.FetchKey, JwksSource
 	}
 
 	sources := append([]JwksSource(nil), grouped.Objects...)
-	sort.Slice(sources, func(i, j int) bool {
-		return sources[i].OwnerKey.String() < sources[j].OwnerKey.String()
+	sources = slices.SortFunc(sources, func(a, b JwksSource) int {
+		return cmp.Compare(a.OwnerKey.String(), b.OwnerKey.String())
 	})
 
 	shared := SharedJwksRequest{
@@ -89,25 +87,8 @@ func collapseJwksSources(grouped krt.IndexObject[remotehttp.FetchKey, JwksSource
 		Target:     sources[0].Target,
 		TLSConfig:  sources[0].TLSConfig,
 		TTL:        sources[0].TTL,
-		Issuer:     sources[0].Issuer,
-		Discovery:  sources[0].Discovery,
 	}
 	for _, source := range sources[1:] {
-		if source.Discovery != shared.Discovery {
-			logger.Error("refusing to collapse jwks sources with mismatched discovery mode", "request_key", grouped.Key, "discovery", shared.Discovery, "conflicting_discovery", source.Discovery)
-			return nil
-		}
-		if shared.Discovery {
-			match, err := oidc.IssuersEquivalent(shared.Issuer, source.Issuer)
-			if err != nil {
-				logger.Error("invalid issuer while collapsing shared jwks request", "request_key", grouped.Key, "error", err)
-				return nil
-			}
-			if !match {
-				logger.Error("refusing to collapse discovery-backed jwks sources with mismatched issuers", "request_key", grouped.Key, "issuer", shared.Issuer, "conflicting_issuer", source.Issuer)
-				return nil
-			}
-		}
 		if source.TTL < shared.TTL {
 			shared.TTL = source.TTL
 		}

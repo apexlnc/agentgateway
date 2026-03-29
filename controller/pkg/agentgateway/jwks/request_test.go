@@ -43,7 +43,7 @@ func TestResolveEndpoint(t *testing.T) {
 	tests := []struct {
 		name                string
 		inputs              []any
-		remoteProvider      *agentgateway.RemoteJWKS
+		remoteProvider      agentgateway.RemoteJWKS
 		disableAutoResolver bool
 		expectedError       string
 		expectedURL         string
@@ -54,10 +54,6 @@ func TestResolveEndpoint(t *testing.T) {
 			remoteProvider:      serviceRemote,
 			disableAutoResolver: true,
 			expectedError:       "remote http resolver hasn't been initialized",
-		},
-		{
-			name:          "errors when remote provider is not initialized",
-			expectedError: "remote jwks provider hasn't been initialized",
 		},
 		{
 			name: "service-backed remote jwks uses attached backend tls policy",
@@ -157,7 +153,7 @@ func TestResolveEndpoint(t *testing.T) {
 	}
 }
 
-func gatewayJWTPolicy(remote *agentgateway.RemoteJWKS) *agentgateway.AgentgatewayPolicy {
+func gatewayJWTPolicy(remote agentgateway.RemoteJWKS) *agentgateway.AgentgatewayPolicy {
 	return &agentgateway.AgentgatewayPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "gw-policy", Namespace: "default"},
 		Spec: agentgateway.AgentgatewayPolicySpec{
@@ -173,7 +169,7 @@ func gatewayJWTPolicy(remote *agentgateway.RemoteJWKS) *agentgateway.Agentgatewa
 					Mode: agentgateway.JWTAuthenticationModeStrict,
 					Providers: []agentgateway.JWTProvider{{
 						Issuer: "https://kgateway.dev",
-						JWKS:   agentgateway.JWKS{Remote: remote},
+						JWKS:   agentgateway.JWKS{Remote: &remote},
 					}},
 				},
 			},
@@ -218,8 +214,8 @@ func staticBackend(name, host string, port int32, tlsPolicy *agentgateway.Backen
 	}
 }
 
-func remoteProvider(path string, backendRef gwv1.BackendObjectReference) *agentgateway.RemoteJWKS {
-	return &agentgateway.RemoteJWKS{
+func remoteProvider(path string, backendRef gwv1.BackendObjectReference) agentgateway.RemoteJWKS {
+	return agentgateway.RemoteJWKS{
 		JwksPath:   path,
 		BackendRef: backendRef,
 	}

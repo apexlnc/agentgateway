@@ -696,7 +696,7 @@ type JWTProvider struct {
 	JWKS JWKS `json:"jwks"`
 }
 
-// +kubebuilder:validation:ExactlyOneOf=remote;inline;discovery
+// +kubebuilder:validation:ExactlyOneOf=remote;inline
 type JWKS struct {
 	// `remote` specifies how to reach the JSON Web Key Set from a remote
 	// address.
@@ -708,14 +708,6 @@ type JWKS struct {
 	// +kubebuilder:validation:MaxLength=65536
 	// +optional
 	Inline *string `json:"inline,omitempty"`
-	// `discovery` specifies how to reach the issuer metadata endpoint used to
-	// discover the JSON Web Key Set and other OpenID Connect endpoints. In
-	// phase 1, the controller uses `backendRef` for issuer metadata discovery
-	// and then fetches the discovered `jwks_uri` directly. If the discovered
-	// `jwks_uri` shares the discovery authority, the resolved discovery TLS
-	// settings are reused.
-	// +optional
-	Discovery *OIDCDiscovery `json:"discovery,omitempty"`
 }
 
 type RemoteJWKS struct {
@@ -735,25 +727,6 @@ type RemoteJWKS struct {
 	// `AgentgatewayPolicy` containing backend TLS config can then be attached
 	// to the `Service` or `Backend` in order to set TLS options for a
 	// connection to the remote `jwks` source.
-	// +required
-	BackendRef gwv1.BackendObjectReference `json:"backendRef"`
-}
-
-type OIDCDiscovery struct {
-	// +optional
-	// +kubebuilder:validation:XValidation:rule="matches(self, '^([0-9]{1,5}(h|m|s|ms)){1,4}$')",message="invalid duration value"
-	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5m')",message="cacheDuration must be at least 5m."
-	// +kubebuilder:default="5m"
-	CacheDuration *metav1.Duration `json:"cacheDuration,omitempty"`
-	// `backendRef` references the issuer endpoint to reach for OpenID Connect
-	// discovery. Supported types are `Service` and static `Backend`. An
-	// `AgentgatewayPolicy` containing backend TLS config can then be attached
-	// to the `Service` or `Backend` in order to set TLS options for a
-	// connection to the issuer metadata source. In phase 1, the discovered
-	// `jwks_uri` reuses those TLS settings only when it shares the discovery
-	// authority. If it points at a different authority, it is fetched directly
-	// over HTTPS and custom transport or TLS configuration for that separate
-	// JWKS authority is not yet configurable.
 	// +required
 	BackendRef gwv1.BackendObjectReference `json:"backendRef"`
 }

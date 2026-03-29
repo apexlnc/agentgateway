@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
@@ -36,9 +36,9 @@ func TestPlanConfigMapSyncDeletesInactiveConfigMap(t *testing.T) {
 		JwksJSON:   `{"keys":[]}`,
 	}
 	cmName := JwksConfigMapName(DefaultJwksStorePrefix, keyset.RequestKey)
-	existingCm := configMapWithKeyset(t, cmName, "agentgateway-system", keyset)
+	existingEntry := persistedEntryWithKeyset(cmName, "agentgateway-system", keyset)
 
-	plan := planConfigMapSync(keyset.RequestKey, []*corev1.ConfigMap{existingCm}, DefaultJwksStorePrefix, func(remotehttp.FetchKey) (Keyset, bool) {
+	plan := planConfigMapSync(keyset.RequestKey, []PersistedEntry{existingEntry}, DefaultJwksStorePrefix, func(remotehttp.FetchKey) (Keyset, bool) {
 		return Keyset{}, false
 	})
 
@@ -69,9 +69,9 @@ func TestPlanConfigMapSyncDeletesNonCanonicalConfigMapsForActiveRequest(t *testi
 	legacyName := "jwks-store-legacy-name"
 	plan := planConfigMapSync(
 		keyset.RequestKey,
-		[]*corev1.ConfigMap{
-			configMapWithKeyset(t, canonicalName, "agentgateway-system", keyset),
-			configMapWithKeyset(t, legacyName, "agentgateway-system", keyset),
+		[]PersistedEntry{
+			persistedEntryWithKeyset(canonicalName, "agentgateway-system", keyset),
+			persistedEntryWithKeyset(legacyName, "agentgateway-system", keyset),
 		},
 		DefaultJwksStorePrefix,
 		func(requestKey remotehttp.FetchKey) (Keyset, bool) {
@@ -89,16 +89,12 @@ func TestPlanConfigMapSyncDeletesNonCanonicalConfigMapsForActiveRequest(t *testi
 	assert.Equal(t, []string{legacyName}, plan.deleteNames)
 }
 
-func configMapWithKeyset(t *testing.T, name, namespace string, keyset Keyset) *corev1.ConfigMap {
-	t.Helper()
-
-	cm := &corev1.ConfigMap{
-		Data: map[string]string{},
+func persistedEntryWithKeyset(name, namespace string, keyset Keyset) PersistedEntry {
+	return PersistedEntry{
+		NamespacedName: types.NamespacedName{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Keyset: &keyset,
 	}
-	cm.Name = name
-	cm.Namespace = namespace
-	if err := SetJwksInConfigMap(cm, keyset); err != nil {
-		t.Fatalf("SetJwksInConfigMap() error = %v", err)
-	}
-	return cm
 }

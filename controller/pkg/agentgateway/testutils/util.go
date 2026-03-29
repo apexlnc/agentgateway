@@ -274,10 +274,6 @@ func BuildRemoteHTTPResolver(collections *plugins.AgwCollections) remotehttp.Res
 
 func BuildJWKSLookup(collections *plugins.AgwCollections) jwks.Lookup {
 	jwksResolver := jwks.NewResolver(BuildRemoteHTTPResolver(collections))
-	return jwks.NewLookup(
-		collections.ConfigMaps,
-		jwksResolver,
-		jwks.DefaultJwksStorePrefix,
-		collections.SystemNamespace,
-	)
+	persistedJWKS := jwks.NewPersistedEntriesFromCollection(collections.ConfigMaps, jwks.DefaultJwksStorePrefix, collections.SystemNamespace)
+	return jwks.NewLookup(persistedJWKS, jwksResolver)
 }

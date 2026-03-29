@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"sort"
 	"strings"
 
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -1282,7 +1281,7 @@ func buildTLS(
 				return dummyTls, err
 			}
 			sameNamespace := cred.Source.Namespace == namespace
-			if !sameNamespace && !grants.SecretAllowed(ctx, GvkFromObject(gw), cred.Source, namespace) {
+			if !sameNamespace && !grants.SecretAllowed(ctx, objectKind, cred.Source, namespace) {
 				return dummyTls, &ConfigError{
 					Reason: InvalidListenerRefNotPermitted,
 					Message: fmt.Sprintf(
@@ -1323,7 +1322,8 @@ func resolveGatewayBackendTLS(
 	}
 
 	namespace := gw.GetNamespace()
-	if tlsRes.Source.Namespace != namespace && !grants.SecretAllowed(ctx, GvkFromObject(gw), tlsRes.Source, namespace) {
+	objectKind := GvkFromObject(gw)
+	if tlsRes.Source.Namespace != namespace && !grants.SecretAllowed(ctx, objectKind, tlsRes.Source, namespace) {
 		return &ConfigError{
 			Reason: string(gwv1.GatewayReasonRefNotPermitted),
 			Message: fmt.Sprintf(
@@ -1520,8 +1520,7 @@ func namespacesFromSelector(ctx krt.HandlerContext, localNamespace string, names
 		}
 	}
 	// Ensure stable order
-	sort.Strings(namespaces)
-	return namespaces
+	return slices.Sort(namespaces)
 }
 
 // NamespaceNameLabel represents that label added automatically to namespaces is newer Kubernetes clusters
@@ -1597,7 +1596,7 @@ func getGroup(rgk gwv1.RouteGroupKind) gwv1.Group {
 	return ptr.OrDefault(rgk.Group, wellknown.GatewayGroup)
 }
 
-// We can use istio's once they bump to v1 GW API
+// We can use istio's once they bump to v1 GW API.
 func GvkFromObject(obj any) schema.GroupVersionKind {
 	switch obj.(type) {
 	case *gwv1.Gateway:
@@ -1676,7 +1675,7 @@ func truncatedKeysMessage(data map[string][]byte) string {
 	for k := range data {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	keys = slices.Sort(keys)
 	if len(keys) < 3 {
 		return strings.Join(keys, ", ")
 	}

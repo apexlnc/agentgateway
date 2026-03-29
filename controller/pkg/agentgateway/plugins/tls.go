@@ -16,7 +16,7 @@ var (
 		return fmt.Errorf("%w %s/%s: %v", ErrInvalidTlsSecret, ns, n, err)
 	}
 
-	ErrMissingCACertKey = errors.New("ca.crt key missing")
+	ErrMissingCACertKey = utils.ErrMissingCACertKey
 
 	ErrInvalidCACertificate = func(n, ns string, err error) error {
 		return fmt.Errorf("invalid ca.crt in ConfigMap %s/%s: %v", ns, n, err)
@@ -40,7 +40,7 @@ func ValidateTlsSecretData(n, ns string, sslSecretData map[string][]byte) (clean
 func GetCACertFromConfigMap(cm *corev1.ConfigMap) (string, error) {
 	cleanedChainBytes, err := utils.CACertsFromConfigMap(cm)
 	if err != nil {
-		if errors.Is(err, utils.ErrMissingCACertKey) {
+		if errors.Is(err, ErrMissingCACertKey) {
 			return "", ErrMissingCACertKey
 		}
 		return "", ErrInvalidCACertificate(cm.Name, cm.Namespace, err)

@@ -22,7 +22,6 @@ import (
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
 	agwplugins "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/plugins"
-	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
 	"github.com/agentgateway/agentgateway/controller/pkg/deployer"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk"
@@ -71,6 +70,7 @@ type StartConfig struct {
 	Client apiclient.Client
 
 	AgwCollections *agwplugins.AgwCollections
+	JWKSLookup     jwks.Lookup
 
 	KrtOptions                     krtutil.KrtOptions
 	ExtraAgwResourceStatusHandlers map[schema.GroupVersionKind]syncer.ResourceStatusSyncer
@@ -107,11 +107,13 @@ func NewControllerBuilder(ctx context.Context, cfg StartConfig) (*ControllerBuil
 	// This only effects metrics in the resources subsystem and is not required for other metrics.
 	//metrics.StartResourceSyncMetricsProcessing(ctx)
 
-	runtimeDeps := newRuntimeDeps(cfg.AgwCollections)
+	if cfg.JWKSLookup == nil {
+		return nil, errors.New("jwks lookup is not configured")
+	}
 	agwMergedPlugins := agwPluginFactory(cfg)(ctx, cfg.AgwCollections)
 	syncerOptions := append([]syncer.AgentgatewaySyncerOption{}, cfg.AgentgatewaySyncerOptions...)
 	syncerOptions = append(syncerOptions, syncer.WithBuildReferenceTypes(func(agw *agwplugins.AgwCollections, base agwplugins.ReferenceTypes) agwplugins.ReferenceTypes {
-		base.InlineJWKS = runtimeDeps.JWKSLookup.InlineForOwner
+		base.InlineJWKS = cfg.JWKSLookup.InlineForOwner
 		return base
 	}))
 
@@ -180,31 +182,6 @@ func Plugins(agw *agwplugins.AgwCollections) []agwplugins.AgwPlugin {
 		agwplugins.NewA2APlugin(agw),
 		agwplugins.NewBackendTLSPlugin(agw),
 		agentgatewaybackend.NewBackendPlugin(agw),
-	}
-}
-
-type runtimeDeps struct {
-	JWKSLookup jwks.Lookup
-}
-
-func newRuntimeDeps(agw *agwplugins.AgwCollections) runtimeDeps {
-	remoteHTTPResolver := remotehttp.NewResolver(remotehttp.Inputs{
-		ConfigMaps:           agw.ConfigMaps,
-		Services:             agw.Services,
-		Backends:             agw.Backends,
-		AgentgatewayPolicies: agw.AgentgatewayPolicies,
-		BackendTLSPolicies:   agw.BackendTLSPolicies,
-	})
-	jwksResolver := jwks.NewResolver(remoteHTTPResolver)
-	jwksLookup := jwks.NewLookup(
-		agw.ConfigMaps,
-		jwksResolver,
-		jwks.DefaultJwksStorePrefix,
-		agw.SystemNamespace,
-	)
-
-	return runtimeDeps{
-		JWKSLookup: jwksLookup,
 	}
 }
 

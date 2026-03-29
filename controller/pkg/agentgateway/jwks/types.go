@@ -24,8 +24,6 @@ type JwksSource struct {
 	// +noKrtEquals
 	TLSConfig *tls.Config
 	TTL       time.Duration
-	Issuer    string
-	Discovery bool
 }
 
 func (s JwksSource) ResourceName() string {
@@ -36,9 +34,7 @@ func (s JwksSource) Equals(other JwksSource) bool {
 	return s.OwnerKey == other.OwnerKey &&
 		s.RequestKey == other.RequestKey &&
 		reflect.DeepEqual(s.Target, other.Target) &&
-		s.TTL == other.TTL &&
-		s.Issuer == other.Issuer &&
-		s.Discovery == other.Discovery
+		s.TTL == other.TTL
 }
 
 // SharedJwksRequest is the canonical JWKS request produced by KRT for a shared
@@ -49,8 +45,6 @@ type SharedJwksRequest struct {
 	// +noKrtEquals
 	TLSConfig *tls.Config
 	TTL       time.Duration
-	Issuer    string
-	Discovery bool
 }
 
 func (r SharedJwksRequest) ResourceName() string {
@@ -60,9 +54,7 @@ func (r SharedJwksRequest) ResourceName() string {
 func (r SharedJwksRequest) Equals(other SharedJwksRequest) bool {
 	return r.RequestKey == other.RequestKey &&
 		reflect.DeepEqual(r.Target, other.Target) &&
-		r.TTL == other.TTL &&
-		r.Issuer == other.Issuer &&
-		r.Discovery == other.Discovery
+		r.TTL == other.TTL
 }
 
 // JwksSource returns the canonical runtime request consumed by the fetcher.
@@ -72,7 +64,5 @@ func (r SharedJwksRequest) JwksSource() JwksSource {
 		Target:     r.Target,
 		TLSConfig:  r.TLSConfig,
 		TTL:        r.TTL,
-		Issuer:     r.Issuer,
-		Discovery:  r.Discovery,
 	}
 }

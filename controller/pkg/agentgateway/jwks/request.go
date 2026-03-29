@@ -10,21 +10,17 @@ import (
 )
 
 var (
-	errResolverNotInitialized       = errors.New("remote http resolver hasn't been initialized")
-	errRemoteProviderNotInitialized = errors.New("remote jwks provider hasn't been initialized")
+	errResolverNotInitialized = errors.New("remote http resolver hasn't been initialized")
 )
 
 func ResolveEndpoint(
 	krtctx krt.HandlerContext,
 	resolver remotehttp.Resolver,
 	policyName, defaultNS string,
-	remoteProvider *agentgateway.RemoteJWKS,
+	remoteProvider agentgateway.RemoteJWKS,
 ) (*remotehttp.ResolvedTarget, error) {
 	if resolver == nil {
 		return nil, errResolverNotInitialized
-	}
-	if remoteProvider == nil {
-		return nil, errRemoteProviderNotInitialized
 	}
 
 	return resolver.Resolve(krtctx, remotehttp.ResolveInput{

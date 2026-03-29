@@ -572,7 +572,7 @@ func processJWTAuthenticationPolicy(ctx PolicyCtx, jwt *agentgateway.JWTAuthenti
 			p.Providers = append(p.Providers, jp)
 			continue
 		}
-		if pp.JWKS.Remote != nil || pp.JWKS.Discovery != nil {
+		if pp.JWKS.Remote != nil {
 			owner, ok := jwks.PolicyJWTProviderLookupOwner(policy.Namespace, policy.Name, idx, pp)
 			if !ok {
 				continue

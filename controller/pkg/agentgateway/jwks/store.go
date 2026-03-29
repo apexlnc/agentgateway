@@ -2,17 +2,15 @@ package jwks
 
 import (
 	"context"
+	"fmt"
 
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/util/sets"
 
-	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
 	"github.com/agentgateway/agentgateway/controller/pkg/common"
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
-	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
 
 var logger = logging.New("jwks_store")
@@ -23,37 +21,37 @@ const RunnableName = "jwks-store"
 // Store bridges KRT-derived shared JWKS requests to the runtime that fetches,
 // persists, and serves keysets to translation.
 //
-// For JWT auth, JWKS is the persisted last-known-good boundary. Discovery
-// metadata is resolved through the oidc subsystem at runtime, but the
-// controller only persists the final key material needed by translation and
-// the dataplane.
+// For JWT auth, JWKS is the persisted last-known-good boundary for explicit
+// remote key fetches.
 type Store struct {
-	storePrefix         string
-	deploymentNamespace string
-	jwksCache           *jwksCache
-	jwksFetcher         *fetcher
-	persistedKeysets    *persistedKeysetReader
-	requests            krt.Collection[SharedJwksRequest]
-	ready               chan struct{}
+	storePrefix      string
+	jwksCache        *jwksCache
+	jwksFetcher      *fetcher
+	persistedKeysets *persistedKeysetReader
+	requests         krt.Collection[SharedJwksRequest]
+	ready            chan struct{}
 }
 
-func NewStore(cli apiclient.Client, krtOptions krtutil.KrtOptions, requests krt.Collection[SharedJwksRequest], providerLookup oidc.ProviderReader, storePrefix, deploymentNamespace string) *Store {
+func NewStore(requests krt.Collection[SharedJwksRequest], persistedKeysets *PersistedEntries, storePrefix string) *Store {
 	logger.Info("creating jwks store")
 
 	jwksCache := newCache()
 	return &Store{
-		storePrefix:         storePrefix,
-		deploymentNamespace: deploymentNamespace,
-		jwksCache:           jwksCache,
-		requests:            requests,
-		jwksFetcher:         newFetcherWithProviders(jwksCache, providerLookup),
-		persistedKeysets:    newPersistedKeysetReader(cli, storePrefix, deploymentNamespace, krtOptions),
-		ready:               make(chan struct{}),
+		storePrefix:      storePrefix,
+		jwksCache:        jwksCache,
+		requests:         requests,
+		jwksFetcher:      newFetcher(jwksCache),
+		persistedKeysets: newPersistedKeysetReader(persistedKeysets),
+		ready:            make(chan struct{}),
 	}
 }
 
 func (s *Store) Start(ctx context.Context) error {
 	logger.Info("starting jwks store")
+
+	if s.persistedKeysets == nil {
+		return fmt.Errorf("jwks persisted keyset reader is not configured")
+	}
 
 	storedJwks, err := s.persistedKeysets.LoadPersistedKeysets(ctx)
 	if err != nil {

@@ -13,7 +13,6 @@ import (
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/shared"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-	apifake "github.com/agentgateway/agentgateway/controller/pkg/apiclient/fake"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
 
@@ -38,7 +37,6 @@ func TestSharedJwksRequestsCollapseMinTTLAcrossOwners(t *testing.T) {
 	requests := awaitSharedJwksRequests(t, collections.SharedRequests, 1)
 	assert.Equal(t, remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}.Key(), requests[0].RequestKey)
 	assert.Equal(t, 5*time.Minute, requests[0].TTL)
-	assert.False(t, requests[0].Discovery)
 }
 
 func TestSharedJwksRequestsRetargetOwnerAcrossRequestKeys(t *testing.T) {
@@ -52,9 +50,6 @@ func TestSharedJwksRequestsRetargetOwnerAcrossRequestKeys(t *testing.T) {
 		AgentgatewayPolicies: policies,
 		Backends:             krt.NewStaticCollection[*agentgateway.AgentgatewayBackend](alwaysSynced{}, nil),
 		Resolver: jwksResolverFunc(func(owner RemoteJwksOwner) (*ResolvedJwksRequest, error) {
-			if owner.Remote == nil {
-				return nil, assert.AnError
-			}
 			return resolvedJwksRequest(owner, owner.Remote.JwksPath), nil
 		}),
 		KrtOpts: krtOpts,
@@ -84,9 +79,6 @@ func TestSharedJwksRequestsRemoveLastOwnerDeletesRequest(t *testing.T) {
 		AgentgatewayPolicies: policies,
 		Backends:             krt.NewStaticCollection[*agentgateway.AgentgatewayBackend](alwaysSynced{}, nil),
 		Resolver: jwksResolverFunc(func(owner RemoteJwksOwner) (*ResolvedJwksRequest, error) {
-			if owner.Remote == nil {
-				return nil, assert.AnError
-			}
 			return resolvedJwksRequest(owner, owner.Remote.JwksPath), nil
 		}),
 		KrtOpts: krtOpts,
@@ -108,9 +100,12 @@ func TestStoreTracksSharedRequestCollectionLifecycle(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	client := apifake.NewClient(t)
-	store := NewStore(client, krtOpts, requests, nil, DefaultJwksStorePrefix, "agentgateway-system")
-	client.RunAndWait(ctx.Done())
+	persisted := NewPersistedEntriesFromCollection(
+		krt.NewStaticCollection[*corev1.ConfigMap](alwaysSynced{}, nil),
+		DefaultJwksStorePrefix,
+		"agentgateway-system",
+	)
+	store := NewStore(requests, persisted, DefaultJwksStorePrefix)
 	go func() {
 		_ = store.Start(ctx)
 	}()
@@ -134,7 +129,6 @@ func TestStoreTracksSharedRequestCollectionLifecycle(t *testing.T) {
 }
 
 func TestStoreLoadsPersistedKeysetsBeforeServing(t *testing.T) {
-	krtOpts := testKrtOptions(t)
 	target := remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}
 	keyset := Keyset{
 		RequestKey: target.Key(),
@@ -144,7 +138,7 @@ func TestStoreLoadsPersistedKeysetsBeforeServing(t *testing.T) {
 
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      JwksConfigMapName(DefaultJwksStorePrefix, keyset.RequestKey),
+			Name:      "jwks-store-legacy-name",
 			Namespace: "agentgateway-system",
 			Labels:    JwksStoreConfigMapLabel(DefaultJwksStorePrefix),
 		},
@@ -154,10 +148,13 @@ func TestStoreLoadsPersistedKeysetsBeforeServing(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	client := apifake.NewClient(t, cm)
 	requests := krt.NewStaticCollection[SharedJwksRequest](alwaysSynced{}, nil)
-	store := NewStore(client, krtOpts, requests, nil, DefaultJwksStorePrefix, "agentgateway-system")
-	client.RunAndWait(ctx.Done())
+	persisted := NewPersistedEntriesFromCollection(
+		krt.NewStaticCollection[*corev1.ConfigMap](alwaysSynced{}, []*corev1.ConfigMap{cm}),
+		DefaultJwksStorePrefix,
+		"agentgateway-system",
+	)
+	store := NewStore(requests, persisted, DefaultJwksStorePrefix)
 	go func() {
 		_ = store.Start(ctx)
 	}()
@@ -261,13 +258,11 @@ func resolvedJwksRequest(owner RemoteJwksOwner, requestURL string) *ResolvedJwks
 	target := remotehttp.FetchTarget{URL: requestURL}
 	return &ResolvedJwksRequest{
 		OwnerID: owner.ID,
-		Issuer:  owner.Issuer,
 		Target: remotehttp.ResolvedTarget{
 			Key:    target.Key(),
 			Target: target,
 		},
-		TTL:       owner.TTL,
-		Discovery: owner.Discovery != nil,
+		TTL: owner.TTL,
 	}
 }
 

@@ -2,11 +2,8 @@ package jwks
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -14,7 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"istio.io/istio/pkg/util/sets"
 
-	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
@@ -120,89 +116,6 @@ func TestSuccessfulJwksFetch(t *testing.T) {
 	assert.WithinDuration(t, time.Now().Add(5*time.Minute), retry.At, 3*time.Second)
 }
 
-func TestSuccessfulDiscoveryBackedJwksFetch(t *testing.T) {
-	ctx := t.Context()
-
-	source := testDiscoverySource(
-		"https://idp.internal/realms/team/.well-known/openid-configuration",
-		"https://accounts.google.com",
-	)
-	source.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-	expectedTarget := remotehttp.FetchTarget{
-		URL: "https://127.0.0.1:1/oauth2/v3/certs",
-	}
-
-	f := newFetcherWithProviders(newCache(), staticProviderReader{
-		source.RequestKey: {
-			RequestKey:   source.RequestKey,
-			DiscoveryURL: source.Target.URL,
-			Issuer:       source.Issuer,
-			JwksURI:      expectedTarget.URL,
-		},
-	})
-	assert.NoError(t, f.AddOrUpdateKeyset(source))
-	updates := f.SubscribeToUpdates()
-
-	expectedJwks := jose.JSONWebKeySet{}
-	err := json.Unmarshal([]byte(sampleJWKS), &expectedJwks)
-	assert.NoError(t, err)
-
-	f.defaultJwksClient = stubJwksClient{
-		t:           t,
-		expectedReq: expectedTarget,
-		result:      expectedJwks,
-	}
-	go f.maybeFetchJwks(ctx)
-
-	awaitJwksUpdate(t, updates, source.RequestKey)
-	keyset := awaitStoredKeyset(t, f.cache, source.RequestKey)
-	assert.Equal(t, expectedTarget.URL, keyset.URL)
-	assert.Equal(t, sampleJWKS, keyset.JwksJSON)
-}
-
-func TestSuccessfulDiscoveryBackedJwksFetchReusesTLSForSameAuthority(t *testing.T) {
-	ctx := t.Context()
-
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/oauth2/v3/certs" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(sampleJWKS))
-	}))
-	defer server.Close()
-
-	source := testDiscoverySource(
-		server.URL+"/.well-known/openid-configuration",
-		"https://issuer.example",
-	)
-	source.TLSConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
-
-	f := newFetcherWithProviders(newCache(), staticProviderReader{
-		source.RequestKey: {
-			RequestKey:   source.RequestKey,
-			DiscoveryURL: source.Target.URL,
-			Issuer:       source.Issuer,
-			JwksURI:      server.URL + "/oauth2/v3/certs",
-		},
-	})
-	assert.NoError(t, f.AddOrUpdateKeyset(source))
-	updates := f.SubscribeToUpdates()
-
-	f.defaultJwksClient = stubJwksClient{
-		t:           t,
-		expectedReq: remotehttp.FetchTarget{URL: "https://default-client-should-not-run.invalid"},
-		err:         fmt.Errorf("default jwks client should not be used for same-authority discovery"),
-	}
-	go f.maybeFetchJwks(ctx)
-
-	awaitJwksUpdate(t, updates, source.RequestKey)
-	keyset := awaitStoredKeyset(t, f.cache, source.RequestKey)
-	assert.Equal(t, server.URL+"/oauth2/v3/certs", keyset.URL)
-	assert.Equal(t, sampleJWKS, keyset.JwksJSON)
-}
-
 func TestFetchJwksWithError(t *testing.T) {
 	ctx := t.Context()
 
@@ -229,21 +142,6 @@ func TestFetchJwksWithError(t *testing.T) {
 
 	retry := awaitJwksRetryAttempt(t, f, source.RequestKey, 1)
 	assert.WithinDuration(t, time.Now().Add(200*time.Millisecond), retry.At, 2*time.Second)
-}
-
-func TestDiscoveryFetchWithoutProviderLookupUsesRequestContextInError(t *testing.T) {
-	f := newFetcherWithProviders(newCache(), nil)
-	target := remotehttp.FetchTarget{URL: "https://idp.internal/.well-known/openid-configuration"}
-	source := SharedJwksRequest{
-		RequestKey: target.Key(),
-		Target:     target,
-		Issuer:     "https://issuer.example",
-		Discovery:  true,
-	}.JwksSource()
-
-	_, _, err := f.fetchJwks(t.Context(), source)
-
-	assert.EqualError(t, err, fmt.Sprintf("oidc lookup is not configured for request %q (%s)", target.Key(), target.URL))
 }
 
 func TestFetcherDiscardedFetchDoesNotRepopulateRemovedKeyset(t *testing.T) {
@@ -319,26 +217,6 @@ func testSourceWithURL(requestURL string) JwksSource {
 		Target:     target,
 		TTL:        5 * time.Minute,
 	}
-}
-
-func testDiscoverySource(requestURL, issuer string) JwksSource {
-	source := testSourceWithURL(requestURL)
-	source.OwnerKey = JwksOwnerID{
-		Kind:      OwnerKindPolicy,
-		Namespace: "default",
-		Name:      "test",
-		Path:      "spec.traffic.jwtAuthentication.providers[0].jwks.discovery",
-	}
-	source.Issuer = issuer
-	source.Discovery = true
-	return source
-}
-
-type staticProviderReader map[remotehttp.FetchKey]oidc.ProviderConfig
-
-func (r staticProviderReader) ProviderByRequestKey(requestKey remotehttp.FetchKey) (oidc.ProviderConfig, bool) {
-	provider, ok := r[requestKey]
-	return provider, ok
 }
 
 type stubJwksClient struct {

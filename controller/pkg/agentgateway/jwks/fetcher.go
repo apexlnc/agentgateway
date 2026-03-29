@@ -1,11 +1,13 @@
 package jwks
 
 import (
+	"container/heap"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -15,20 +17,162 @@ import (
 	"istio.io/istio/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/internal/remotefetch"
-	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
+
+const (
+	initialRetryDelay = 100 * time.Millisecond
+	maxRetryDelay     = 15 * time.Second
+	maxRetryShift     = 30
+	clientTimeout     = 10 * time.Second
+)
+
+type fetchAt struct {
+	At           time.Time
+	RequestKey   remotehttp.FetchKey
+	Generation   uint64
+	RetryAttempt int
+	index        int
+}
+
+type fetchHeap []*fetchAt
+
+func (h fetchHeap) Len() int           { return len(h) }
+func (h fetchHeap) Less(i, j int) bool { return h[i].At.Before(h[j].At) }
+func (h fetchHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].index = i
+	h[j].index = j
+}
+
+func (h *fetchHeap) Push(x any) {
+	entry := x.(*fetchAt)
+	entry.index = len(*h)
+	*h = append(*h, entry)
+}
+
+func (h *fetchHeap) Pop() any {
+	old := *h
+	n := len(old)
+	entry := old[n-1]
+	entry.index = -1
+	old[n-1] = nil
+	*h = old[:n-1]
+	return entry
+}
+
+type fetchSchedule struct {
+	heap      fetchHeap
+	scheduled map[remotehttp.FetchKey]*fetchAt
+}
+
+func newFetchSchedule() *fetchSchedule {
+	s := &fetchSchedule{
+		heap:      make(fetchHeap, 0),
+		scheduled: make(map[remotehttp.FetchKey]*fetchAt),
+	}
+	heap.Init(&s.heap)
+	return s
+}
+
+func (s *fetchSchedule) Len() int {
+	return len(s.heap)
+}
+
+func (s *fetchSchedule) Peek() *fetchAt {
+	if len(s.heap) == 0 {
+		return nil
+	}
+	return s.heap[0]
+}
+
+func (s *fetchSchedule) PopDue(now time.Time) []fetchAt {
+	var due []fetchAt
+	for {
+		next := s.Peek()
+		if next == nil || next.At.After(now) {
+			return due
+		}
+		entry := heap.Pop(&s.heap).(*fetchAt)
+		delete(s.scheduled, entry.RequestKey)
+		due = append(due, *entry)
+	}
+}
+
+func (s *fetchSchedule) Schedule(requestKey remotehttp.FetchKey, generation uint64, at time.Time, retryAttempt int) {
+	if scheduled := s.scheduled[requestKey]; scheduled != nil {
+		scheduled.At = at
+		scheduled.Generation = generation
+		scheduled.RetryAttempt = retryAttempt
+		heap.Fix(&s.heap, scheduled.index)
+		return
+	}
+
+	entry := &fetchAt{
+		At:           at,
+		RequestKey:   requestKey,
+		Generation:   generation,
+		RetryAttempt: retryAttempt,
+		index:        -1,
+	}
+	heap.Push(&s.heap, entry)
+	s.scheduled[requestKey] = entry
+}
+
+func (s *fetchSchedule) Remove(requestKey remotehttp.FetchKey) {
+	if scheduled := s.scheduled[requestKey]; scheduled != nil {
+		heap.Remove(&s.heap, scheduled.index)
+		delete(s.scheduled, requestKey)
+	}
+}
+
+func nextRetryDelay(retryAttempt int) time.Duration {
+	shift := min(retryAttempt+1, maxRetryShift)
+
+	next := initialRetryDelay * time.Duration(1<<shift)
+	if next > maxRetryDelay {
+		return maxRetryDelay
+	}
+	return next
+}
+
+func makeFetchClient(tlsConfig *tls.Config) *http.Client {
+	return &http.Client{
+		Timeout: clientTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+			DialContext: (&net.Dialer{
+				Timeout: 5 * time.Second,
+			}).DialContext,
+			DisableKeepAlives: true,
+		},
+	}
+}
+
+func drainTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
+
+func signalWake(wake chan<- struct{}) {
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
 
 // fetcher fetches and periodically refreshes remote JWKS keysets.
 // Fetched keysets are stored in jwksCache and updates are sent to subscribers.
 type fetcher struct {
 	mu                sync.Mutex
 	cache             *jwksCache
-	providers         oidc.ProviderReader
 	defaultJwksClient JwksHttpClient
 	requests          map[remotehttp.FetchKey]fetchState
-	schedule          *remotefetch.Schedule
+	schedule          *fetchSchedule
 	subscribers       []chan sets.Set[remotehttp.FetchKey]
 	wake              chan struct{}
 }
@@ -38,40 +182,23 @@ type fetchState struct {
 	generation uint64
 }
 
-const (
-	maxRetryDelay = remotefetch.MaxRetryDelay
-)
-
 type JwksHttpClient interface {
 	FetchJwks(ctx context.Context, target remotehttp.FetchTarget) (jose.JSONWebKeySet, error)
 }
-
-type fetchAt = remotefetch.Entry
 
 type jwksHttpClientImpl struct {
 	Client *http.Client
 }
 
 func newFetcher(cache *jwksCache) *fetcher {
-	return newFetcherWithProviders(cache, nil)
-}
-
-func newFetcherWithProviders(cache *jwksCache, providers oidc.ProviderReader) *fetcher {
-	fetcher := &fetcher{
+	return &fetcher{
 		cache:             cache,
-		providers:         providers,
-		defaultJwksClient: &jwksHttpClientImpl{Client: remotefetch.MakeClient(nil)},
+		defaultJwksClient: &jwksHttpClientImpl{Client: makeFetchClient(nil)},
 		requests:          make(map[remotehttp.FetchKey]fetchState),
-		schedule:          remotefetch.NewSchedule(),
+		schedule:          newFetchSchedule(),
 		subscribers:       make([]chan sets.Set[remotehttp.FetchKey], 0),
 		wake:              make(chan struct{}, 1),
 	}
-
-	return fetcher
-}
-
-func nextRetryDelay(retryAttempt int) time.Duration {
-	return remotefetch.NextRetryDelay(retryAttempt)
 }
 
 func (f *fetcher) Run(ctx context.Context) {
@@ -106,7 +233,7 @@ func (f *fetcher) Run(ctx context.Context) {
 		case <-f.wake:
 			// Drain the timer if it fired concurrently with wake so the next loop
 			// iteration can safely reset it after a request was added, updated, or removed.
-			remotefetch.DrainTimer(timer)
+			drainTimer(timer)
 		}
 	}
 }
@@ -125,7 +252,7 @@ func (f *fetcher) maybeFetchJwks(ctx context.Context) {
 			continue
 		}
 
-		logger.Debug("fetching jwks", "request_key", fetch.RequestKey, "target", state.source.Target.URL, "discovery", state.source.Discovery)
+		logger.Debug("fetching jwks", "request_key", fetch.RequestKey, "target", state.source.Target.URL)
 
 		requestURL, jwks, err := f.fetchJwks(ctx, state.source)
 		if err != nil {
@@ -198,47 +325,20 @@ func (f *fetcher) RemoveKeyset(requestKey remotehttp.FetchKey) {
 
 	f.cache.deleteJwks(requestKey)
 	f.notifySubscribers(sets.New(requestKey))
-	remotefetch.Signal(f.wake)
+	signalWake(f.wake)
 }
 
 func (f *fetcher) fetchJwks(ctx context.Context, source JwksSource) (string, jose.JSONWebKeySet, error) {
-	target := source.Target
-	tlsConfig := source.TLSConfig
-	if source.Discovery {
-		if f.providers == nil {
-			return "", jose.JSONWebKeySet{}, fmt.Errorf("oidc lookup is not configured for request %q (%s)", source.RequestKey, source.Target.URL)
-		}
-		provider, ok := f.providers.ProviderByRequestKey(source.RequestKey)
-		if !ok {
-			return "", jose.JSONWebKeySet{}, fmt.Errorf("oidc provider config for %q isn't available (not yet fetched or fetch failed)", source.Target.URL)
-		}
-		if err := oidc.ValidateProviderForIssuer(source.Issuer, provider); err != nil {
-			return "", jose.JSONWebKeySet{}, err
-		}
-		var err error
-		target, err = oidc.DiscoveredJWKSTarget(source.Issuer, provider)
-		if err != nil {
-			return "", jose.JSONWebKeySet{}, err
-		}
-		shareAuthority, err := oidc.URLsShareAuthority(source.Target.URL, target.URL)
-		if err != nil {
-			return "", jose.JSONWebKeySet{}, err
-		}
-		if !shareAuthority {
-			tlsConfig = nil
-		}
-	}
-
-	jwks, err := f.fetchJwksFromTarget(ctx, tlsConfig, target)
+	jwks, err := f.fetchJwksFromTarget(ctx, source.TLSConfig, source.Target)
 	if err != nil {
 		return "", jose.JSONWebKeySet{}, err
 	}
-	return target.URL, jwks, nil
+	return source.Target.URL, jwks, nil
 }
 
 func (f *fetcher) fetchJwksFromTarget(ctx context.Context, tlsConfig *tls.Config, target remotehttp.FetchTarget) (jose.JSONWebKeySet, error) {
 	if tlsConfig != nil {
-		return (&jwksHttpClientImpl{Client: remotefetch.MakeClient(tlsConfig)}).FetchJwks(ctx, target)
+		return (&jwksHttpClientImpl{Client: makeFetchClient(tlsConfig)}).FetchJwks(ctx, target)
 	}
 	return f.defaultJwksClient.FetchJwks(ctx, target)
 }
@@ -297,7 +397,7 @@ func (f *fetcher) scheduleAtLocked(requestKey remotehttp.FetchKey, generation ui
 	}
 
 	f.schedule.Schedule(requestKey, generation, at, retryAttempt)
-	remotefetch.Signal(f.wake)
+	signalWake(f.wake)
 }
 
 func (f *fetcher) notifySubscribers(updates sets.Set[remotehttp.FetchKey]) {

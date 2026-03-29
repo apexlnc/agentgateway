@@ -7646,105 +7646,6 @@ spec:
                                 `jwks` defines the JSON Web Key Set used to validate the signature of the
                                 JWT.
                               properties:
-                                discovery:
-                                  description: |-
-                                    `discovery` specifies how to reach the issuer metadata endpoint used to
-                                    discover the JSON Web Key Set and other OpenID Connect endpoints. In
-                                    phase 1, the controller uses `backendRef` for issuer metadata discovery
-                                    and then fetches the discovered `jwks_uri` directly. If the discovered
-                                    `jwks_uri` shares the discovery authority, the resolved discovery TLS
-                                    settings are reused.
-                                  properties:
-                                    backendRef:
-                                      description: |-
-                                        `backendRef` references the issuer endpoint to reach for OpenID Connect
-                                        discovery. Supported types are `Service` and static `Backend`. An
-                                        `AgentgatewayPolicy` containing backend TLS config can then be attached
-                                        to the `Service` or `Backend` in order to set TLS options for a
-                                        connection to the issuer metadata source. In phase 1, the discovered
-                                        `jwks_uri` reuses those TLS settings only when it shares the discovery
-                                        authority. If it points at a different authority, it is fetched directly
-                                        over HTTPS and custom transport or TLS configuration for that separate
-                                        JWKS authority is not yet configurable.
-                                      properties:
-                                        group:
-                                          default: ""
-                                          description: |-
-                                            Group is the group of the referent. For example, "gateway.networking.k8s.io".
-                                            When unspecified or empty string, core API group is inferred.
-                                          maxLength: 253
-                                          pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                                          type: string
-                                        kind:
-                                          default: Service
-                                          description: |-
-                                            Kind is the Kubernetes resource kind of the referent. For example
-                                            "Service".
-
-                                            Defaults to "Service" when not specified.
-
-                                            ExternalName services can refer to CNAME DNS records that may live
-                                            outside of the cluster and as such are difficult to reason about in
-                                            terms of conformance. They also may not be safe to forward to (see
-                                            CVE-2021-25740 for more information). Implementations SHOULD NOT
-                                            support ExternalName Services.
-
-                                            Support: Core (Services with a type other than ExternalName)
-
-                                            Support: Implementation-specific (Services with type ExternalName)
-                                          maxLength: 63
-                                          minLength: 1
-                                          pattern: ^[a-zA-Z]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
-                                          type: string
-                                        name:
-                                          description: Name is the name of the referent.
-                                          maxLength: 253
-                                          minLength: 1
-                                          type: string
-                                        namespace:
-                                          description: |-
-                                            Namespace is the namespace of the backend. When unspecified, the local
-                                            namespace is inferred.
-
-                                            Note that when a namespace different than the local namespace is specified,
-                                            a ReferenceGrant object is required in the referent namespace to allow that
-                                            namespace's owner to accept the reference. See the ReferenceGrant
-                                            documentation for details.
-
-                                            Support: Core
-                                          maxLength: 63
-                                          minLength: 1
-                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                                          type: string
-                                        port:
-                                          description: |-
-                                            Port specifies the destination port number to use for this resource.
-                                            Port is required when the referent is a Kubernetes Service. In this
-                                            case, the port number is the service port number, not the target port.
-                                            For other resources, destination port might be derived from the referent
-                                            resource or this field.
-                                          format: int32
-                                          maximum: 65535
-                                          minimum: 1
-                                          type: integer
-                                      required:
-                                      - name
-                                      type: object
-                                      x-kubernetes-validations:
-                                      - message: Must have port for Service reference
-                                        rule: '(size(self.group) == 0 && self.kind
-                                          == ''Service'') ? has(self.port) : true'
-                                    cacheDuration:
-                                      default: 5m
-                                      type: string
-                                      x-kubernetes-validations:
-                                      - message: invalid duration value
-                                        rule: matches(self, '^([0-9]{1,5}(h|m|s|ms)){1,4}$')
-                                      - message: cacheDuration must be at least 5m.
-                                        rule: duration(self) >= duration('5m')
-                                  required:
-                                  - backendRef
-                                  type: object
                                 inline:
                                   description: |-
                                     `inline` specifies an inline JSON Web Key Set used to validate the
@@ -7853,9 +7754,9 @@ spec:
                                   type: object
                               type: object
                               x-kubernetes-validations:
-                              - message: exactly one of the fields in [remote inline
-                                  discovery] must be set
-                                rule: '[has(self.remote),has(self.inline),has(self.discovery)].filter(x,x==true).size()
+                              - message: exactly one of the fields in [remote inline]
+                                  must be set
+                                rule: '[has(self.remote),has(self.inline)].filter(x,x==true).size()
                                   == 1'
                           required:
                           - issuer

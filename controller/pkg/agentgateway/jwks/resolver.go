@@ -5,16 +5,13 @@ import (
 
 	"istio.io/istio/pkg/kube/krt"
 
-	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
 type ResolvedJwksRequest struct {
-	OwnerID   JwksOwnerID
-	Issuer    string
-	Target    remotehttp.ResolvedTarget
-	TTL       time.Duration
-	Discovery bool
+	OwnerID JwksOwnerID
+	Target  remotehttp.ResolvedTarget
+	TTL     time.Duration
 }
 
 type Resolver interface {
@@ -30,30 +27,14 @@ func NewResolver(endpointResolver remotehttp.Resolver) Resolver {
 }
 
 func (r *defaultResolver) ResolveOwner(krtctx krt.HandlerContext, owner RemoteJwksOwner) (*ResolvedJwksRequest, error) {
-	var (
-		endpoint  *remotehttp.ResolvedTarget
-		err       error
-		discovery bool
-	)
-
-	switch {
-	case owner.Remote != nil:
-		endpoint, err = ResolveEndpoint(krtctx, r.endpointResolver, owner.ID.Name, owner.DefaultNamespace, owner.Remote)
-	case owner.Discovery != nil:
-		endpoint, err = oidc.ResolveDiscoveryEndpoint(krtctx, r.endpointResolver, owner.ID.Name, owner.DefaultNamespace, owner.Issuer, owner.Discovery)
-		discovery = true
-	default:
-		return nil, errRemoteProviderNotInitialized
-	}
+	endpoint, err := ResolveEndpoint(krtctx, r.endpointResolver, owner.ID.Name, owner.DefaultNamespace, owner.Remote)
 	if err != nil {
 		return nil, err
 	}
 
 	return &ResolvedJwksRequest{
-		OwnerID:   owner.ID,
-		Issuer:    owner.Issuer,
-		Target:    *endpoint,
-		TTL:       owner.TTL,
-		Discovery: discovery,
+		OwnerID: owner.ID,
+		Target:  *endpoint,
+		TTL:     owner.TTL,
 	}, nil
 }
