@@ -15,6 +15,8 @@ var logger = logging.New("oidc_store")
 
 const RunnableName = "oidc-store"
 
+// Store bridges KRT-derived shared discovery requests to the concrete runtime
+// that fetches and caches provider metadata for downstream consumers.
 type Store struct {
 	providerCache   *providerCache
 	providerFetcher *fetcher

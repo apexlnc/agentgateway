@@ -8,6 +8,8 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
+// ProviderReader exposes last-known provider metadata by request key to
+// downstream consumers such as jwks.
 type ProviderReader interface {
 	ProviderByRequestKey(requestKey remotehttp.FetchKey) (ProviderConfig, bool)
 }
@@ -23,6 +25,8 @@ type ProviderConfig struct {
 	EndSessionEndpoint    string              `json:"endSessionEndpoint,omitempty"`
 }
 
+// ProviderSource is a per-owner discovery request before KRT collapses
+// equivalent sources onto a shared request key.
 type ProviderSource struct {
 	OwnerKey   OwnerKey
 	Issuer     string
@@ -45,6 +49,8 @@ func (s ProviderSource) Equals(other ProviderSource) bool {
 		s.TTL == other.TTL
 }
 
+// SharedProviderRequest is the canonical discovery request produced by KRT for
+// a shared fetch key. It is the unit the runtime fetcher watches.
 type SharedProviderRequest struct {
 	RequestKey remotehttp.FetchKey
 	Issuer     string
@@ -65,6 +71,7 @@ func (r SharedProviderRequest) Equals(other SharedProviderRequest) bool {
 		r.TTL == other.TTL
 }
 
+// ProviderSource returns the canonical runtime request consumed by the fetcher.
 func (r SharedProviderRequest) ProviderSource() ProviderSource {
 	return ProviderSource{
 		Issuer:     r.Issuer,

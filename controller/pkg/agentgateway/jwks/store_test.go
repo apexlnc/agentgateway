@@ -35,15 +35,10 @@ func TestSharedJwksRequestsCollapseMinTTLAcrossOwners(t *testing.T) {
 		KrtOpts: krtOpts,
 	})
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		requests := collections.SharedRequests.List()
-		if !assert.Len(c, requests, 1) {
-			return
-		}
-		assert.Equal(c, remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}.Key(), requests[0].RequestKey)
-		assert.Equal(c, 5*time.Minute, requests[0].TTL)
-		assert.False(c, requests[0].Discovery)
-	}, 2*time.Second, 20*time.Millisecond)
+	requests := awaitSharedJwksRequests(t, collections.SharedRequests, 1)
+	assert.Equal(t, remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}.Key(), requests[0].RequestKey)
+	assert.Equal(t, 5*time.Minute, requests[0].TTL)
+	assert.False(t, requests[0].Discovery)
 }
 
 func TestSharedJwksRequestsRetargetOwnerAcrossRequestKeys(t *testing.T) {
@@ -65,13 +60,8 @@ func TestSharedJwksRequestsRetargetOwnerAcrossRequestKeys(t *testing.T) {
 		KrtOpts: krtOpts,
 	})
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		requests := collections.SharedRequests.List()
-		if !assert.Len(c, requests, 1) {
-			return
-		}
-		assert.Equal(c, 5*time.Minute, requests[0].TTL)
-	}, 2*time.Second, 20*time.Millisecond)
+	requests := awaitSharedJwksRequests(t, collections.SharedRequests, 1)
+	assert.Equal(t, 5*time.Minute, requests[0].TTL)
 
 	updatedPolicies := []*agentgateway.AgentgatewayPolicy{
 		testRemotePolicy("moving", "https://issuer.example/b", 5*time.Minute),
@@ -79,14 +69,9 @@ func TestSharedJwksRequestsRetargetOwnerAcrossRequestKeys(t *testing.T) {
 	}
 	policies.Reset(updatedPolicies)
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		requests := jwksRequestsByKey(collections.SharedRequests.List())
-		if !assert.Len(c, requests, 2) {
-			return
-		}
-		assert.Equal(c, 10*time.Minute, requests[remotehttp.FetchTarget{URL: "https://issuer.example/a"}.Key()].TTL)
-		assert.Equal(c, 5*time.Minute, requests[remotehttp.FetchTarget{URL: "https://issuer.example/b"}.Key()].TTL)
-	}, 2*time.Second, 20*time.Millisecond)
+	requestsByKey := jwksRequestsByKey(awaitSharedJwksRequests(t, collections.SharedRequests, 2))
+	assert.Equal(t, 10*time.Minute, requestsByKey[remotehttp.FetchTarget{URL: "https://issuer.example/a"}.Key()].TTL)
+	assert.Equal(t, 5*time.Minute, requestsByKey[remotehttp.FetchTarget{URL: "https://issuer.example/b"}.Key()].TTL)
 }
 
 func TestSharedJwksRequestsRemoveLastOwnerDeletesRequest(t *testing.T) {
@@ -107,15 +92,11 @@ func TestSharedJwksRequestsRemoveLastOwnerDeletesRequest(t *testing.T) {
 		KrtOpts: krtOpts,
 	})
 
-	assert.Eventually(t, func() bool {
-		return len(collections.SharedRequests.List()) == 1
-	}, 2*time.Second, 20*time.Millisecond)
+	awaitSharedJwksRequests(t, collections.SharedRequests, 1)
 
 	policies.Reset(nil)
 
-	assert.Eventually(t, func() bool {
-		return len(collections.SharedRequests.List()) == 0
-	}, 2*time.Second, 20*time.Millisecond)
+	awaitSharedJwksRequests(t, collections.SharedRequests, 0)
 }
 
 func TestStoreTracksSharedRequestCollectionLifecycle(t *testing.T) {
@@ -134,36 +115,22 @@ func TestStoreTracksSharedRequestCollectionLifecycle(t *testing.T) {
 		_ = store.Start(ctx)
 	}()
 
-	assert.Eventually(t, store.HasSynced, 2*time.Second, 20*time.Millisecond)
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		state, ok := store.jwksFetcher.lookup(remotehttp.FetchTarget{URL: "https://issuer.example/a"}.Key())
-		if !assert.True(c, ok) {
-			return
-		}
-		assert.Equal(c, 5*time.Minute, state.source.TTL)
-	}, 2*time.Second, 20*time.Millisecond)
+	assert.Eventually(t, store.HasSynced, testEventuallyTimeout, testEventuallyPoll)
+	state := awaitJwksFetchState(t, store.jwksFetcher, remotehttp.FetchTarget{URL: "https://issuer.example/a"}.Key())
+	assert.Equal(t, 5*time.Minute, state.source.TTL)
 
 	updatedRequests := []SharedJwksRequest{
 		testSharedJwksRequest("https://issuer.example/b", 10*time.Minute),
 	}
 	requests.Reset(updatedRequests)
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		_, oldExists := store.jwksFetcher.lookup(remotehttp.FetchTarget{URL: "https://issuer.example/a"}.Key())
-		newState, newExists := store.jwksFetcher.lookup(remotehttp.FetchTarget{URL: "https://issuer.example/b"}.Key())
-		assert.False(c, oldExists)
-		if !assert.True(c, newExists) {
-			return
-		}
-		assert.Equal(c, 10*time.Minute, newState.source.TTL)
-	}, 2*time.Second, 20*time.Millisecond)
+	awaitNoJwksFetchState(t, store.jwksFetcher, remotehttp.FetchTarget{URL: "https://issuer.example/a"}.Key())
+	newState := awaitJwksFetchState(t, store.jwksFetcher, remotehttp.FetchTarget{URL: "https://issuer.example/b"}.Key())
+	assert.Equal(t, 10*time.Minute, newState.source.TTL)
 
 	requests.Reset(nil)
 
-	assert.Eventually(t, func() bool {
-		_, ok := store.jwksFetcher.lookup(remotehttp.FetchTarget{URL: "https://issuer.example/b"}.Key())
-		return !ok
-	}, 2*time.Second, 20*time.Millisecond)
+	awaitNoJwksFetchState(t, store.jwksFetcher, remotehttp.FetchTarget{URL: "https://issuer.example/b"}.Key())
 }
 
 func TestStoreLoadsPersistedKeysetsBeforeServing(t *testing.T) {
@@ -195,7 +162,7 @@ func TestStoreLoadsPersistedKeysetsBeforeServing(t *testing.T) {
 		_ = store.Start(ctx)
 	}()
 
-	assert.Eventually(t, store.HasSynced, 2*time.Second, 20*time.Millisecond)
+	assert.Eventually(t, store.HasSynced, testEventuallyTimeout, testEventuallyPoll)
 	actual, ok := store.JwksByRequestKey(keyset.RequestKey)
 	assert.True(t, ok)
 	assert.Equal(t, keyset, actual)
@@ -319,4 +286,38 @@ func jwksRequestsByKey(requests []SharedJwksRequest) map[remotehttp.FetchKey]Sha
 		out[request.RequestKey] = request
 	}
 	return out
+}
+
+func awaitJwksFetchState(t *testing.T, f *fetcher, requestKey remotehttp.FetchKey) fetchState {
+	t.Helper()
+
+	var state fetchState
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		var ok bool
+		state, ok = f.lookup(requestKey)
+		assert.True(c, ok)
+	}, testEventuallyTimeout, testEventuallyPoll)
+
+	return state
+}
+
+func awaitNoJwksFetchState(t *testing.T, f *fetcher, requestKey remotehttp.FetchKey) {
+	t.Helper()
+
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		_, ok := f.lookup(requestKey)
+		assert.False(c, ok)
+	}, testEventuallyTimeout, testEventuallyPoll)
+}
+
+func awaitSharedJwksRequests(t *testing.T, requests krt.Collection[SharedJwksRequest], expectedLen int) []SharedJwksRequest {
+	t.Helper()
+
+	var shared []SharedJwksRequest
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		shared = requests.List()
+		assert.Len(c, shared, expectedLen)
+	}, testEventuallyTimeout, testEventuallyPoll)
+
+	return shared
 }

@@ -18,6 +18,11 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
+const (
+	testEventuallyTimeout = 2 * time.Second
+	testEventuallyPoll    = 20 * time.Millisecond
+)
+
 func TestAddKeysetToFetcher(t *testing.T) {
 	expected := testSource()
 
@@ -107,23 +112,12 @@ func TestSuccessfulJwksFetch(t *testing.T) {
 	}
 	go f.maybeFetchJwks(ctx)
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		select {
-		case actual := <-updates:
-			assert.True(c, actual.Contains(source.RequestKey))
-			keyset, ok := f.cache.GetJwks(source.RequestKey)
-			assert.True(c, ok)
-			assert.Equal(c, sampleJWKS, keyset.JwksJSON)
-		default:
-			assert.Fail(c, "no updates")
-		}
-	}, 2*time.Second, 100*time.Millisecond)
+	awaitJwksUpdate(t, updates, source.RequestKey)
+	keyset := awaitStoredKeyset(t, f.cache, source.RequestKey)
+	assert.Equal(t, sampleJWKS, keyset.JwksJSON)
 
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	fetch := f.schedule.Peek()
-	assert.NotNil(t, fetch)
-	assert.WithinDuration(t, time.Now().Add(5*time.Minute), fetch.at, 3*time.Second)
+	retry := awaitJwksRetry(t, f)
+	assert.WithinDuration(t, time.Now().Add(5*time.Minute), retry.at, 3*time.Second)
 }
 
 func TestSuccessfulDiscoveryBackedJwksFetch(t *testing.T) {
@@ -160,18 +154,10 @@ func TestSuccessfulDiscoveryBackedJwksFetch(t *testing.T) {
 	}
 	go f.maybeFetchJwks(ctx)
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		select {
-		case actual := <-updates:
-			assert.True(c, actual.Contains(source.RequestKey))
-			keyset, ok := f.cache.GetJwks(source.RequestKey)
-			assert.True(c, ok)
-			assert.Equal(c, expectedTarget.URL, keyset.URL)
-			assert.Equal(c, sampleJWKS, keyset.JwksJSON)
-		default:
-			assert.Fail(c, "no updates")
-		}
-	}, 2*time.Second, 100*time.Millisecond)
+	awaitJwksUpdate(t, updates, source.RequestKey)
+	keyset := awaitStoredKeyset(t, f.cache, source.RequestKey)
+	assert.Equal(t, expectedTarget.URL, keyset.URL)
+	assert.Equal(t, sampleJWKS, keyset.JwksJSON)
 }
 
 func TestSuccessfulDiscoveryBackedJwksFetchReusesTLSForSameAuthority(t *testing.T) {
@@ -211,18 +197,10 @@ func TestSuccessfulDiscoveryBackedJwksFetchReusesTLSForSameAuthority(t *testing.
 	}
 	go f.maybeFetchJwks(ctx)
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		select {
-		case actual := <-updates:
-			assert.True(c, actual.Contains(source.RequestKey))
-			keyset, ok := f.cache.GetJwks(source.RequestKey)
-			assert.True(c, ok)
-			assert.Equal(c, server.URL+"/oauth2/v3/certs", keyset.URL)
-			assert.Equal(c, sampleJWKS, keyset.JwksJSON)
-		default:
-			assert.Fail(c, "no updates")
-		}
-	}, 2*time.Second, 100*time.Millisecond)
+	awaitJwksUpdate(t, updates, source.RequestKey)
+	keyset := awaitStoredKeyset(t, f.cache, source.RequestKey)
+	assert.Equal(t, server.URL+"/oauth2/v3/certs", keyset.URL)
+	assert.Equal(t, sampleJWKS, keyset.JwksJSON)
 }
 
 func TestFetchJwksWithError(t *testing.T) {
@@ -249,13 +227,8 @@ func TestFetchJwksWithError(t *testing.T) {
 		}
 	}, 250*time.Millisecond, 10*time.Millisecond)
 
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	retry := f.schedule.Peek()
-	assert.NotNil(t, retry)
+	retry := awaitJwksRetryAttempt(t, f, source.RequestKey, 1)
 	assert.WithinDuration(t, time.Now().Add(200*time.Millisecond), retry.at, 2*time.Second)
-	assert.Equal(t, 1, retry.retryAttempt)
-	assert.Equal(t, source.RequestKey, retry.requestKey)
 }
 
 func TestDiscoveryFetchWithoutProviderLookupUsesRequestContextInError(t *testing.T) {
@@ -389,3 +362,71 @@ func (s stubJwksClient) FetchJwks(_ context.Context, req remotehttp.FetchTarget)
 }
 
 var sampleJWKS = `{"keys":[{"use":"sig","kty":"RSA","kid":"JWxVLtipR-Q6wF2zmQKEoxbFhqwibK2aKNLyRqNxdj4","alg":"RS256","n":"5ApthhEwr6U00Coa0_572OytJXbVZKgl-myirM2m4GSrVfaKus41GEPHHXMzyGDPgHU7Rb4o0yzB-obkgz0zo2jnjv1zSx88BgdhhdE0BX2ULFDj67jVYdFZdCOoBr1_xJ5LEjQArHxfywZxW4a0egc3JaIwo-3qSSlRnD1KV2uzTG9FoDpvJLn1ZzdMgoTHuxIMla6WdgPDswVD8nrQM0I_1VGyGC0l2dICUEiqN0QrZen--U70J6EU6hd8vi_9qmALhjoSEASH2Z2sHco4Shv_aVx0BM-zN5UJWz4VF51Ag_KgcePS5Co7iVM0FUwMNWauWhPDPLWiXoUJvUWVPw","e":"AQAB","x5c":["MIICozCCAYsCBgGYyKDydjANBgkqhkiG9w0BAQsFADAVMRMwEQYDVQQDDAprYWdlbnQtZGV2MB4XDTI1MDgyMDE3NTU0N1oXDTM1MDgyMDE3NTcyN1owFTETMBEGA1UEAwwKa2FnZW50LWRldjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAOQKbYYRMK+lNNAqGtP+e9jsrSV21WSoJfpsoqzNpuBkq1X2irrONRhDxx1zM8hgz4B1O0W+KNMswfqG5IM9M6No5479c0sfPAYHYYXRNAV9lCxQ4+u41WHRWXQjqAa9f8SeSxI0AKx8X8sGcVuGtHoHNyWiMKPt6kkpUZw9Sldrs0xvRaA6byS59Wc3TIKEx7sSDJWulnYDw7MFQ/J60DNCP9VRshgtJdnSAlBIqjdEK2Xp/vlO9CehFOoXfL4v/apgC4Y6EhAEh9mdrB3KOEob/2lcdATPszeVCVs+FRedQIPyoHHj0uQqO4lTNBVMDDVmrloTwzy1ol6FCb1FlT8CAwEAATANBgkqhkiG9w0BAQsFAAOCAQEAxElyp6gak62xC3yEw0nRUZNI0nsu0Oeow8ZwbmfTSa2hRKFQQe2sjMzm6L4Eyg2IInVn0spkw9BVJ07i8mDmvChjRNra7t6CX1dIykUUtxtNwglX0YBRjMl/heG7dC/dyDRVW6EUrPopMQ9QibzmH5XOBLDanTfK6tPwe5ezG5JF3JCx2Z3dtmAMtpCp7Nnr/gj48z7j4V8EHSB8hgITHBPcLOmiVglS3LF2/D+PK6efRWnVaDtcPmuh/0JmdmKxwJcvvuZD7tp5UFRbw9cgx5Pvv+mOWVCp/E2L+P17Gu0C/MC4Wnbn3Pi6Tgt0GNUMngCCyBnfcTpljUddW6Kheg=="],"x5t":"SmEthIFV9ehf3ggduek6QLfXxyU","x5t#S256":"XNGenWvGVC_sxSOTW0j_d7zwQlbGzkFj5XGCgPrLNJA"},{"use":"enc","kty":"RSA","kid":"hb2m-EP6nG_ktqHJOna_rnadxRaOtzArOecAJlNSmqU","alg":"RSA-OAEP","n":"xYU8uN6rXI6l6LAQ5inpylE4qiFqshbV92VnPrUO8gNff_TuZjvq19f0zXpVnnu88bCL5Q6DjRqRP4a2brAsYYBjSjwKGF3dd7jda6uavU1br2NFppZ6GSisOlKuKqMAUitQuYgAzYP-E2FasQOskrZ8HQ8S8hff7rNZH84VL5lNwTMHiwL1O8jBmxJE-ABM0To-2a9YosRkRa_uVzY720lSAir1UNiUSR1PypS2ixWyO04AVMJf8JgYU8rsUHNkZenYSRySzYzIxE57RCYnuZoc1hSVBtN2cFXXSqTwGMI7tfzTAtG11Z7zkiWmP0Tk7xabh5xfdXhZtJfHT6id5w","e":"AQAB","x5c":["MIICozCCAYsCBgGYyKD0zDANBgkqhkiG9w0BAQsFADAVMRMwEQYDVQQDDAprYWdlbnQtZGV2MB4XDTI1MDgyMDE3NTU0OFoXDTM1MDgyMDE3NTcyOFowFTETMBEGA1UEAwwKa2FnZW50LWRldjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMWFPLjeq1yOpeiwEOYp6cpROKoharIW1fdlZz61DvIDX3/07mY76tfX9M16VZ57vPGwi+UOg40akT+Gtm6wLGGAY0o8Chhd3Xe43Wurmr1NW69jRaaWehkorDpSriqjAFIrULmIAM2D/hNhWrEDrJK2fB0PEvIX3+6zWR/OFS+ZTcEzB4sC9TvIwZsSRPgATNE6PtmvWKLEZEWv7lc2O9tJUgIq9VDYlEkdT8qUtosVsjtOAFTCX/CYGFPK7FBzZGXp2Ekcks2MyMROe0QmJ7maHNYUlQbTdnBV10qk8BjCO7X80wLRtdWe85Ilpj9E5O8Wm4ecX3V4WbSXx0+onecCAwEAATANBgkqhkiG9w0BAQsFAAOCAQEAWuRnoKtKhCqLaz3Ze2q8hRykke7JwNrNxqDPn7eToa1MKsfsrtE678kzXhnfdivK/1F/8dr7Thn/WX7ZUJW2jsmbP1sCJjK02yY2setJ1jJKvJZcib8y7LAsqoACYZ4FM/KLrdywGn7KSenqWCLRMqeT04dWlmJexEszb5fgCKCFIZLKjaGJZIuLhsJBLyYHEVFpacr69cZ/ZjNpshHIiV0l/I434vcW39S9+uMfxf1glLTEPifmwK4gMRem3QQLqK21vBcjuS0GBQXQinaztcNaiu1invyTZd5s+3u5yORsip6YhbGhe08TbbtN7yLlZFITDQL4oFrXVGXX+4dp8w=="],"x5t":"BMlhx-2TUdiyftY8aR_zt7xECEI","x5t#S256":"YTTj8SxySpGgVFl5ZQqniLPnmg0gWHgBhissHXQCZ8k"}]}`
+
+func awaitJwksUpdate(t *testing.T, updates <-chan sets.Set[remotehttp.FetchKey], requestKey remotehttp.FetchKey) {
+	t.Helper()
+
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		select {
+		case update := <-updates:
+			assert.True(c, update.Contains(requestKey))
+		default:
+			assert.Fail(c, "no updates yet")
+		}
+	}, testEventuallyTimeout, testEventuallyPoll)
+}
+
+func awaitStoredKeyset(t *testing.T, cache *jwksCache, requestKey remotehttp.FetchKey) Keyset {
+	t.Helper()
+
+	var keyset Keyset
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		var ok bool
+		keyset, ok = cache.GetJwks(requestKey)
+		assert.True(c, ok)
+	}, testEventuallyTimeout, testEventuallyPoll)
+
+	return keyset
+}
+
+func awaitJwksRetry(t *testing.T, f *fetcher) fetchAt {
+	t.Helper()
+
+	var retry fetchAt
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+
+		scheduled := f.schedule.Peek()
+		if !assert.NotNil(c, scheduled) {
+			return
+		}
+		retry = *scheduled
+	}, testEventuallyTimeout, testEventuallyPoll)
+
+	return retry
+}
+
+func awaitJwksRetryAttempt(t *testing.T, f *fetcher, requestKey remotehttp.FetchKey, retryAttempt int) fetchAt {
+	t.Helper()
+
+	var retry fetchAt
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		retry = awaitJwksRetryNoWait(f)
+		assert.Equal(c, requestKey, retry.requestKey)
+		assert.Equal(c, retryAttempt, retry.retryAttempt)
+	}, testEventuallyTimeout, testEventuallyPoll)
+
+	return retry
+}
+
+func awaitJwksRetryNoWait(f *fetcher) fetchAt {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	scheduled := f.schedule.Peek()
+	if scheduled == nil {
+		return fetchAt{}
+	}
+	return *scheduled
+}

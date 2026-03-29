@@ -15,6 +15,8 @@ type Keyset struct {
 	JwksJSON   string              `json:"jwks"`
 }
 
+// JwksSource is a per-owner JWKS request before KRT collapses equivalent
+// sources onto a shared request key.
 type JwksSource struct {
 	OwnerKey   OwnerKey
 	RequestKey remotehttp.FetchKey
@@ -39,6 +41,8 @@ func (s JwksSource) Equals(other JwksSource) bool {
 		s.Discovery == other.Discovery
 }
 
+// SharedJwksRequest is the canonical JWKS request produced by KRT for a shared
+// fetch key. It is the unit the runtime fetcher and persistence layer watch.
 type SharedJwksRequest struct {
 	RequestKey remotehttp.FetchKey
 	Target     remotehttp.FetchTarget
@@ -61,6 +65,7 @@ func (r SharedJwksRequest) Equals(other SharedJwksRequest) bool {
 		r.Discovery == other.Discovery
 }
 
+// JwksSource returns the canonical runtime request consumed by the fetcher.
 func (r SharedJwksRequest) JwksSource() JwksSource {
 	return JwksSource{
 		RequestKey: r.RequestKey,

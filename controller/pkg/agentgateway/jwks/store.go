@@ -20,6 +20,8 @@ var logger = logging.New("jwks_store")
 const DefaultJwksStorePrefix = "jwks-store"
 const RunnableName = "jwks-store"
 
+// Store bridges KRT-derived shared JWKS requests to the runtime that fetches,
+// persists, and serves keysets to translation.
 type Store struct {
 	storePrefix         string
 	deploymentNamespace string

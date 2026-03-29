@@ -30,15 +30,10 @@ func TestSharedProviderRequestsCollapseMinTTLAcrossOwners(t *testing.T) {
 		KrtOpts: krtOpts,
 	})
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		requests := collections.SharedRequests.List()
-		if !assert.Len(c, requests, 1) {
-			return
-		}
-		assert.Equal(c, remotehttp.FetchTarget{URL: "https://idp.internal/.well-known/openid-configuration"}.Key(), requests[0].RequestKey)
-		assert.Equal(c, 2*time.Minute, requests[0].TTL)
-		assert.Equal(c, "https://issuer.example", requests[0].Issuer)
-	}, 2*time.Second, 20*time.Millisecond)
+	requests := awaitSharedProviderRequests(t, collections.SharedRequests, 1)
+	assert.Equal(t, remotehttp.FetchTarget{URL: "https://idp.internal/.well-known/openid-configuration"}.Key(), requests[0].RequestKey)
+	assert.Equal(t, 2*time.Minute, requests[0].TTL)
+	assert.Equal(t, "https://issuer.example", requests[0].Issuer)
 }
 
 func TestSharedProviderRequestsRetargetOwnerAcrossRequestKeys(t *testing.T) {
@@ -63,13 +58,8 @@ func TestSharedProviderRequestsRetargetOwnerAcrossRequestKeys(t *testing.T) {
 		KrtOpts: krtOpts,
 	})
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		requests := collections.SharedRequests.List()
-		if !assert.Len(c, requests, 1) {
-			return
-		}
-		assert.Equal(c, 5*time.Minute, requests[0].TTL)
-	}, 2*time.Second, 20*time.Millisecond)
+	requests := awaitSharedProviderRequests(t, collections.SharedRequests, 1)
+	assert.Equal(t, 5*time.Minute, requests[0].TTL)
 
 	updatedPolicies := []*agentgateway.AgentgatewayPolicy{
 		testPolicy("moving", "https://issuer.example/b", 5*time.Minute),
@@ -77,14 +67,9 @@ func TestSharedProviderRequestsRetargetOwnerAcrossRequestKeys(t *testing.T) {
 	}
 	policies.Reset(updatedPolicies)
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		requests := requestsByKey(collections.SharedRequests.List())
-		if !assert.Len(c, requests, 2) {
-			return
-		}
-		assert.Equal(c, 10*time.Minute, requests[remotehttp.FetchTarget{URL: "https://idp.internal/a/.well-known/openid-configuration"}.Key()].TTL)
-		assert.Equal(c, 5*time.Minute, requests[remotehttp.FetchTarget{URL: "https://idp.internal/b/.well-known/openid-configuration"}.Key()].TTL)
-	}, 2*time.Second, 20*time.Millisecond)
+	requestsByKey := requestsByKey(awaitSharedProviderRequests(t, collections.SharedRequests, 2))
+	assert.Equal(t, 10*time.Minute, requestsByKey[remotehttp.FetchTarget{URL: "https://idp.internal/a/.well-known/openid-configuration"}.Key()].TTL)
+	assert.Equal(t, 5*time.Minute, requestsByKey[remotehttp.FetchTarget{URL: "https://idp.internal/b/.well-known/openid-configuration"}.Key()].TTL)
 }
 
 func TestSharedProviderRequestsRemoveLastOwnerDeletesRequest(t *testing.T) {
@@ -101,15 +86,11 @@ func TestSharedProviderRequestsRemoveLastOwnerDeletesRequest(t *testing.T) {
 		KrtOpts: krtOpts,
 	})
 
-	assert.Eventually(t, func() bool {
-		return len(collections.SharedRequests.List()) == 1
-	}, 2*time.Second, 20*time.Millisecond)
+	awaitSharedProviderRequests(t, collections.SharedRequests, 1)
 
 	policies.Reset(nil)
 
-	assert.Eventually(t, func() bool {
-		return len(collections.SharedRequests.List()) == 0
-	}, 2*time.Second, 20*time.Millisecond)
+	awaitSharedProviderRequests(t, collections.SharedRequests, 0)
 }
 
 func TestStoreTracksSharedRequestCollectionLifecycle(t *testing.T) {
@@ -126,36 +107,22 @@ func TestStoreTracksSharedRequestCollectionLifecycle(t *testing.T) {
 		_ = store.Start(ctx)
 	}()
 
-	assert.Eventually(t, store.HasSynced, 2*time.Second, 20*time.Millisecond)
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		state, ok := store.providerFetcher.lookup(remotehttp.FetchTarget{URL: "https://idp.internal/a/.well-known/openid-configuration"}.Key())
-		if !assert.True(c, ok) {
-			return
-		}
-		assert.Equal(c, 5*time.Minute, state.source.TTL)
-	}, 2*time.Second, 20*time.Millisecond)
+	assert.Eventually(t, store.HasSynced, testEventuallyTimeout, testEventuallyPoll)
+	state := awaitProviderFetchState(t, store.providerFetcher, remotehttp.FetchTarget{URL: "https://idp.internal/a/.well-known/openid-configuration"}.Key())
+	assert.Equal(t, 5*time.Minute, state.source.TTL)
 
 	updatedRequests := []SharedProviderRequest{
 		testSharedProviderRequest("https://idp.internal/b/.well-known/openid-configuration", "https://issuer.example/b", 10*time.Minute),
 	}
 	requests.Reset(updatedRequests)
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		_, oldExists := store.providerFetcher.lookup(remotehttp.FetchTarget{URL: "https://idp.internal/a/.well-known/openid-configuration"}.Key())
-		newState, newExists := store.providerFetcher.lookup(remotehttp.FetchTarget{URL: "https://idp.internal/b/.well-known/openid-configuration"}.Key())
-		assert.False(c, oldExists)
-		if !assert.True(c, newExists) {
-			return
-		}
-		assert.Equal(c, 10*time.Minute, newState.source.TTL)
-	}, 2*time.Second, 20*time.Millisecond)
+	awaitNoProviderFetchState(t, store.providerFetcher, remotehttp.FetchTarget{URL: "https://idp.internal/a/.well-known/openid-configuration"}.Key())
+	newState := awaitProviderFetchState(t, store.providerFetcher, remotehttp.FetchTarget{URL: "https://idp.internal/b/.well-known/openid-configuration"}.Key())
+	assert.Equal(t, 10*time.Minute, newState.source.TTL)
 
 	requests.Reset(nil)
 
-	assert.Eventually(t, func() bool {
-		_, ok := store.providerFetcher.lookup(remotehttp.FetchTarget{URL: "https://idp.internal/b/.well-known/openid-configuration"}.Key())
-		return !ok
-	}, 2*time.Second, 20*time.Millisecond)
+	awaitNoProviderFetchState(t, store.providerFetcher, remotehttp.FetchTarget{URL: "https://idp.internal/b/.well-known/openid-configuration"}.Key())
 }
 
 func TestStoreHasSyncedReflectsReadyState(t *testing.T) {
@@ -264,4 +231,38 @@ func requestsByKey(requests []SharedProviderRequest) map[remotehttp.FetchKey]Sha
 		out[request.RequestKey] = request
 	}
 	return out
+}
+
+func awaitProviderFetchState(t *testing.T, f *fetcher, requestKey remotehttp.FetchKey) fetchState {
+	t.Helper()
+
+	var state fetchState
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		var ok bool
+		state, ok = f.lookup(requestKey)
+		assert.True(c, ok)
+	}, testEventuallyTimeout, testEventuallyPoll)
+
+	return state
+}
+
+func awaitNoProviderFetchState(t *testing.T, f *fetcher, requestKey remotehttp.FetchKey) {
+	t.Helper()
+
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		_, ok := f.lookup(requestKey)
+		assert.False(c, ok)
+	}, testEventuallyTimeout, testEventuallyPoll)
+}
+
+func awaitSharedProviderRequests(t *testing.T, requests krt.Collection[SharedProviderRequest], expectedLen int) []SharedProviderRequest {
+	t.Helper()
+
+	var shared []SharedProviderRequest
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		shared = requests.List()
+		assert.Len(c, shared, expectedLen)
+	}, testEventuallyTimeout, testEventuallyPoll)
+
+	return shared
 }

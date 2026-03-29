@@ -11,6 +11,11 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
+const (
+	testEventuallyTimeout = 2 * time.Second
+	testEventuallyPoll    = 20 * time.Millisecond
+)
+
 func TestFetcherStoresProviderConfigAfterSuccessfulFetch(t *testing.T) {
 	ctx := t.Context()
 	source := testProviderSource("https://issuer.example")
@@ -28,12 +33,9 @@ func TestFetcherStoresProviderConfigAfterSuccessfulFetch(t *testing.T) {
 
 	go f.maybeFetchProviderConfig(ctx)
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		provider, ok := f.cache.GetProvider(source.RequestKey)
-		assert.True(c, ok)
-		assert.Equal(c, source.Issuer, provider.Issuer)
-		assert.Equal(c, "https://issuer.example/keys", provider.JwksURI)
-	}, 2*time.Second, 100*time.Millisecond)
+	provider := awaitProviderConfig(t, f.cache, source.RequestKey)
+	assert.Equal(t, source.Issuer, provider.Issuer)
+	assert.Equal(t, "https://issuer.example/keys", provider.JwksURI)
 }
 
 func TestFetcherRejectsIssuerMismatchBeforeCaching(t *testing.T) {
@@ -53,17 +55,9 @@ func TestFetcherRejectsIssuerMismatchBeforeCaching(t *testing.T) {
 
 	go f.maybeFetchProviderConfig(ctx)
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		_, ok := f.cache.GetProvider(source.RequestKey)
-		assert.False(c, ok)
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		retry := f.schedule.Peek()
-		assert.NotNil(c, retry)
-		assert.WithinDuration(c, time.Now().Add(200*time.Millisecond), retry.at, 2*time.Second)
-		assert.Equal(c, 1, retry.retryAttempt)
-		assert.Equal(c, source.RequestKey, retry.requestKey)
-	}, 2*time.Second, 100*time.Millisecond)
+	awaitNoProviderConfig(t, f.cache, source.RequestKey)
+	retry := awaitProviderRetryAttempt(t, f, source.RequestKey, 1)
+	assert.WithinDuration(t, time.Now().Add(200*time.Millisecond), retry.at, 2*time.Second)
 }
 
 func testProviderSource(issuer string) ProviderSource {
@@ -111,14 +105,52 @@ func TestFetcherRetriesWhenProviderFetchFails(t *testing.T) {
 
 	go f.maybeFetchProviderConfig(ctx)
 
+	awaitNoProviderConfig(t, f.cache, source.RequestKey)
+	awaitProviderRetryAttempt(t, f, source.RequestKey, 1)
+}
+
+func awaitProviderConfig(t *testing.T, cache *providerCache, requestKey remotehttp.FetchKey) ProviderConfig {
+	t.Helper()
+
+	var provider ProviderConfig
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		_, ok := f.cache.GetProvider(source.RequestKey)
+		var ok bool
+		provider, ok = cache.GetProvider(requestKey)
+		assert.True(c, ok)
+	}, testEventuallyTimeout, testEventuallyPoll)
+
+	return provider
+}
+
+func awaitNoProviderConfig(t *testing.T, cache *providerCache, requestKey remotehttp.FetchKey) {
+	t.Helper()
+
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		_, ok := cache.GetProvider(requestKey)
 		assert.False(c, ok)
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		retry := f.schedule.Peek()
-		assert.NotNil(c, retry)
-		assert.Equal(c, 1, retry.retryAttempt)
-		assert.Equal(c, source.RequestKey, retry.requestKey)
-	}, 2*time.Second, 100*time.Millisecond)
+	}, testEventuallyTimeout, testEventuallyPoll)
+}
+
+func awaitProviderRetryAttempt(t *testing.T, f *fetcher, requestKey remotehttp.FetchKey, retryAttempt int) fetchAt {
+	t.Helper()
+
+	var retry fetchAt
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		retry = awaitProviderRetryNoWait(f)
+		assert.Equal(c, requestKey, retry.requestKey)
+		assert.Equal(c, retryAttempt, retry.retryAttempt)
+	}, testEventuallyTimeout, testEventuallyPoll)
+
+	return retry
+}
+
+func awaitProviderRetryNoWait(f *fetcher) fetchAt {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	scheduled := f.schedule.Peek()
+	if scheduled == nil {
+		return fetchAt{}
+	}
+	return *scheduled
 }
