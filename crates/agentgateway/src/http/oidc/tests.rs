@@ -114,7 +114,7 @@ fn test_policy() -> OidcPolicy {
 	};
 
 	OidcPolicy {
-		policy_id: "policy".into(),
+		policy_id: PolicyId::policy("policy"),
 		provider: Arc::new(Provider {
 			issuer: TEST_ISSUER.into(),
 			authorization_endpoint: provider_endpoint("https://issuer.example.com/authorize"),

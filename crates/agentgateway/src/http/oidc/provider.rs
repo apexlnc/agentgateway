@@ -57,7 +57,7 @@ pub(crate) async fn exchange_code_with_timeout(
 	];
 	let mut req = ::http::Request::builder()
 		.method(Method::POST)
-		.uri(provider.token_endpoint.as_uri())
+		.uri(provider.token_endpoint.as_str())
 		.header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
 		.header(header::ACCEPT, "application/json");
 	match client_config.token_endpoint_auth {

@@ -135,12 +135,5 @@ pub(super) async fn handle_callback(
 }
 
 fn with_query(uri: &super::ProviderEndpoint, params: &[(&str, String)]) -> String {
-	let mut url = uri.as_url().clone();
-	{
-		let mut query = url.query_pairs_mut();
-		for (key, value) in params {
-			query.append_pair(key, value);
-		}
-	}
-	url.to_string()
+	uri.with_query(params)
 }

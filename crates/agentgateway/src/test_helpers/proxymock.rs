@@ -566,21 +566,50 @@ impl TestBind {
 			.insert_route(route, LISTENER_KEY);
 	}
 	pub async fn attach_route_policy(&mut self, p: serde_json::Value) {
-		let pol: local::FilterOrPolicy = serde_json::from_value(p).unwrap();
-		let pols = local::split_policies(
-			self.pi.upstream.clone(),
-			pol,
-			Some(local::OidcCompileContext::indexed_policy(
-				strng::new("pol"),
-				self.policies + 1,
-				self.pi.cfg.oidc_cookie_encoder.as_ref(),
-			)),
-		)
-		.await
-		.unwrap();
+		let mut non_oidc = p.clone();
+		let oidc = non_oidc
+			.as_object_mut()
+			.and_then(|object| object.remove("oidc"));
+		let pol: local::FilterOrPolicy = serde_json::from_value(non_oidc).unwrap();
+		let pols = local::split_policies(self.pi.upstream.clone(), pol)
+			.await
+			.unwrap();
 		for v in pols.route_policies.into_iter() {
 			self.policies += 1;
 			let key = strng::format!("pol/{}", self.policies);
+			self.with_policy(TargetedPolicy {
+				key,
+				name: None,
+				target: PolicyTarget::Route(RouteName {
+					name: "route".into(),
+					namespace: "".into(),
+					rule_name: None,
+					kind: None,
+				}),
+				policy: (v, PolicyPhase::Route).into(),
+			});
+		}
+		if let Some(oidc) = oidc {
+			self.policies += 1;
+			let key = strng::format!("pol/{}", self.policies);
+			let pol: local::FilterOrPolicy = serde_json::from_value(serde_json::json!({
+				"oidc": oidc,
+			}))
+			.unwrap();
+			let pols = local::split_attached_policies(
+				self.pi.upstream.clone(),
+				pol,
+				crate::http::oidc::PolicyId::policy(&key),
+				self.pi.cfg.oidc_cookie_encoder.as_ref(),
+			)
+			.await
+			.unwrap();
+			assert!(pols.backend_policies.is_empty());
+			let v = pols
+				.route_policies
+				.into_iter()
+				.exactly_one()
+				.expect("oidc route policy helper expected exactly one route policy");
 			self.with_policy(TargetedPolicy {
 				key,
 				name: None,
@@ -616,7 +645,7 @@ impl TestBind {
 	}
 	pub async fn attached_backend_policy(&mut self, addr: &SocketAddr, p: serde_json::Value) {
 		let pol: local::FilterOrPolicy = serde_json::from_value(p).unwrap();
-		let pols = local::split_policies(self.pi.upstream.clone(), pol, None)
+		let pols = local::split_policies(self.pi.upstream.clone(), pol)
 			.await
 			.unwrap();
 		for v in pols.backend_policies.into_iter() {

@@ -8,13 +8,14 @@ In this example, we set up GitHub OAuth authentication. The same pattern can be 
 ### Running the example
 
 First, create a [GitHub OAuth App](https://github.com/settings/applications/new).
-Take note of the Client ID and Client Secret, and start OAuth2 Proxy locally:
+Use `http://localhost:3000/oauth2/callback` as the callback URL. Then take note of the Client ID
+and Client Secret, and start OAuth2 Proxy locally:
 
 ```bash
 export OAUTH2_PROXY_CLIENT_SECRET=...
 export OAUTH2_PROXY_CLIENT_ID=...
 export OAUTH2_PROXY_COOKIE_SECRET=`python -c 'import os,base64; print(base64.b64encode(os.urandom(16)).decode("ascii"))'`
-docker compose up
+docker compose -f examples/oauth2-proxy/docker-compose.yaml up
 ```
 
 Note: the example configuration of OAuth2 Proxy uses a minimal setup to get started.

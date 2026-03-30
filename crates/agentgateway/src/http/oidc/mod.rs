@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::http::jwt;
-use crate::http::{Body, PolicyResponse, Request, Response, Uri};
+use crate::http::{Body, PolicyResponse, Request, Response};
 use crate::proxy::httpproxy::PolicyClient;
 use crate::telemetry::log::RequestLog;
 
@@ -51,32 +51,24 @@ impl PolicyId {
 	}
 }
 
-impl From<String> for PolicyId {
-	fn from(value: String) -> Self {
-		Self(value)
-	}
-}
-
-impl From<&str> for PolicyId {
-	fn from(value: &str) -> Self {
-		Self(value.to_string())
-	}
-}
-
 /// Validated absolute HTTP(S) endpoint used by an OIDC provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderEndpoint {
-	uri: Uri,
-	url: url::Url,
-}
+pub struct ProviderEndpoint(url::Url);
 
 impl ProviderEndpoint {
-	pub fn as_uri(&self) -> &Uri {
-		&self.uri
+	pub fn as_str(&self) -> &str {
+		self.0.as_ref()
 	}
 
-	pub fn as_url(&self) -> &url::Url {
-		&self.url
+	pub fn with_query(&self, params: &[(&str, String)]) -> String {
+		let mut url = self.0.clone();
+		{
+			let mut query = url.query_pairs_mut();
+			for (key, value) in params {
+				query.append_pair(key, value);
+			}
+		}
+		url.to_string()
 	}
 }
 
@@ -93,14 +85,7 @@ impl TryFrom<&str> for ProviderEndpoint {
 			));
 		}
 
-		let uri = value
-			.parse::<Uri>()
-			.map_err(|e| format!("must be a valid HTTP URI: {e}"))?;
-		if uri.scheme().is_none() || uri.authority().is_none() {
-			return Err("must be an absolute http(s) URL".into());
-		}
-
-		Ok(Self { uri, url })
+		Ok(Self(url))
 	}
 }
 
@@ -112,17 +97,9 @@ impl std::str::FromStr for ProviderEndpoint {
 	}
 }
 
-impl TryFrom<Uri> for ProviderEndpoint {
-	type Error = String;
-
-	fn try_from(value: Uri) -> Result<Self, Self::Error> {
-		Self::try_from(value.to_string().as_str())
-	}
-}
-
 impl fmt::Display for ProviderEndpoint {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		self.uri.fmt(f)
+		self.0.fmt(f)
 	}
 }
 
