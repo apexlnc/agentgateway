@@ -1418,15 +1418,6 @@ async fn convert(
 			config.oidc_cookie_encoder.as_ref(),
 		)
 		.await?;
-		if (res.route_policies.len() + res.backend_policies.len()) != 1 {
-			anyhow::bail!("'policies' must contain exactly 1 policy")
-		}
-		if let Some(route_policy) = res.route_policies.first()
-			&& matches!(route_policy, TrafficPolicy::Oidc(_))
-			&& p.phase == PolicyPhase::Gateway
-		{
-			anyhow::bail!("oidc policies must be attached to a route or route-phase targeted policy");
-		}
 		let tp = if let Some(route_policy) = res.route_policies.into_iter().next() {
 			PolicyType::from((route_policy, p.phase))
 		} else {
