@@ -315,11 +315,20 @@ async fn apply_derives_claims_from_stored_id_token() {
 async fn apply_redirects_unauthenticated_requests_to_login() {
 	let cases = [
 		(
-			"html request",
+			"http redirect uri keeps cookie non-secure",
 			"http://127.0.0.1/private",
 			"text/html",
 			"http://127.0.0.1/oauth/callback",
 			Some("redirect_uri=http%3A%2F%2F127.0.0.1%2Foauth%2Fcallback"),
+			false,
+		),
+		(
+			"https redirect uri marks cookie secure behind plain http",
+			"http://127.0.0.1/private",
+			"text/html",
+			"https://app.example.com/oauth/callback",
+			Some("redirect_uri=https%3A%2F%2Fapp.example.com%2Foauth%2Fcallback"),
+			true,
 		),
 		(
 			"json request",
@@ -327,6 +336,7 @@ async fn apply_redirects_unauthenticated_requests_to_login() {
 			"application/json",
 			"https://app.example.com/oauth/callback",
 			None,
+			true,
 		),
 		(
 			"callback path without query",
@@ -334,11 +344,13 @@ async fn apply_redirects_unauthenticated_requests_to_login() {
 			"text/html",
 			"https://app.example.com/oauth/callback",
 			None,
+			true,
 		),
 	];
 
-	for (name, request_uri, accept, redirect_uri, expected_fragment) in cases {
+	for (name, request_uri, accept, redirect_uri, expected_fragment, expect_secure_cookie) in cases {
 		let mut policy = test_policy();
+		policy.session.secure = CookieSecureMode::Auto;
 		policy.redirect_uri = RedirectUri::parse(redirect_uri.to_string()).expect("redirect uri");
 		let mut req = request(Method::GET, request_uri, Some(accept));
 
@@ -362,6 +374,13 @@ async fn apply_redirects_unauthenticated_requests_to_login() {
 		if let Some(expected_fragment) = expected_fragment {
 			assert!(location.contains(expected_fragment), "{name}");
 		}
+		let cookie = response
+			.headers()
+			.get(header::SET_COOKIE)
+			.expect("set-cookie header")
+			.to_str()
+			.expect("set-cookie utf8");
+		assert_eq!(cookie.contains("Secure"), expect_secure_cookie, "{name}");
 	}
 }
 
@@ -586,6 +605,8 @@ async fn callback_success_sets_session_cookie_and_clears_transaction_cookie() {
 		.await;
 
 	let policy = test_callback_policy(provider_endpoint(format!("{}/token", mock.uri())));
+	let mut policy = policy;
+	policy.session.secure = CookieSecureMode::Auto;
 	let encoded = encoded_transaction(
 		&policy,
 		"test-state",
@@ -595,7 +616,7 @@ async fn callback_success_sets_session_cookie_and_clears_transaction_cookie() {
 	);
 	let mut req = request(
 		Method::GET,
-		"https://app.example.com/oauth/callback?code=auth-code&state=test-state",
+		"http://127.0.0.1/oauth/callback?code=auth-code&state=test-state",
 		Some("text/html"),
 	);
 	add_cookie(
@@ -624,6 +645,7 @@ async fn callback_success_sets_session_cookie_and_clears_transaction_cookie() {
 			.iter()
 			.any(|cookie| cookie.starts_with(&policy.session.cookie_name))
 	);
+	assert!(cookies.iter().all(|cookie| cookie.contains("Secure")));
 	assert!(cookies.iter().any(
 		|cookie| cookie.starts_with(&policy.session.transaction_cookie_name)
 			&& cookie.contains("Max-Age=0")

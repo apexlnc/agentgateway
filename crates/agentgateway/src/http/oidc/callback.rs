@@ -14,7 +14,6 @@ use super::session::{
 use super::{Error, OidcPolicy, build_redirect_response, cap_session_expiry, now_unix};
 
 pub(super) struct CallbackRequestContext {
-	pub is_https: bool,
 	pub code: String,
 	pub state: String,
 	pub transaction_cookie: String,
@@ -24,7 +23,6 @@ pub(super) fn start_login(
 	policy: &OidcPolicy,
 	req: &Request,
 ) -> Result<crate::http::PolicyResponse, Error> {
-	let is_https = req.uri().scheme_str() == Some("https");
 	let state = generate_state();
 	let nonce = generate_nonce();
 	let pkce_verifier = generate_pkce_verifier();
@@ -45,7 +43,7 @@ pub(super) fn start_login(
 	let cookie = policy.session.set_cookie(
 		&policy.session.transaction_cookie_name,
 		&encoded,
-		is_https,
+		policy.redirect_uri.https,
 		policy.session.transaction_ttl,
 	);
 	let location = with_query(
@@ -123,12 +121,13 @@ pub(super) async fn handle_callback(
 	let session_cookie = policy.session.set_cookie(
 		&policy.session.cookie_name,
 		&encoded,
-		context.is_https,
+		policy.redirect_uri.https,
 		policy.session.ttl,
 	);
-	let clear_transaction = policy
-		.session
-		.clear_cookie(&policy.session.transaction_cookie_name, context.is_https);
+	let clear_transaction = policy.session.clear_cookie(
+		&policy.session.transaction_cookie_name,
+		policy.redirect_uri.https,
+	);
 	let location = transaction.original_uri;
 	let response = build_redirect_response(&location, &[session_cookie, clear_transaction])?;
 	Ok(crate::http::PolicyResponse::default().with_response(response))

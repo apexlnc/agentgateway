@@ -250,7 +250,6 @@ impl OidcPolicy {
 		let response = callback::handle_callback(
 			self,
 			callback::CallbackRequestContext {
-				is_https: req.uri().scheme_str() == Some("https"),
 				code,
 				state: query.state,
 				transaction_cookie,
