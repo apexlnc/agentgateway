@@ -66,6 +66,13 @@ pub struct LocalOidcConfig {
 	#[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
 	pub token_endpoint: Option<ProviderEndpoint>,
 
+	/// Token endpoint client authentication method for explicit provider configuration.
+	///
+	/// Discovery mode derives this from provider metadata. Explicit mode defaults to
+	/// `clientSecretBasic` when omitted.
+	#[serde(default)]
+	pub token_endpoint_auth: Option<TokenEndpointAuth>,
+
 	/// JWKS source used to validate returned ID tokens.
 	#[serde(default)]
 	pub jwks: Option<FileInlineOrRemote>,
@@ -115,6 +122,7 @@ impl LocalOidcConfig {
 			discovery,
 			authorization_endpoint,
 			token_endpoint,
+			token_endpoint_auth,
 			jwks,
 			client_id,
 			client_secret,
@@ -125,6 +133,11 @@ impl LocalOidcConfig {
 		let explicit_field_count = usize::from(authorization_endpoint.is_some())
 			+ usize::from(token_endpoint.is_some())
 			+ usize::from(jwks.is_some());
+		if token_endpoint_auth.is_some() && explicit_field_count != 3 {
+			return Err(Error::Config(
+				"tokenEndpointAuth must be omitted unless authorizationEndpoint, tokenEndpoint, and jwks are configured explicitly".into(),
+			));
+		}
 		let provider = match explicit_field_count {
 			0 => {
 				let discovery = match discovery {
@@ -155,6 +168,7 @@ impl LocalOidcConfig {
 					issuer,
 					authorization_endpoint.expect("checked above"),
 					token_endpoint.expect("checked above"),
+					token_endpoint_auth.unwrap_or_default(),
 					jwks.expect("checked above"),
 				)
 				.await?
@@ -226,6 +240,7 @@ async fn resolve_explicit_provider(
 	issuer: String,
 	authorization_endpoint: ProviderEndpoint,
 	token_endpoint: ProviderEndpoint,
+	token_endpoint_auth: TokenEndpointAuth,
 	jwks: FileInlineOrRemote,
 ) -> Result<PreparedOidcProvider, Error> {
 	let id_token_jwks = load_jwks(client, jwks, "explicit jwks source").await?;
@@ -234,7 +249,7 @@ async fn resolve_explicit_provider(
 		issuer,
 		authorization_endpoint,
 		token_endpoint,
-		token_endpoint_auth: TokenEndpointAuth::ClientSecretBasic,
+		token_endpoint_auth,
 		id_token_jwks,
 	})
 }

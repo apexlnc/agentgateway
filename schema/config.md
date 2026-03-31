@@ -919,6 +919,7 @@
 |`binds[].listeners[].routes[].policies.oidc.discovery.url`|string||
 |`binds[].listeners[].routes[].policies.oidc.authorizationEndpoint`|string|Authorization endpoint used to start the browser login flow.|
 |`binds[].listeners[].routes[].policies.oidc.tokenEndpoint`|string|Token endpoint used to exchange the authorization code.|
+|`binds[].listeners[].routes[].policies.oidc.tokenEndpointAuth`|string|Token endpoint client authentication method for explicit provider configuration.<br><br>Discovery mode derives this from provider metadata. Explicit mode defaults to<br>`clientSecretBasic` when omitted.|
 |`binds[].listeners[].routes[].policies.oidc.jwks`|object|JWKS source used to validate returned ID tokens.|
 |`binds[].listeners[].routes[].policies.oidc.jwks.file`|string||
 |`binds[].listeners[].routes[].policies.oidc.jwks.url`|string||
@@ -3431,20 +3432,6 @@
 |`binds[].listeners[].tcpRoutes[].backends[].policies.backendTunnel.proxy.host`|string|Hostname or IP address|
 |`binds[].listeners[].tcpRoutes[].backends[].policies.backendTunnel.proxy.backend`|string|Explicit backend reference. Backend must be defined in the top level backends list|
 |`binds[].listeners[].policies`|object||
-|`binds[].listeners[].policies.oidc`|object|Authenticate incoming browser requests with OIDC authorization code flow.|
-|`binds[].listeners[].policies.oidc.issuer`|string|Issuer used for discovery and ID token validation.|
-|`binds[].listeners[].policies.oidc.discovery`|object|Optional discovery document override. If omitted, discovery uses<br>`${issuer}/.well-known/openid-configuration`.|
-|`binds[].listeners[].policies.oidc.discovery.file`|string||
-|`binds[].listeners[].policies.oidc.discovery.url`|string||
-|`binds[].listeners[].policies.oidc.authorizationEndpoint`|string|Authorization endpoint used to start the browser login flow.|
-|`binds[].listeners[].policies.oidc.tokenEndpoint`|string|Token endpoint used to exchange the authorization code.|
-|`binds[].listeners[].policies.oidc.jwks`|object|JWKS source used to validate returned ID tokens.|
-|`binds[].listeners[].policies.oidc.jwks.file`|string||
-|`binds[].listeners[].policies.oidc.jwks.url`|string||
-|`binds[].listeners[].policies.oidc.clientId`|string|OAuth2 client identifier used for authorization and token exchange.|
-|`binds[].listeners[].policies.oidc.clientSecret`|string|OAuth2 client secret used for token exchange.|
-|`binds[].listeners[].policies.oidc.redirectURI`|string|Absolute callback URI handled by the gateway.<br>This policy always redirects unauthenticated non-callback requests back through this login<br>flow.|
-|`binds[].listeners[].policies.oidc.scopes`|[]string|Additional OAuth2 scopes to request. `openid` is always included.|
 |`binds[].listeners[].policies.jwtAuth`|object|Authenticate incoming JWT requests.|
 |`binds[].listeners[].policies.jwtAuth.mode`|string||
 |`binds[].listeners[].policies.jwtAuth.providers`|[]object||
@@ -4807,6 +4794,7 @@
 |`policies[].policy.oidc.discovery.url`|string||
 |`policies[].policy.oidc.authorizationEndpoint`|string|Authorization endpoint used to start the browser login flow.|
 |`policies[].policy.oidc.tokenEndpoint`|string|Token endpoint used to exchange the authorization code.|
+|`policies[].policy.oidc.tokenEndpointAuth`|string|Token endpoint client authentication method for explicit provider configuration.<br><br>Discovery mode derives this from provider metadata. Explicit mode defaults to<br>`clientSecretBasic` when omitted.|
 |`policies[].policy.oidc.jwks`|object|JWKS source used to validate returned ID tokens.|
 |`policies[].policy.oidc.jwks.file`|string||
 |`policies[].policy.oidc.jwks.url`|string||
@@ -6364,20 +6352,6 @@
 |`llm.models[].matches[].headers[].value.exact`|string||
 |`llm.models[].matches[].headers[].value.regex`|string||
 |`llm.policies`|object|policies defines policies for handling incoming requests, before a model is selected|
-|`llm.policies.oidc`|object|Authenticate incoming browser requests with OIDC authorization code flow.|
-|`llm.policies.oidc.issuer`|string|Issuer used for discovery and ID token validation.|
-|`llm.policies.oidc.discovery`|object|Optional discovery document override. If omitted, discovery uses<br>`${issuer}/.well-known/openid-configuration`.|
-|`llm.policies.oidc.discovery.file`|string||
-|`llm.policies.oidc.discovery.url`|string||
-|`llm.policies.oidc.authorizationEndpoint`|string|Authorization endpoint used to start the browser login flow.|
-|`llm.policies.oidc.tokenEndpoint`|string|Token endpoint used to exchange the authorization code.|
-|`llm.policies.oidc.jwks`|object|JWKS source used to validate returned ID tokens.|
-|`llm.policies.oidc.jwks.file`|string||
-|`llm.policies.oidc.jwks.url`|string||
-|`llm.policies.oidc.clientId`|string|OAuth2 client identifier used for authorization and token exchange.|
-|`llm.policies.oidc.clientSecret`|string|OAuth2 client secret used for token exchange.|
-|`llm.policies.oidc.redirectURI`|string|Absolute callback URI handled by the gateway.<br>This policy always redirects unauthenticated non-callback requests back through this login<br>flow.|
-|`llm.policies.oidc.scopes`|[]string|Additional OAuth2 scopes to request. `openid` is always included.|
 |`llm.policies.jwtAuth`|object|Authenticate incoming JWT requests.|
 |`llm.policies.jwtAuth.mode`|string||
 |`llm.policies.jwtAuth.providers`|[]object||
@@ -7596,6 +7570,7 @@
 |`mcp.policies.oidc.discovery.url`|string||
 |`mcp.policies.oidc.authorizationEndpoint`|string|Authorization endpoint used to start the browser login flow.|
 |`mcp.policies.oidc.tokenEndpoint`|string|Token endpoint used to exchange the authorization code.|
+|`mcp.policies.oidc.tokenEndpointAuth`|string|Token endpoint client authentication method for explicit provider configuration.<br><br>Discovery mode derives this from provider metadata. Explicit mode defaults to<br>`clientSecretBasic` when omitted.|
 |`mcp.policies.oidc.jwks`|object|JWKS source used to validate returned ID tokens.|
 |`mcp.policies.oidc.jwks.file`|string||
 |`mcp.policies.oidc.jwks.url`|string||

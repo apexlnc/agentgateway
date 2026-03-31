@@ -3408,6 +3408,18 @@
           ],
           "default": null
         },
+        "tokenEndpointAuth": {
+          "description": "Token endpoint client authentication method for explicit provider configuration.\n\nDiscovery mode derives this from provider metadata. Explicit mode defaults to\n`clientSecretBasic` when omitted.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenEndpointAuth"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "jwks": {
           "description": "JWKS source used to validate returned ID tokens.",
           "anyOf": [
@@ -3446,6 +3458,13 @@
         "clientId",
         "clientSecret",
         "redirectURI"
+      ]
+    },
+    "TokenEndpointAuth": {
+      "type": "string",
+      "enum": [
+        "clientSecretBasic",
+        "clientSecretPost"
       ]
     },
     "LocalBasicAuth": {
@@ -5130,17 +5149,6 @@
     "LocalGatewayPolicy": {
       "type": "object",
       "properties": {
-        "oidc": {
-          "description": "Authenticate incoming browser requests with OIDC authorization code flow.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LocalOidcConfig"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "jwtAuth": {
           "description": "Authenticate incoming JWT requests.",
           "anyOf": [
@@ -6217,17 +6225,6 @@
     "LocalLLMPolicy": {
       "type": "object",
       "properties": {
-        "oidc": {
-          "description": "Authenticate incoming browser requests with OIDC authorization code flow.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LocalOidcConfig"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "jwtAuth": {
           "description": "Authenticate incoming JWT requests.",
           "anyOf": [

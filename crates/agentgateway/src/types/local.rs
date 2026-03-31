@@ -1006,9 +1006,6 @@ struct LocalLLMPolicy {
 #[apply(schema_de!)]
 #[derive(Default)]
 struct LocalGatewayPolicy {
-	/// Authenticate incoming browser requests with OIDC authorization code flow.
-	#[serde(default)]
-	oidc: Option<crate::http::oidc::LocalOidcConfig>,
 	/// Authenticate incoming JWT requests.
 	#[serde(default)]
 	jwt_auth: Option<crate::http::jwt::LocalJwtConfig>,
@@ -1037,7 +1034,6 @@ struct LocalGatewayPolicy {
 impl From<LocalGatewayPolicy> for FilterOrPolicy {
 	fn from(val: LocalGatewayPolicy) -> Self {
 		let LocalGatewayPolicy {
-			oidc,
 			jwt_auth,
 			ext_authz,
 			ext_proc,
@@ -1046,7 +1042,6 @@ impl From<LocalGatewayPolicy> for FilterOrPolicy {
 			api_key,
 		} = val;
 		FilterOrPolicy {
-			oidc,
 			jwt_auth,
 			ext_authz,
 			ext_proc,

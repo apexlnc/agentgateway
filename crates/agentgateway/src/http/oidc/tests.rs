@@ -200,6 +200,7 @@ fn explicit_local_oidc_config() -> LocalOidcConfig {
 		discovery: None,
 		authorization_endpoint: Some(provider_endpoint("https://issuer.example.com/authorize")),
 		token_endpoint: Some(provider_endpoint("https://issuer.example.com/token")),
+		token_endpoint_auth: None,
 		jwks: Some(test_jwks_inline()),
 		client_id: TEST_CLIENT_ID.into(),
 		client_secret: SecretString::new("client-secret".into()),
@@ -725,6 +726,7 @@ async fn local_oidc_config_compiles_supported_provider_sources() {
 				discovery: None,
 				authorization_endpoint: None,
 				token_endpoint: None,
+				token_endpoint_auth: None,
 				jwks: None,
 				client_id: TEST_CLIENT_ID.into(),
 				client_secret: SecretString::new("client-secret".into()),
@@ -741,6 +743,16 @@ async fn local_oidc_config_compiles_supported_provider_sources() {
 			provider_endpoint("https://issuer.example.com/authorize"),
 			provider_endpoint("https://issuer.example.com/token"),
 			TokenEndpointAuth::ClientSecretBasic,
+		),
+		(
+			"explicit post",
+			LocalOidcConfig {
+				token_endpoint_auth: Some(TokenEndpointAuth::ClientSecretPost),
+				..explicit_local_oidc_config()
+			},
+			provider_endpoint("https://issuer.example.com/authorize"),
+			provider_endpoint("https://issuer.example.com/token"),
+			TokenEndpointAuth::ClientSecretPost,
 		),
 	];
 
@@ -791,6 +803,7 @@ async fn discovery_rejects_relative_provider_endpoints() {
 		discovery: None,
 		authorization_endpoint: None,
 		token_endpoint: None,
+		token_endpoint_auth: None,
 		jwks: None,
 		client_id: TEST_CLIENT_ID.into(),
 		client_secret: SecretString::new("client-secret".into()),
@@ -814,6 +827,7 @@ async fn local_oidc_config_rejects_ambiguous_provider_source_configuration() {
 				discovery: None,
 				authorization_endpoint: None,
 				token_endpoint: Some(provider_endpoint("https://issuer.example.com/token")),
+				token_endpoint_auth: None,
 				jwks: Some(test_jwks_inline()),
 				client_id: TEST_CLIENT_ID.into(),
 				client_secret: SecretString::new("client-secret".into()),
@@ -833,6 +847,22 @@ async fn local_oidc_config_rejects_ambiguous_provider_source_configuration() {
 				..explicit_local_oidc_config()
 			},
 			"oidc discovery must be omitted when authorizationEndpoint, tokenEndpoint, and jwks are configured explicitly",
+		),
+		(
+			"token endpoint auth without explicit provider",
+			LocalOidcConfig {
+				issuer: TEST_ISSUER.into(),
+				discovery: None,
+				authorization_endpoint: None,
+				token_endpoint: None,
+				token_endpoint_auth: Some(TokenEndpointAuth::ClientSecretPost),
+				jwks: None,
+				client_id: TEST_CLIENT_ID.into(),
+				client_secret: SecretString::new("client-secret".into()),
+				redirect_uri: "http://localhost:3000/oauth/callback".into(),
+				scopes: vec![],
+			},
+			"tokenEndpointAuth must be omitted unless authorizationEndpoint, tokenEndpoint, and jwks are configured explicitly",
 		),
 	];
 
