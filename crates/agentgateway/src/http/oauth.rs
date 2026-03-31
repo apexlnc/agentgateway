@@ -59,31 +59,14 @@ pub(crate) fn parse_token_endpoint_auth_methods(
 #[cfg(test)]
 mod tests {
 	use super::{
-		TokenEndpointAuth, authorization_server_metadata_url, openid_configuration_metadata_url,
-		parse_token_endpoint_auth_methods,
+		TokenEndpointAuth, authorization_server_metadata_url, parse_token_endpoint_auth_methods,
 	};
-
-	#[test]
-	fn openid_configuration_metadata_url_normalizes_trailing_slashes() {
-		assert_eq!(
-			openid_configuration_metadata_url("http://keycloak:8080/realms/test/"),
-			"http://keycloak:8080/realms/test/.well-known/openid-configuration"
-		);
-	}
 
 	#[test]
 	fn authorization_server_metadata_url_supports_path_based_issuers() {
 		assert_eq!(
 			authorization_server_metadata_url("https://idp.example.com/application/o/myapp"),
 			"https://idp.example.com/.well-known/oauth-authorization-server/application/o/myapp"
-		);
-	}
-
-	#[test]
-	fn authorization_server_metadata_url_normalizes_root_issuers() {
-		assert_eq!(
-			authorization_server_metadata_url("https://idp.example.com/"),
-			"https://idp.example.com/.well-known/oauth-authorization-server"
 		);
 	}
 

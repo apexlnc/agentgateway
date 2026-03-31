@@ -25,7 +25,7 @@ struct OidcDiscoveryDocument {
 	token_endpoint_auth_methods_supported: Option<Vec<String>>,
 }
 
-struct ResolvedOidcProviderSpec {
+struct PreparedOidcProvider {
 	issuer: String,
 	authorization_endpoint: ProviderEndpoint,
 	token_endpoint: ProviderEndpoint,
@@ -33,8 +33,8 @@ struct ResolvedOidcProviderSpec {
 	id_token_jwks: JwkSet,
 }
 
-struct ResolvedOidcPolicySpec {
-	provider: ResolvedOidcProviderSpec,
+struct PreparedOidcPolicy {
+	provider: PreparedOidcProvider,
 	client_id: String,
 	client_secret: SecretString,
 	redirect_uri: RedirectUri,
@@ -96,21 +96,6 @@ struct DiscoveredProviderMetadata {
 	jwks: FileInlineOrRemote,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum JwksLoadSource {
-	Discovered,
-	Explicit,
-}
-
-impl JwksLoadSource {
-	fn describe(self) -> &'static str {
-		match self {
-			Self::Discovered => "discovered jwks source",
-			Self::Explicit => "explicit jwks source",
-		}
-	}
-}
-
 impl LocalOidcConfig {
 	pub(crate) async fn compile(
 		self,
@@ -124,7 +109,7 @@ impl LocalOidcConfig {
 			.compile(policy_id, oidc_cookie_encoder)
 	}
 
-	async fn resolve(self, client: Client) -> Result<ResolvedOidcPolicySpec, Error> {
+	async fn resolve(self, client: Client) -> Result<PreparedOidcPolicy, Error> {
 		let LocalOidcConfig {
 			issuer,
 			discovery,
@@ -149,9 +134,9 @@ impl LocalOidcConfig {
 					},
 				};
 				let discovered = discover_provider_metadata(client.clone(), &issuer, discovery).await?;
-				let id_token_jwks = load_jwks(client, discovered.jwks, JwksLoadSource::Discovered).await?;
+				let id_token_jwks = load_jwks(client, discovered.jwks, "discovered jwks source").await?;
 
-				ResolvedOidcProviderSpec {
+				PreparedOidcProvider {
 					issuer,
 					authorization_endpoint: discovered.authorization_endpoint,
 					token_endpoint: discovered.token_endpoint,
@@ -182,7 +167,7 @@ impl LocalOidcConfig {
 			},
 		};
 
-		Ok(ResolvedOidcPolicySpec {
+		Ok(PreparedOidcPolicy {
 			provider,
 			client_id,
 			client_secret,
@@ -242,10 +227,10 @@ async fn resolve_explicit_provider(
 	authorization_endpoint: ProviderEndpoint,
 	token_endpoint: ProviderEndpoint,
 	jwks: FileInlineOrRemote,
-) -> Result<ResolvedOidcProviderSpec, Error> {
-	let id_token_jwks = load_jwks(client, jwks, JwksLoadSource::Explicit).await?;
+) -> Result<PreparedOidcProvider, Error> {
+	let id_token_jwks = load_jwks(client, jwks, "explicit jwks source").await?;
 
-	Ok(ResolvedOidcProviderSpec {
+	Ok(PreparedOidcProvider {
 		issuer,
 		authorization_endpoint,
 		token_endpoint,
@@ -267,19 +252,19 @@ fn default_discovery_url(issuer: &str) -> Result<http::Uri, Error> {
 async fn load_jwks(
 	client: Client,
 	jwks: FileInlineOrRemote,
-	source: JwksLoadSource,
+	source: &'static str,
 ) -> Result<JwkSet, Error> {
 	let jwks = jwks.load::<JwkSet>(client).await.map_err(|e| {
 		Error::Config(format!(
 			"failed to load oidc jwks from {} {}: {e}",
-			source.describe(),
+			source,
 			describe_file_inline_or_remote(&jwks)
 		))
 	})?;
 	Ok(jwks)
 }
 
-impl ResolvedOidcProviderSpec {
+impl PreparedOidcProvider {
 	fn compile(self, client_id: String) -> Result<Provider, Error> {
 		let provider = crate::http::jwt::Provider::from_jwks(
 			self.id_token_jwks,
@@ -301,14 +286,14 @@ impl ResolvedOidcProviderSpec {
 	}
 }
 
-impl ResolvedOidcPolicySpec {
+impl PreparedOidcPolicy {
 	fn compile(
 		self,
 		policy_id: PolicyId,
 		oidc_cookie_encoder: &crate::http::sessionpersistence::Encoder,
 	) -> Result<OidcPolicy, Error> {
 		let (cookie_name, transaction_cookie_name) = session::derive_cookie_names(&policy_id);
-		let ResolvedOidcPolicySpec {
+		let PreparedOidcPolicy {
 			provider,
 			client_id,
 			client_secret,

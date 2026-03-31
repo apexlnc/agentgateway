@@ -288,7 +288,7 @@ impl CallbackQuery {
 	}
 }
 
-fn iter_request_cookies(req: &Request) -> impl Iterator<Item = (String, String)> + '_ {
+fn iter_request_cookies(req: &Request) -> impl Iterator<Item = cookie::Cookie<'static>> + '_ {
 	req
 		.headers()
 		.get_all(header::COOKIE)
@@ -297,16 +297,16 @@ fn iter_request_cookies(req: &Request) -> impl Iterator<Item = (String, String)>
 		.flat_map(|header_value| {
 			cookie::Cookie::split_parse(header_value.to_owned())
 				.filter_map(|c: Result<cookie::Cookie<'_>, _>| c.ok())
-				.map(|c: cookie::Cookie<'_>| (c.name().to_owned(), c.value().to_owned()))
+				.map(cookie::Cookie::into_owned)
 				.collect::<Vec<_>>()
 		})
 }
 
 fn read_cookie(req: &Request, name: &str) -> Option<String> {
 	let mut matched = None;
-	for (cookie_name, cookie_value) in iter_request_cookies(req) {
-		if cookie_name == name {
-			matched = Some(cookie_value);
+	for cookie in iter_request_cookies(req) {
+		if cookie.name() == name {
+			matched = Some(cookie.value().to_owned());
 		}
 	}
 	matched
@@ -314,8 +314,8 @@ fn read_cookie(req: &Request, name: &str) -> Option<String> {
 
 fn strip_reserved_cookies(req: &mut Request) {
 	let preserved: Vec<String> = iter_request_cookies(req)
-		.filter(|(name, _)| !name.starts_with(RESERVED_COOKIE_PREFIX))
-		.map(|(name, value)| format!("{name}={value}"))
+		.filter(|cookie| !cookie.name().starts_with(RESERVED_COOKIE_PREFIX))
+		.map(|cookie| cookie.to_string())
 		.collect();
 
 	req.headers_mut().remove(header::COOKIE);

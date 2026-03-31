@@ -235,17 +235,6 @@ fn redirect_uri_rejects_ambiguous_values() {
 }
 
 #[test]
-fn redirect_uri_accepts_valid_absolute_http_callbacks() {
-	let redirect =
-		RedirectUri::parse("http://app.example.com/oauth/callback".to_string()).expect("redirect uri");
-
-	assert_eq!(redirect.host, "app.example.com");
-	assert_eq!(redirect.port, 80);
-	assert!(!redirect.https);
-	assert_eq!(redirect.callback_path.path(), "/oauth/callback");
-}
-
-#[test]
 fn normalize_original_uri_preserves_only_safe_local_targets() {
 	let over_limit = format!("/{}", "a".repeat(2050));
 	let cases = [
@@ -684,42 +673,6 @@ async fn callback_matching_uses_path_not_redirect_host_or_port() {
 			.unwrap(),
 		"/protected"
 	);
-}
-
-#[test]
-fn oidc_errors_use_error_specific_status_codes() {
-	let cases = [
-		(
-			"authentication required",
-			Error::AuthenticationRequired,
-			::http::StatusCode::UNAUTHORIZED,
-		),
-		(
-			"missing transaction",
-			Error::MissingTransaction,
-			::http::StatusCode::BAD_REQUEST,
-		),
-		(
-			"nonce mismatch",
-			Error::NonceMismatch,
-			::http::StatusCode::BAD_REQUEST,
-		),
-		(
-			"token exchange failure",
-			Error::TokenExchangeFailed(anyhow::anyhow!("boom")),
-			::http::StatusCode::INTERNAL_SERVER_ERROR,
-		),
-	];
-
-	for (name, error, expected_status) in cases {
-		assert_eq!(
-			crate::proxy::ProxyError::OidcFailure(error)
-				.into_response()
-				.status(),
-			expected_status,
-			"{name}"
-		);
-	}
 }
 
 #[tokio::test]

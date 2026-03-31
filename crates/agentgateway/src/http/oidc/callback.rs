@@ -28,12 +28,16 @@ pub(super) fn start_login(
 	let state = generate_state();
 	let nonce = generate_nonce();
 	let pkce_verifier = generate_pkce_verifier();
+	let code_challenge = {
+		let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, pkce_verifier.as_bytes());
+		base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.as_ref())
+	};
 	let original_uri = normalize_original_uri(req.uri().path_and_query());
 	let transaction = TransactionState {
 		policy_id: policy.policy_id.clone(),
 		csrf_state: state.clone(),
 		nonce: nonce.clone(),
-		pkce_verifier: SecretString::new(pkce_verifier.clone().into_boxed_str()),
+		pkce_verifier: SecretString::new(pkce_verifier.into_boxed_str()),
 		original_uri,
 		expires_at_unix: now_unix().saturating_add(policy.session.transaction_ttl.as_secs()),
 	};
@@ -44,10 +48,6 @@ pub(super) fn start_login(
 		is_https,
 		policy.session.transaction_ttl,
 	);
-	let code_challenge = {
-		let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, pkce_verifier.as_bytes());
-		base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.as_ref())
-	};
 	let location = with_query(
 		&policy.provider.authorization_endpoint,
 		&[
