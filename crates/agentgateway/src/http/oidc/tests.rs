@@ -105,7 +105,7 @@ fn provider_endpoint(value: impl AsRef<str>) -> ProviderEndpoint {
 fn test_policy() -> OidcPolicy {
 	let session = SessionConfig {
 		cookie_name: "agw_oidc_s_test".into(),
-		transaction_cookie_name: "agw_oidc_t_test".into(),
+		transaction_cookie_prefix: "agw_oidc_t_test".into(),
 		same_site: SameSiteMode::Lax,
 		secure: CookieSecureMode::Never,
 		ttl: Duration::from_secs(3600),
@@ -145,7 +145,8 @@ fn test_callback_policy(token_endpoint: ProviderEndpoint) -> OidcPolicy {
 
 fn encoded_transaction(
 	policy: &OidcPolicy,
-	state: &str,
+	transaction_id: &str,
+	csrf_state: &str,
 	nonce: &str,
 	original_uri: &str,
 	expires_at_unix: u64,
@@ -154,13 +155,22 @@ fn encoded_transaction(
 		.session
 		.encode_transaction(&TransactionState {
 			policy_id: policy.policy_id.clone(),
-			csrf_state: state.into(),
+			transaction_id: transaction_id.into(),
+			csrf_state: csrf_state.into(),
 			nonce: nonce.into(),
 			pkce_verifier: SecretString::new("pkce-verifier".into()),
 			original_uri: original_uri.into(),
 			expires_at_unix,
 		})
 		.expect("encode transaction")
+}
+
+fn encoded_callback_state(transaction_id: &str, csrf_state: &str) -> String {
+	super::callback::CallbackTransactionState {
+		transaction_id: transaction_id.into(),
+		csrf_state: csrf_state.into(),
+	}
+	.encode()
 }
 
 fn signed_id_token(nonce: &str) -> String {
@@ -192,6 +202,30 @@ fn add_cookie(req: &mut crate::http::Request, cookie: String) {
 	req
 		.headers_mut()
 		.append(header::COOKIE, cookie.parse().expect("cookie header"));
+}
+
+fn redirect_location(response: &crate::http::Response) -> String {
+	response
+		.headers()
+		.get(header::LOCATION)
+		.expect("location header")
+		.to_str()
+		.expect("location utf8")
+		.to_string()
+}
+
+fn query_param(url: &str, key: &str) -> String {
+	url::Url::parse(url)
+		.expect("absolute url")
+		.query_pairs()
+		.find_map(|(k, v)| (k == key).then(|| v.into_owned()))
+		.expect("query param")
+}
+
+fn parse_set_cookie(set_cookie: &str) -> cookie::Cookie<'static> {
+	cookie::Cookie::parse(set_cookie.to_string())
+		.expect("set-cookie")
+		.into_owned()
 }
 
 fn explicit_local_oidc_config() -> LocalOidcConfig {
@@ -559,25 +593,40 @@ async fn callback_rejects_invalid_transaction_state() {
 		(
 			"missing transaction",
 			None,
-			"https://app.example.com/oauth/callback?code=auth-code&state=test-state",
+			"tx-1",
+			"test-state",
 			Error::MissingTransaction,
 		),
 		(
 			"csrf mismatch",
 			Some(("expected-state", TEST_NONCE, "/protected")),
-			"https://app.example.com/oauth/callback?code=auth-code&state=wrong-state",
+			"tx-1",
+			"wrong-state",
 			Error::CsrfMismatch,
 		),
 	];
 
-	for (name, transaction, uri, expected_error) in cases {
+	for (name, transaction, transaction_id, callback_csrf_state, expected_error) in cases {
 		let policy = test_policy();
-		let mut req = request(Method::GET, uri, Some("text/html"));
-		if let Some((state, nonce, original_uri)) = transaction {
-			let encoded = encoded_transaction(&policy, state, nonce, original_uri, now_unix() + 300);
+		let callback_state = encoded_callback_state(transaction_id, callback_csrf_state);
+		let uri =
+			format!("https://app.example.com/oauth/callback?code=auth-code&state={callback_state}");
+		let mut req = request(Method::GET, &uri, Some("text/html"));
+		if let Some((cookie_csrf_state, nonce, original_uri)) = transaction {
+			let encoded = encoded_transaction(
+				&policy,
+				transaction_id,
+				cookie_csrf_state,
+				nonce,
+				original_uri,
+				now_unix() + 300,
+			);
 			add_cookie(
 				&mut req,
-				format!("{}={encoded}", policy.session.transaction_cookie_name),
+				format!(
+					"{}={encoded}",
+					policy.session.transaction_cookie_name(transaction_id)
+				),
 			);
 		}
 
@@ -608,21 +657,24 @@ async fn callback_success_sets_session_cookie_and_clears_transaction_cookie() {
 	let policy = test_callback_policy(provider_endpoint(format!("{}/token", mock.uri())));
 	let mut policy = policy;
 	policy.session.secure = CookieSecureMode::Auto;
+	let transaction_id = "tx-1";
+	let callback_state = encoded_callback_state(transaction_id, "test-state");
 	let encoded = encoded_transaction(
 		&policy,
+		transaction_id,
 		"test-state",
 		TEST_NONCE,
 		"/protected",
 		now_unix() + 300,
 	);
-	let mut req = request(
-		Method::GET,
-		"http://127.0.0.1/oauth/callback?code=auth-code&state=test-state",
-		Some("text/html"),
-	);
+	let uri = format!("http://127.0.0.1/oauth/callback?code=auth-code&state={callback_state}");
+	let mut req = request(Method::GET, &uri, Some("text/html"));
 	add_cookie(
 		&mut req,
-		format!("{}={encoded}", policy.session.transaction_cookie_name),
+		format!(
+			"{}={encoded}",
+			policy.session.transaction_cookie_name(transaction_id)
+		),
 	);
 
 	let response = policy
@@ -647,10 +699,119 @@ async fn callback_success_sets_session_cookie_and_clears_transaction_cookie() {
 			.any(|cookie| cookie.starts_with(&policy.session.cookie_name))
 	);
 	assert!(cookies.iter().all(|cookie| cookie.contains("Secure")));
-	assert!(cookies.iter().any(
-		|cookie| cookie.starts_with(&policy.session.transaction_cookie_name)
+	assert!(cookies.iter().any(|cookie| {
+		cookie.starts_with(&policy.session.transaction_cookie_name(transaction_id))
 			&& cookie.contains("Max-Age=0")
-	));
+	}));
+}
+
+#[tokio::test]
+async fn concurrent_login_attempts_use_distinct_transaction_cookies() {
+	let mock = MockServer::start().await;
+	let policy = test_callback_policy(provider_endpoint(format!("{}/token", mock.uri())));
+
+	let mut first_req = request(
+		Method::GET,
+		"https://app.example.com/protected",
+		Some("text/html"),
+	);
+	let first_response = policy
+		.apply(None, &mut first_req, policy_client())
+		.await
+		.expect("first login start")
+		.direct_response
+		.expect("first redirect");
+	let first_location = redirect_location(&first_response);
+	let first_state = query_param(&first_location, "state");
+	let first_cookie = parse_set_cookie(
+		first_response
+			.headers()
+			.get(header::SET_COOKIE)
+			.expect("first set-cookie")
+			.to_str()
+			.expect("first set-cookie utf8"),
+	);
+	let first_transaction = policy
+		.session
+		.decode_transaction(first_cookie.value())
+		.expect("decode first transaction");
+
+	let mut second_req = request(
+		Method::GET,
+		"https://app.example.com/protected",
+		Some("text/html"),
+	);
+	let second_response = policy
+		.apply(None, &mut second_req, policy_client())
+		.await
+		.expect("second login start")
+		.direct_response
+		.expect("second redirect");
+	let second_cookie = parse_set_cookie(
+		second_response
+			.headers()
+			.get(header::SET_COOKIE)
+			.expect("second set-cookie")
+			.to_str()
+			.expect("second set-cookie utf8"),
+	);
+
+	Mock::given(method("POST"))
+		.and(path("/token"))
+		.respond_with(ResponseTemplate::new(200).set_body_json(json!({
+			"id_token": signed_id_token(&first_transaction.nonce)
+		})))
+		.mount(&mock)
+		.await;
+
+	assert_ne!(first_cookie.name(), second_cookie.name());
+	assert!(
+		first_cookie
+			.name()
+			.starts_with(&policy.session.transaction_cookie_prefix)
+	);
+	assert!(
+		second_cookie
+			.name()
+			.starts_with(&policy.session.transaction_cookie_prefix)
+	);
+
+	let mut callback_req = request(
+		Method::GET,
+		&format!("https://app.example.com/oauth/callback?code=auth-code&state={first_state}"),
+		Some("text/html"),
+	);
+	add_cookie(
+		&mut callback_req,
+		format!("{}={}", first_cookie.name(), first_cookie.value()),
+	);
+	add_cookie(
+		&mut callback_req,
+		format!("{}={}", second_cookie.name(), second_cookie.value()),
+	);
+
+	let callback_response = policy
+		.apply(None, &mut callback_req, policy_client())
+		.await
+		.expect("first callback succeeds")
+		.direct_response
+		.expect("callback redirect");
+	let set_cookies: Vec<_> = callback_response
+		.headers()
+		.get_all(header::SET_COOKIE)
+		.iter()
+		.map(|value| value.to_str().expect("set-cookie utf8").to_string())
+		.collect();
+	assert!(
+		set_cookies
+			.iter()
+			.any(|cookie| cookie.starts_with(first_cookie.name()) && cookie.contains("Max-Age=0"))
+	);
+	assert!(
+		!set_cookies
+			.iter()
+			.any(|cookie| cookie.starts_with(second_cookie.name()) && cookie.contains("Max-Age=0"))
+	);
 }
 
 #[tokio::test]
@@ -666,21 +827,25 @@ async fn callback_matching_uses_path_not_redirect_host_or_port() {
 		.await;
 
 	let policy = test_callback_policy(provider_endpoint(format!("{}/token", mock.uri())));
+	let transaction_id = "tx-1";
+	let callback_state = encoded_callback_state(transaction_id, "test-state");
 	let encoded = encoded_transaction(
 		&policy,
+		transaction_id,
 		"test-state",
 		TEST_NONCE,
 		"/protected",
 		now_unix() + 300,
 	);
-	let mut req = request(
-		Method::GET,
-		"https://edge.example.net:8443/oauth/callback?code=auth-code&state=test-state",
-		Some("text/html"),
-	);
+	let uri =
+		format!("https://edge.example.net:8443/oauth/callback?code=auth-code&state={callback_state}");
+	let mut req = request(Method::GET, &uri, Some("text/html"));
 	add_cookie(
 		&mut req,
-		format!("{}={encoded}", policy.session.transaction_cookie_name),
+		format!(
+			"{}={encoded}",
+			policy.session.transaction_cookie_name(transaction_id)
+		),
 	);
 
 	let response = policy

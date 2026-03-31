@@ -245,13 +245,18 @@ impl OidcPolicy {
 			return Err(Error::ProviderCallback(error));
 		}
 		let code = query.code.ok_or(Error::InvalidCallback)?;
+		let callback_state = callback::CallbackTransactionState::decode(&query.state)?;
+		let transaction_cookie_name = self
+			.session
+			.transaction_cookie_name(&callback_state.transaction_id);
 		let transaction_cookie =
-			read_cookie(req, &self.session.transaction_cookie_name).ok_or(Error::MissingTransaction)?;
+			read_cookie(req, &transaction_cookie_name).ok_or(Error::MissingTransaction)?;
 		let response = callback::handle_callback(
 			self,
 			callback::CallbackRequestContext {
 				code,
-				state: query.state,
+				callback_state,
+				transaction_cookie_name,
 				transaction_cookie,
 			},
 			client,

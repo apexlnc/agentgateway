@@ -31,6 +31,7 @@ pub(super) fn default_transaction_ttl() -> Duration {
 #[serde(rename_all = "camelCase")]
 pub struct TransactionState {
 	pub policy_id: PolicyId,
+	pub transaction_id: String,
 	pub csrf_state: String,
 	pub nonce: String,
 	#[serde(serialize_with = "crate::serdes::ser_redact")]
@@ -50,6 +51,7 @@ impl Serialize for TransactionState {
 		#[serde(rename_all = "camelCase")]
 		struct SerializableTransactionState<'a> {
 			policy_id: &'a PolicyId,
+			transaction_id: &'a str,
 			csrf_state: &'a str,
 			nonce: &'a str,
 			pkce_verifier: &'a str,
@@ -59,6 +61,7 @@ impl Serialize for TransactionState {
 
 		SerializableTransactionState {
 			policy_id: &self.policy_id,
+			transaction_id: &self.transaction_id,
 			csrf_state: &self.csrf_state,
 			nonce: &self.nonce,
 			pkce_verifier: self.pkce_verifier.expose_secret(),
@@ -115,7 +118,7 @@ impl BrowserSession {
 #[serde(rename_all = "camelCase")]
 pub struct SessionConfig {
 	pub cookie_name: String,
-	pub transaction_cookie_name: String,
+	pub transaction_cookie_prefix: String,
 	pub same_site: SameSiteMode,
 	pub secure: CookieSecureMode,
 	#[serde(with = "crate::serdes::serde_dur")]
@@ -195,6 +198,10 @@ impl SessionConfig {
 			true,
 		)
 	}
+
+	pub fn transaction_cookie_name(&self, transaction_id: &str) -> String {
+		format!("{}.{}", self.transaction_cookie_prefix, transaction_id)
+	}
 }
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -232,6 +239,10 @@ pub(super) fn generate_nonce() -> String {
 }
 
 pub(super) fn generate_state() -> String {
+	random_token(16)
+}
+
+pub(super) fn generate_transaction_id() -> String {
 	random_token(16)
 }
 
