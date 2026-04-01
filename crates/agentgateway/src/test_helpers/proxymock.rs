@@ -603,6 +603,43 @@ impl TestBind {
 			});
 		}
 	}
+	pub async fn attach_gateway_policy(&mut self, p: serde_json::Value) {
+		let oidc_key = strng::format!("pol/{}", self.policies + 1);
+		let pol: local::FilterOrPolicy = serde_json::from_value(p).unwrap();
+		let pols = local::split_policies(
+			self.pi.upstream.clone(),
+			pol,
+			Some(local::AttachedPolicyContext {
+				oidc_policy_id: crate::http::oidc::PolicyId::policy(&oidc_key),
+				oidc_cookie_encoder: self.pi.cfg.oidc_cookie_encoder.as_ref(),
+			}),
+		)
+		.await
+		.unwrap();
+		assert!(pols.backend_policies.is_empty());
+		let (oidc_policies, gateway_policies): (Vec<_>, Vec<_>) = pols
+			.route_policies
+			.into_iter()
+			.partition(|policy| matches!(policy, TrafficPolicy::Oidc(_)));
+		for v in oidc_policies.into_iter().chain(gateway_policies) {
+			self.policies += 1;
+			let key = if matches!(v, TrafficPolicy::Oidc(_)) {
+				oidc_key.clone()
+			} else {
+				strng::format!("pol/{}", self.policies)
+			};
+			self.with_policy(TargetedPolicy {
+				key,
+				name: None,
+				target: PolicyTarget::Gateway(crate::types::agent::ListenerTarget {
+					gateway_name: Default::default(),
+					gateway_namespace: Default::default(),
+					listener_name: None,
+				}),
+				policy: (v, PolicyPhase::Gateway).into(),
+			});
+		}
+	}
 	pub async fn attach_frontend_policy(&mut self, p: serde_json::Value) {
 		let cfg = serde_json::json!({
 			"frontendPolicies": p,
@@ -757,6 +794,10 @@ impl TestBind {
 pub fn setup_proxy_test(cfg: &str) -> anyhow::Result<TestBind> {
 	agent_core::telemetry::testing::setup_test_logging();
 	let config = crate::config::parse_config(cfg.to_string(), None)?;
+	Ok(setup_proxy_test_with_config(config))
+}
+
+pub fn setup_proxy_test_with_config(config: crate::Config) -> TestBind {
 	let encoder = config.session_encoder.clone();
 	let stores = Stores::new(config.ipv6_enabled, config.threading_mode);
 	let client = client::Client::new(&config.dns, None, Default::default(), None);
@@ -773,14 +814,14 @@ pub fn setup_proxy_test(cfg: &str) -> anyhow::Result<TestBind> {
 
 		mcp_state: mcp::App::new(stores.clone(), encoder),
 	});
-	Ok(TestBind {
+	TestBind {
 		pi,
 		drain_rx,
 		_drain_tx: drain_tx,
 
 		routes: 0,
 		policies: 0,
-	})
+	}
 }
 
 pub async fn read_body_raw(body: axum_core::body::Body) -> Bytes {

@@ -420,6 +420,29 @@ async fn apply_redirects_unauthenticated_requests_to_login() {
 }
 
 #[tokio::test]
+async fn apply_bypasses_cors_preflight_requests() {
+	let policy = test_policy();
+	let mut req = request(Method::OPTIONS, "https://app.example.com/private", None);
+	req.headers_mut().insert(
+		header::ORIGIN,
+		"https://frontend.example.com".parse().unwrap(),
+	);
+	req.headers_mut().insert(
+		header::ACCESS_CONTROL_REQUEST_METHOD,
+		"GET".parse().unwrap(),
+	);
+
+	let response = policy
+		.apply(None, &mut req, policy_client())
+		.await
+		.expect("preflight should bypass oidc");
+
+	assert!(response.direct_response.is_none());
+	assert!(response.response_headers.is_none());
+	assert!(req.extensions().get::<jwt::Claims>().is_none());
+}
+
+#[tokio::test]
 async fn token_endpoint_auth_modes_shape_exchange_requests() {
 	#[derive(Copy, Clone)]
 	enum Expectation {

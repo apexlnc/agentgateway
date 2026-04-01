@@ -5149,6 +5149,17 @@
     "LocalGatewayPolicy": {
       "type": "object",
       "properties": {
+        "oidc": {
+          "description": "Authenticate incoming browser requests with OIDC authorization code flow.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalOidcConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "jwtAuth": {
           "description": "Authenticate incoming JWT requests.",
           "anyOf": [
@@ -6225,6 +6236,17 @@
     "LocalLLMPolicy": {
       "type": "object",
       "properties": {
+        "oidc": {
+          "description": "Authenticate incoming browser requests with OIDC authorization code flow.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalOidcConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "jwtAuth": {
           "description": "Authenticate incoming JWT requests.",
           "anyOf": [

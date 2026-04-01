@@ -255,6 +255,7 @@ pub struct RoutePolicies {
 #[derive(Debug, Default)]
 pub struct GatewayPolicies {
 	pub ext_proc: Option<ext_proc::ExtProc>,
+	pub oidc: Option<oidc::OidcPolicy>,
 	pub jwt: Option<JwtAuthentication>,
 	pub ext_authz: Option<ext_authz::ExtAuthz>,
 	pub transformation: Option<http::transformation_cel::Transformation>,
@@ -604,6 +605,9 @@ impl Store {
 		let mut pol = GatewayPolicies::default();
 		for rule in rules {
 			match &rule {
+				TrafficPolicy::Oidc(p) => {
+					pol.oidc.get_or_insert_with(|| p.clone());
+				},
 				TrafficPolicy::JwtAuth(p) => {
 					pol.jwt.get_or_insert_with(|| p.clone());
 				},

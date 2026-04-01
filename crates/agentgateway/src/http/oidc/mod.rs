@@ -205,6 +205,10 @@ impl OidcPolicy {
 			return Ok(response);
 		}
 
+		if is_cors_preflight(req) {
+			return Ok(PolicyResponse::default());
+		}
+
 		if let Some(cookie) = read_cookie(req, &self.session.cookie_name) {
 			match self.session.decode_browser_session(&cookie) {
 				Ok(browser_session) => {
@@ -248,16 +252,16 @@ impl OidcPolicy {
 			return Ok(None);
 		};
 
-		if let Some(error) = query.error {
-			return Err(Error::ProviderCallback(error));
-		}
-		let code = query.code.ok_or(Error::InvalidCallback)?;
 		let callback_state = callback::CallbackTransactionState::decode(&query.state)?;
 		let transaction_cookie_name = self
 			.session
 			.transaction_cookie_name(&callback_state.transaction_id);
 		let transaction_cookie =
 			read_cookie(req, &transaction_cookie_name).ok_or(Error::MissingTransaction)?;
+		if let Some(error) = query.error {
+			return Err(Error::ProviderCallback(error));
+		}
+		let code = query.code.ok_or(Error::InvalidCallback)?;
 		let response = callback::handle_callback(
 			self,
 			callback::CallbackRequestContext {
@@ -271,6 +275,16 @@ impl OidcPolicy {
 		.await?;
 		Ok(Some(response))
 	}
+}
+
+fn is_cors_preflight(req: &Request) -> bool {
+	req.method() == ::http::Method::OPTIONS
+		&& req.headers().contains_key(header::ORIGIN)
+		&& req
+			.headers()
+			.get(header::ACCESS_CONTROL_REQUEST_METHOD)
+			.map(|value| !value.as_bytes().is_empty())
+			.unwrap_or(false)
 }
 
 impl CallbackQuery {

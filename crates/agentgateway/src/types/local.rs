@@ -1006,6 +1006,9 @@ struct LocalLLMPolicy {
 #[apply(schema_de!)]
 #[derive(Default)]
 struct LocalGatewayPolicy {
+	/// Authenticate incoming browser requests with OIDC authorization code flow.
+	#[serde(default)]
+	oidc: Option<crate::http::oidc::LocalOidcConfig>,
 	/// Authenticate incoming JWT requests.
 	#[serde(default)]
 	jwt_auth: Option<crate::http::jwt::LocalJwtConfig>,
@@ -1034,6 +1037,7 @@ struct LocalGatewayPolicy {
 impl From<LocalGatewayPolicy> for FilterOrPolicy {
 	fn from(val: LocalGatewayPolicy) -> Self {
 		let LocalGatewayPolicy {
+			oidc,
 			jwt_auth,
 			ext_authz,
 			ext_proc,
@@ -1042,6 +1046,7 @@ impl From<LocalGatewayPolicy> for FilterOrPolicy {
 			api_key,
 		} = val;
 		FilterOrPolicy {
+			oidc,
 			jwt_auth,
 			ext_authz,
 			ext_proc,
@@ -1424,7 +1429,6 @@ async fn convert(
 			bail!("'policies' must contain exactly 1 policy");
 		}
 		let tp = if let Some(route_policy) = res.route_policies.into_iter().next() {
-			validate_targeted_traffic_policy(&p.target, p.phase, &route_policy)?;
 			PolicyType::from((route_policy, p.phase))
 		} else {
 			res.backend_policies.into_iter().next().unwrap().into()
@@ -1480,7 +1484,91 @@ async fn convert(
 		workloads,
 		services,
 	};
+	validate_listener_oidc_modes(&normalized)?;
 	Ok(normalized)
+}
+
+#[derive(Default)]
+struct ListenerOidcModes {
+	has_gateway_phase_oidc: bool,
+	has_route_phase_oidc: bool,
+}
+
+fn validate_listener_oidc_modes(normalized: &NormalizedLocalConfig) -> anyhow::Result<()> {
+	let mut listener_modes: HashMap<ListenerName, ListenerOidcModes> = HashMap::new();
+	let mut route_listeners: HashMap<RouteName, ListenerName> = HashMap::new();
+	let listeners: Vec<ListenerName> = normalized
+		.binds
+		.iter()
+		.flat_map(|bind| bind.listeners.iter())
+		.map(|listener| listener.name.clone())
+		.collect();
+
+	for bind in &normalized.binds {
+		for listener in bind.listeners.iter() {
+			for route in listener.routes.iter() {
+				route_listeners.insert(route.name.clone(), listener.name.clone());
+				if route
+					.inline_policies
+					.iter()
+					.any(|policy| matches!(policy, TrafficPolicy::Oidc(_)))
+				{
+					listener_modes
+						.entry(listener.name.clone())
+						.or_default()
+						.has_route_phase_oidc = true;
+				}
+			}
+		}
+	}
+
+	for policy in &normalized.policies {
+		let PolicyType::Traffic(traffic) = &policy.policy else {
+			continue;
+		};
+		if !matches!(traffic.policy, TrafficPolicy::Oidc(_)) {
+			continue;
+		}
+
+		let affected_listeners: Vec<ListenerName> = match &policy.target {
+			PolicyTarget::Gateway(target) => listeners
+				.iter()
+				.filter(|listener| {
+					listener.gateway_name == target.gateway_name
+						&& listener.gateway_namespace == target.gateway_namespace
+						&& target
+							.listener_name
+							.as_ref()
+							.is_none_or(|name| listener.listener_name == *name)
+				})
+				.cloned()
+				.collect(),
+			PolicyTarget::Route(route) => route_listeners.get(route).into_iter().cloned().collect(),
+			PolicyTarget::Backend(_) => Vec::new(),
+		};
+
+		for listener in affected_listeners {
+			let modes = listener_modes.entry(listener).or_default();
+			match traffic.phase {
+				PolicyPhase::Gateway => modes.has_gateway_phase_oidc = true,
+				PolicyPhase::Route => modes.has_route_phase_oidc = true,
+			}
+		}
+	}
+
+	if let Some((listener, _)) = listener_modes
+		.iter()
+		.find(|(_, modes)| modes.has_gateway_phase_oidc && modes.has_route_phase_oidc)
+	{
+		bail!(
+			"listener '{}/{}/{}' cannot mix gateway-phase oidc with route-phase oidc",
+			listener.gateway_namespace,
+			listener.gateway_name,
+			listener.listener_name
+		);
+	}
+
+	Ok(())
 }
 
 static STARTUP_TIMESTAMP: OnceLock<u64> = OnceLock::new();
@@ -1545,7 +1633,15 @@ async fn convert_llm_config(
 			None,
 		)
 		.await?;
-		let gateway_policies = split_policies(client.clone(), gateway.into(), None).await?;
+		let gateway_policies = split_policies(
+			client.clone(),
+			gateway.into(),
+			Some(AttachedPolicyContext {
+				oidc_policy_id: crate::http::oidc::PolicyId::policy("listener/llm"),
+				oidc_cookie_encoder: config.oidc_cookie_encoder.as_ref(),
+			}),
+		)
+		.await?;
 		(
 			gateway_policies.route_policies,
 			authorization_policies.route_policies,
@@ -2131,7 +2227,16 @@ async fn convert_listener(
 	}
 
 	if let Some(pol) = policies {
-		let pols = split_policies(client.clone(), pol.into(), None).await?;
+		let listener_policy_id = strng::format!("listener/{key}");
+		let pols = split_policies(
+			client.clone(),
+			pol.into(),
+			Some(AttachedPolicyContext {
+				oidc_policy_id: crate::http::oidc::PolicyId::policy(listener_policy_id),
+				oidc_cookie_encoder: config.oidc_cookie_encoder.as_ref(),
+			}),
+		)
+		.await?;
 		let target = PolicyTarget::Gateway(name.clone().into());
 		for (idx, pol) in pols.route_policies.into_iter().enumerate() {
 			let key = strng::format!("listener/{key}/{idx}");
@@ -2471,37 +2576,6 @@ pub(crate) async fn split_policies(
 		route_policies.push(oidc);
 	}
 	Ok(resolved)
-}
-
-fn validate_targeted_traffic_policy(
-	target: &PolicyTarget,
-	phase: PolicyPhase,
-	policy: &TrafficPolicy,
-) -> Result<(), Error> {
-	if matches!(target, PolicyTarget::Backend(_)) {
-		bail!("'policies' traffic policies cannot target a backend");
-	}
-	if phase == PolicyPhase::Gateway && matches!(target, PolicyTarget::Route(_)) {
-		bail!("'policies' gateway-phase traffic policies must target a gateway or listener");
-	}
-	if phase == PolicyPhase::Gateway && !targeted_traffic_policy_supports_gateway_phase(policy) {
-		bail!(
-			"'policies' gateway phase only supports jwtAuth, basicAuth, apiKey, extAuthz, extProc, and transformations"
-		);
-	}
-	Ok(())
-}
-
-fn targeted_traffic_policy_supports_gateway_phase(policy: &TrafficPolicy) -> bool {
-	matches!(
-		policy,
-		TrafficPolicy::JwtAuth(_)
-			| TrafficPolicy::BasicAuth(_)
-			| TrafficPolicy::APIKey(_)
-			| TrafficPolicy::ExtAuthz(_)
-			| TrafficPolicy::ExtProc(_)
-			| TrafficPolicy::Transformation(_)
-	)
 }
 
 async fn convert_tcp_route(
