@@ -88,6 +88,7 @@ async fn apply_request_policies(
 			.map_err(|e| ProxyResponse::from(ProxyError::OidcFailure(e)))?
 			.apply(response_policies.headers())?;
 	}
+	http::strip_request_cookies_by_prefix(req, http::oidc::RESERVED_COOKIE_PREFIX);
 
 	if let Some(j) = &policies.jwt {
 		j.apply(&client, Some(log), req).await?;

@@ -1411,17 +1411,23 @@ async fn convert(
 
 	for p in policies {
 		let policy_key = p.name.to_string();
-		let res = split_attached_policies(
+		let res = split_policies(
 			client.clone(),
 			p.policy,
-			crate::http::oidc::PolicyId::policy(&policy_key),
-			config.oidc_cookie_encoder.as_ref(),
+			Some(AttachedPolicyContext {
+				oidc_policy_id: crate::http::oidc::PolicyId::policy(&policy_key),
+				oidc_cookie_encoder: config.oidc_cookie_encoder.as_ref(),
+			}),
 		)
 		.await?;
+		if (res.route_policies.len() + res.backend_policies.len()) != 1 {
+			bail!("'policies' must contain exactly 1 policy");
+		}
 		let tp = if let Some(route_policy) = res.route_policies.into_iter().next() {
+			validate_targeted_traffic_policy(&p.target, p.phase, &route_policy)?;
 			PolicyType::from((route_policy, p.phase))
 		} else {
-			res.backend_policies.first().unwrap().clone().into()
+			res.backend_policies.into_iter().next().unwrap().into()
 		};
 		let tgt_policy = TargetedPolicy {
 			name: Some(TypedResourceName {
@@ -1536,9 +1542,10 @@ async fn convert_llm_config(
 				authorization,
 				..Default::default()
 			},
+			None,
 		)
 		.await?;
-		let gateway_policies = split_policies(client.clone(), gateway.into()).await?;
+		let gateway_policies = split_policies(client.clone(), gateway.into(), None).await?;
 		(
 			gateway_policies.route_policies,
 			authorization_policies.route_policies,
@@ -1936,11 +1943,13 @@ async fn convert_mcp_config(
 	let route_key = strng::new("mcp:default");
 
 	let resolved_policies = if let Some(pol) = policies {
-		split_attached_policies(
+		split_policies(
 			client.clone(),
 			pol,
-			crate::http::oidc::PolicyId::route(&route_key),
-			config.oidc_cookie_encoder.as_ref(),
+			Some(AttachedPolicyContext {
+				oidc_policy_id: crate::http::oidc::PolicyId::route(&route_key),
+				oidc_cookie_encoder: config.oidc_cookie_encoder.as_ref(),
+			}),
 		)
 		.await?
 	} else {
@@ -2122,7 +2131,7 @@ async fn convert_listener(
 	}
 
 	if let Some(pol) = policies {
-		let pols = split_policies(client.clone(), pol.into()).await?;
+		let pols = split_policies(client.clone(), pol.into(), None).await?;
 		let target = PolicyTarget::Gateway(name.clone().into());
 		for (idx, pol) in pols.route_policies.into_iter().enumerate() {
 			let key = strng::format!("listener/{key}/{idx}");
@@ -2199,11 +2208,13 @@ pub async fn convert_route(
 		external_backends.extend_from_slice(&backends);
 	}
 	let resolved = if let Some(pol) = policies {
-		split_attached_policies(
+		split_policies(
 			client,
 			pol,
-			crate::http::oidc::PolicyId::route(&key),
-			config.oidc_cookie_encoder.as_ref(),
+			Some(AttachedPolicyContext {
+				oidc_policy_id: crate::http::oidc::PolicyId::route(&key),
+				oidc_cookie_encoder: config.oidc_cookie_encoder.as_ref(),
+			}),
 		)
 		.await?
 	} else {
@@ -2235,6 +2246,11 @@ pub async fn convert_route(
 pub(crate) struct ResolvedPolicies {
 	pub(crate) backend_policies: Vec<BackendPolicy>,
 	pub(crate) route_policies: Vec<TrafficPolicy>,
+}
+
+pub(crate) struct AttachedPolicyContext<'a> {
+	pub(crate) oidc_policy_id: crate::http::oidc::PolicyId,
+	pub(crate) oidc_cookie_encoder: Option<&'a crate::http::sessionpersistence::Encoder>,
 }
 
 async fn split_frontend_policies(
@@ -2300,6 +2316,7 @@ async fn split_frontend_policies(
 pub(crate) async fn split_policies(
 	client: Client,
 	pol: FilterOrPolicy,
+	attached: Option<AttachedPolicyContext<'_>>,
 ) -> Result<ResolvedPolicies, Error> {
 	let mut resolved = ResolvedPolicies::default();
 	let ResolvedPolicies {
@@ -2394,11 +2411,27 @@ pub(crate) async fn split_policies(
 			mcp: None,
 		}));
 	}
-	if oidc_config.is_some() {
-		return Err(Error::msg(
-			"oidc policies must be attached to a route or route-phase targeted policy",
-		));
-	}
+	let compiled_oidc = if let Some(oidc) = oidc_config {
+		let Some(AttachedPolicyContext {
+			oidc_policy_id,
+			oidc_cookie_encoder,
+		}) = attached
+		else {
+			return Err(Error::msg("oidc policies must be attached"));
+		};
+		let Some(oidc_cookie_encoder) = oidc_cookie_encoder else {
+			return Err(Error::msg(
+				"OIDC_COOKIE_SECRET is required when oidc is configured",
+			));
+		};
+		Some(TrafficPolicy::Oidc(
+			oidc
+				.compile(client.clone(), oidc_policy_id, oidc_cookie_encoder)
+				.await?,
+		))
+	} else {
+		None
+	};
 	if let Some(p) = basic_auth {
 		route_policies.push(TrafficPolicy::BasicAuth(p.try_into()?));
 	}
@@ -2434,30 +2467,41 @@ pub(crate) async fn split_policies(
 	if let Some(p) = retry {
 		route_policies.push(TrafficPolicy::Retry(p));
 	}
+	if let Some(oidc) = compiled_oidc {
+		route_policies.push(oidc);
+	}
 	Ok(resolved)
 }
 
-pub(crate) async fn split_attached_policies(
-	client: Client,
-	mut pol: FilterOrPolicy,
-	oidc_policy_id: crate::http::oidc::PolicyId,
-	oidc_cookie_encoder: Option<&crate::http::sessionpersistence::Encoder>,
-) -> Result<ResolvedPolicies, Error> {
-	let oidc_config = pol.oidc.take();
-	let mut resolved = split_policies(client.clone(), pol).await?;
-	if let Some(oidc) = oidc_config {
-		let Some(oidc_cookie_encoder) = oidc_cookie_encoder else {
-			return Err(Error::msg(
-				"OIDC_COOKIE_SECRET is required when oidc is configured",
-			));
-		};
-		resolved.route_policies.push(TrafficPolicy::Oidc(
-			oidc
-				.compile(client, oidc_policy_id, oidc_cookie_encoder)
-				.await?,
-		));
+fn validate_targeted_traffic_policy(
+	target: &PolicyTarget,
+	phase: PolicyPhase,
+	policy: &TrafficPolicy,
+) -> Result<(), Error> {
+	if matches!(target, PolicyTarget::Backend(_)) {
+		bail!("'policies' traffic policies cannot target a backend");
 	}
-	Ok(resolved)
+	if phase == PolicyPhase::Gateway && matches!(target, PolicyTarget::Route(_)) {
+		bail!("'policies' gateway-phase traffic policies must target a gateway or listener");
+	}
+	if phase == PolicyPhase::Gateway && !targeted_traffic_policy_supports_gateway_phase(policy) {
+		bail!(
+			"'policies' gateway phase only supports jwtAuth, basicAuth, apiKey, extAuthz, extProc, and transformations"
+		);
+	}
+	Ok(())
+}
+
+fn targeted_traffic_policy_supports_gateway_phase(policy: &TrafficPolicy) -> bool {
+	matches!(
+		policy,
+		TrafficPolicy::JwtAuth(_)
+			| TrafficPolicy::BasicAuth(_)
+			| TrafficPolicy::APIKey(_)
+			| TrafficPolicy::ExtAuthz(_)
+			| TrafficPolicy::ExtProc(_)
+			| TrafficPolicy::Transformation(_)
+	)
 }
 
 async fn convert_tcp_route(

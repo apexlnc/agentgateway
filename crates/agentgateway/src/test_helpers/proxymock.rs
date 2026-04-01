@@ -38,7 +38,7 @@ use crate::types::agent::{
 	BindProtocol, Listener, ListenerProtocol, ListenerSet, McpBackend, McpTarget, McpTargetSpec,
 	PathMatch, PolicyPhase, PolicyTarget, ResourceName, Route, RouteBackendReference, RouteMatch,
 	RouteName, RouteSet, SimpleBackendReference, SseTargetSpec, StreamableHTTPTargetSpec, TCPRoute,
-	TCPRouteBackendReference, TCPRouteSet, Target, TargetedPolicy,
+	TCPRouteBackendReference, TCPRouteSet, Target, TargetedPolicy, TrafficPolicy,
 };
 use crate::types::local;
 use crate::types::local::LocalNamedAIProvider;
@@ -566,50 +566,30 @@ impl TestBind {
 			.insert_route(route, LISTENER_KEY);
 	}
 	pub async fn attach_route_policy(&mut self, p: serde_json::Value) {
-		let mut non_oidc = p.clone();
-		let oidc = non_oidc
-			.as_object_mut()
-			.and_then(|object| object.remove("oidc"));
-		let pol: local::FilterOrPolicy = serde_json::from_value(non_oidc).unwrap();
-		let pols = local::split_policies(self.pi.upstream.clone(), pol)
-			.await
-			.unwrap();
-		for v in pols.route_policies.into_iter() {
+		let oidc_key = strng::format!("pol/{}", self.policies + 1);
+		let pol: local::FilterOrPolicy = serde_json::from_value(p).unwrap();
+		let pols = local::split_policies(
+			self.pi.upstream.clone(),
+			pol,
+			Some(local::AttachedPolicyContext {
+				oidc_policy_id: crate::http::oidc::PolicyId::policy(&oidc_key),
+				oidc_cookie_encoder: self.pi.cfg.oidc_cookie_encoder.as_ref(),
+			}),
+		)
+		.await
+		.unwrap();
+		assert!(pols.backend_policies.is_empty());
+		let (oidc_policies, route_policies): (Vec<_>, Vec<_>) = pols
+			.route_policies
+			.into_iter()
+			.partition(|policy| matches!(policy, TrafficPolicy::Oidc(_)));
+		for v in oidc_policies.into_iter().chain(route_policies) {
 			self.policies += 1;
-			let key = strng::format!("pol/{}", self.policies);
-			self.with_policy(TargetedPolicy {
-				key,
-				name: None,
-				target: PolicyTarget::Route(RouteName {
-					name: "route".into(),
-					namespace: "".into(),
-					rule_name: None,
-					kind: None,
-				}),
-				policy: (v, PolicyPhase::Route).into(),
-			});
-		}
-		if let Some(oidc) = oidc {
-			self.policies += 1;
-			let key = strng::format!("pol/{}", self.policies);
-			let pol: local::FilterOrPolicy = serde_json::from_value(serde_json::json!({
-				"oidc": oidc,
-			}))
-			.unwrap();
-			let pols = local::split_attached_policies(
-				self.pi.upstream.clone(),
-				pol,
-				crate::http::oidc::PolicyId::policy(&key),
-				self.pi.cfg.oidc_cookie_encoder.as_ref(),
-			)
-			.await
-			.unwrap();
-			assert!(pols.backend_policies.is_empty());
-			let v = pols
-				.route_policies
-				.into_iter()
-				.exactly_one()
-				.expect("oidc route policy helper expected exactly one route policy");
+			let key = if matches!(v, TrafficPolicy::Oidc(_)) {
+				oidc_key.clone()
+			} else {
+				strng::format!("pol/{}", self.policies)
+			};
 			self.with_policy(TargetedPolicy {
 				key,
 				name: None,
@@ -645,7 +625,7 @@ impl TestBind {
 	}
 	pub async fn attached_backend_policy(&mut self, addr: &SocketAddr, p: serde_json::Value) {
 		let pol: local::FilterOrPolicy = serde_json::from_value(p).unwrap();
-		let pols = local::split_policies(self.pi.upstream.clone(), pol)
+		let pols = local::split_policies(self.pi.upstream.clone(), pol, None)
 			.await
 			.unwrap();
 		for v in pols.backend_policies.into_iter() {

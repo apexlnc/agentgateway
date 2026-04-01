@@ -111,10 +111,7 @@ pub(crate) async fn exchange_code_with_timeout(
 }
 
 fn form_urlencode_component(value: &str) -> String {
-	let encoded = url::form_urlencoded::Serializer::new(String::new())
-		.append_pair("", value)
-		.finish();
-	encoded.strip_prefix('=').unwrap_or(&encoded).to_string()
+	url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 fn format_token_endpoint_error_body(body: &[u8]) -> String {

@@ -8,6 +8,7 @@ use secrecy::ExposeSecret;
 use secrecy::SecretString;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
+use tracing::debug;
 
 use crate::http::jwt;
 use crate::http::{Body, PolicyResponse, Request, Response};
@@ -204,22 +205,28 @@ impl OidcPolicy {
 			return Ok(response);
 		}
 
-		if let Some(cookie) = read_cookie(req, &self.session.cookie_name)
-			&& let Ok(browser_session) = self.session.decode_browser_session(&cookie)
-			&& browser_session.policy_id == self.policy_id
-			&& let Ok(claims) = self
-				.provider
-				.id_token_validator
-				.validate_claims(browser_session.raw_id_token.expose_secret())
-		{
-			if let Some(Value::String(sub)) = claims.inner.get("sub")
-				&& let Some(log) = log
-			{
-				log.jwt_sub = Some(sub.clone());
+		if let Some(cookie) = read_cookie(req, &self.session.cookie_name) {
+			match self.session.decode_browser_session(&cookie) {
+				Ok(browser_session) => {
+					if browser_session.policy_id == self.policy_id
+						&& let Ok(claims) = self
+							.provider
+							.id_token_validator
+							.validate_claims(browser_session.raw_id_token.expose_secret())
+					{
+						if let Some(Value::String(sub)) = claims.inner.get("sub")
+							&& let Some(log) = log
+						{
+							log.jwt_sub = Some(sub.clone());
+						}
+						req.extensions_mut().insert(claims);
+						return Ok(PolicyResponse::default());
+					}
+				},
+				Err(err) => {
+					debug!(error=%err, "failed to decode oidc browser session cookie");
+				},
 			}
-			req.extensions_mut().insert(claims);
-			strip_reserved_cookies(req);
-			return Ok(PolicyResponse::default());
 		}
 
 		// OIDC is an interactive browser policy: unauthenticated non-callback requests enter login.
@@ -292,42 +299,8 @@ impl CallbackQuery {
 	}
 }
 
-fn iter_request_cookies(req: &Request) -> impl Iterator<Item = cookie::Cookie<'static>> + '_ {
-	req
-		.headers()
-		.get_all(header::COOKIE)
-		.into_iter()
-		.filter_map(|value| value.to_str().ok())
-		.flat_map(|header_value| {
-			cookie::Cookie::split_parse(header_value.to_owned())
-				.filter_map(|c: Result<cookie::Cookie<'_>, _>| c.ok())
-				.map(cookie::Cookie::into_owned)
-				.collect::<Vec<_>>()
-		})
-}
-
 fn read_cookie(req: &Request, name: &str) -> Option<String> {
-	let mut matched = None;
-	for cookie in iter_request_cookies(req) {
-		if cookie.name() == name {
-			matched = Some(cookie.value().to_owned());
-		}
-	}
-	matched
-}
-
-fn strip_reserved_cookies(req: &mut Request) {
-	let preserved: Vec<String> = iter_request_cookies(req)
-		.filter(|cookie| !cookie.name().starts_with(RESERVED_COOKIE_PREFIX))
-		.map(|cookie| cookie.to_string())
-		.collect();
-
-	req.headers_mut().remove(header::COOKIE);
-	if !preserved.is_empty() {
-		let hv = HeaderValue::from_str(&preserved.join("; "))
-			.expect("re-joined cookie header from valid source data");
-		req.headers_mut().insert(header::COOKIE, hv);
-	}
+	crate::http::read_request_cookie(req, name)
 }
 
 pub(crate) fn build_redirect_response(

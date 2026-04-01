@@ -1,9 +1,8 @@
-use std::fs;
-use std::path::Path;
-
 use crate::types::agent::HeaderValueMatch;
 use crate::types::local::NormalizedLocalConfig;
 use crate::*;
+use std::fs;
+use std::path::Path;
 
 async fn test_config_parsing(test_name: &str) {
 	// Make it static

@@ -1580,10 +1580,6 @@ impl RouteSet {
 		self.all.contains_key(key)
 	}
 
-	pub fn get(&self, key: &RouteKey) -> Option<Arc<Route>> {
-		self.all.get(key).cloned()
-	}
-
 	pub fn remove(&mut self, key: &RouteKey) {
 		let Some(old_route) = self.all.remove(key) else {
 			return;

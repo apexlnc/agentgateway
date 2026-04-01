@@ -10,7 +10,7 @@ use crate::types::agent::{
 };
 use crate::types::backend;
 use crate::*;
-use ::http::{Method, Version};
+use ::http::{Method, Version, header};
 use agent_core::strng;
 use assert_matches::assert_matches;
 use http_body_util::BodyExt;
@@ -57,6 +57,38 @@ async fn basic_http2() {
 		.unwrap();
 	assert_eq!(res.status(), 200);
 	assert_eq!(read_body(res.into_body()).await.version, Version::HTTP_2);
+}
+
+#[tokio::test]
+async fn reserved_oidc_cookies_are_stripped_before_proxying() {
+	let mock = simple_mock().await;
+	let t = setup_proxy_test("{}")
+		.unwrap()
+		.with_backend(*mock.address())
+		.with_bind(simple_bind(basic_route(*mock.address())));
+	let io = t.serve_http(BIND_KEY);
+
+	let res = send_request_headers(
+		io,
+		Method::GET,
+		"http://lo",
+		&[(
+			"cookie",
+			"agw_oidc_s_test=session; app_cookie=keep; agw_oidc_t_test=txn",
+		)],
+	)
+	.await;
+
+	assert_eq!(res.status(), 200);
+	let body = read_body(res.into_body()).await;
+	let cookie = body
+		.headers
+		.get(header::COOKIE)
+		.and_then(|value| value.to_str().ok())
+		.unwrap_or_default();
+	assert!(cookie.contains("app_cookie=keep"));
+	assert!(!cookie.contains("agw_oidc_s_test"));
+	assert!(!cookie.contains("agw_oidc_t_test"));
 }
 
 #[tokio::test]
