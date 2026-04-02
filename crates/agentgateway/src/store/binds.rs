@@ -8,6 +8,7 @@ use crate::http::authorization::{HTTPAuthorizationSet, NetworkAuthorizationSet};
 use crate::http::backendtls::BackendTLS;
 use crate::http::ext_proc::InferenceRouting;
 use crate::http::oidc;
+use crate::http::sessionpersistence::Encoder;
 use crate::http::{ext_authz, ext_proc, filters, health, remoteratelimit, retry, timeout};
 use crate::llm::policy::ResponseGuard;
 use crate::mcp::McpAuthorizationSet;
@@ -15,8 +16,8 @@ use crate::proxy::httpproxy::PolicyClient;
 use crate::types::agent::{
 	A2aPolicy, Backend, BackendKey, BackendPolicy, BackendTargetRef, BackendWithPolicies, Bind,
 	BindKey, FrontendPolicy, JwtAuthentication, Listener, ListenerKey, ListenerName,
-	McpAuthentication, PolicyKey, PolicyTarget, Route, RouteKey, RouteName, RouteSet, TCPRoute,
-	TCPRouteSet, TargetedPolicy, TrafficPolicy,
+	McpAuthentication, PhasedTrafficPolicy, PolicyKey, PolicyPhase, PolicyTarget, PolicyType, Route,
+	RouteKey, RouteName, RouteSet, TCPRoute, TCPRouteSet, TargetedPolicy, TrafficPolicy,
 };
 use crate::types::discovery::NamespacedHostname;
 use crate::types::proto::agent::resource::Kind as XdsKind;
@@ -30,6 +31,7 @@ use agent_xds::{RejectedConfig, XdsUpdate};
 use anyhow::Context;
 use futures_core::Stream;
 use itertools::Itertools;
+use secrecy::SecretString;
 use tracing::{Level, instrument, warn};
 
 #[derive(Debug)]
@@ -398,6 +400,189 @@ pub struct RoutePath<'a> {
 	// the originally intended service, pre-routing
 	pub service: Option<&'a NamespacedHostname>,
 	pub route: &'a RouteName,
+}
+
+fn has_xds_oidc(spec: &crate::types::proto::agent::TrafficPolicySpec) -> bool {
+	matches!(
+		spec.kind,
+		Some(crate::types::proto::agent::traffic_policy_spec::Kind::Oidc(
+			_
+		))
+	)
+}
+
+fn materialize_simple_reference(
+	target: Option<&crate::types::proto::agent::BackendReference>,
+) -> Result<crate::types::agent::SimpleBackendReference, crate::types::proto::ProtoError> {
+	let Some(target) = target else {
+		return Ok(crate::types::agent::SimpleBackendReference::Invalid);
+	};
+	Ok(match target.kind.as_ref() {
+		None => crate::types::agent::SimpleBackendReference::Invalid,
+		Some(crate::types::proto::agent::backend_reference::Kind::Service(svc)) => {
+			let ns = NamespacedHostname {
+				namespace: Strng::from(&svc.namespace),
+				hostname: Strng::from(&svc.hostname),
+			};
+			crate::types::agent::SimpleBackendReference::Service {
+				name: ns,
+				port: target.port as u16,
+			}
+		},
+		Some(crate::types::proto::agent::backend_reference::Kind::Backend(name)) => {
+			crate::types::agent::SimpleBackendReference::Backend(name.into())
+		},
+	})
+}
+
+fn materialize_xds_traffic_policy(
+	spec: &crate::types::proto::agent::TrafficPolicySpec,
+	oidc_cookie_encoder: Option<&Encoder>,
+) -> Result<TrafficPolicy, crate::types::proto::ProtoError> {
+	use crate::types::proto::agent::traffic_policy_spec as tps;
+
+	match &spec.kind {
+		Some(tps::Kind::Oidc(oidc_spec)) => {
+			let Some(oidc_cookie_encoder) = oidc_cookie_encoder else {
+				return Err(crate::types::proto::ProtoError::Generic(
+					"OIDC requires OIDC_COOKIE_SECRET".into(),
+				));
+			};
+
+			let token_endpoint_auth = match tps::oidc::TokenEndpointAuth::try_from(
+				oidc_spec.token_endpoint_auth,
+			)
+			.map_err(|_| {
+				crate::types::proto::ProtoError::EnumParse("invalid OIDC token endpoint auth".to_string())
+			})? {
+				tps::oidc::TokenEndpointAuth::Unspecified => {
+					return Err(crate::types::proto::ProtoError::Generic(
+						"oidc token endpoint auth must be explicitly set".into(),
+					));
+				},
+				tps::oidc::TokenEndpointAuth::ClientSecretBasic => {
+					crate::http::oidc::TokenEndpointAuth::ClientSecretBasic
+				},
+				tps::oidc::TokenEndpointAuth::ClientSecretPost => {
+					crate::http::oidc::TokenEndpointAuth::ClientSecretPost
+				},
+			};
+
+			let policy_id = oidc_spec
+				.policy_id
+				.parse::<crate::http::oidc::PolicyId>()
+				.map_err(|e| {
+					crate::types::proto::ProtoError::Generic(format!("invalid oidc policy_id: {e}"))
+				})?;
+
+			let resolved = crate::http::oidc::ResolvedOidcConfig {
+				issuer: oidc_spec.issuer.clone(),
+				authorization_endpoint: oidc_spec.authorization_endpoint.clone(),
+				token_endpoint: oidc_spec.token_endpoint.clone(),
+				token_endpoint_auth,
+				jwks_inline: oidc_spec.jwks_inline.clone(),
+				provider_backend: match materialize_simple_reference(oidc_spec.provider_backend.as_ref())? {
+					crate::types::agent::SimpleBackendReference::Invalid => None,
+					backend => Some(backend),
+				},
+				client_id: oidc_spec.client_id.clone(),
+				client_secret: SecretString::new(oidc_spec.client_secret.clone().into()),
+				redirect_uri: oidc_spec.redirect_uri.clone(),
+				scopes: oidc_spec.scopes.clone(),
+			};
+
+			Ok(TrafficPolicy::Oidc(
+				resolved
+					.compile(policy_id, oidc_cookie_encoder)
+					.map_err(|e| {
+						crate::types::proto::ProtoError::Generic(format!("failed to compile OIDC config: {e}"))
+					})?,
+			))
+		},
+		_ => TrafficPolicy::try_from(spec),
+	}
+}
+
+fn materialize_xds_route(
+	raw: &XdsRoute,
+	oidc_cookie_encoder: Option<&Encoder>,
+) -> Result<(Route, ListenerKey), crate::types::proto::ProtoError> {
+	if raw
+		.traffic_policies
+		.iter()
+		.all(|policy| !has_xds_oidc(policy))
+	{
+		return Ok((Route::try_from(raw)?, strng::new(&raw.listener_key)));
+	}
+
+	let route = Route {
+		key: strng::new(&raw.key),
+		service_key: raw
+			.service_key
+			.as_ref()
+			.filter(|sk| !sk.namespace.is_empty() || !sk.hostname.is_empty())
+			.map(|sk| NamespacedHostname {
+				namespace: Strng::from(&sk.namespace),
+				hostname: Strng::from(&sk.hostname),
+			}),
+		name: raw
+			.name
+			.as_ref()
+			.ok_or(crate::types::proto::ProtoError::MissingRequiredField)?
+			.into(),
+		hostnames: raw.hostnames.iter().map(strng::new).collect(),
+		matches: raw
+			.matches
+			.iter()
+			.map(crate::types::agent::RouteMatch::try_from)
+			.collect::<Result<Vec<_>, _>>()?,
+		backends: raw
+			.backends
+			.iter()
+			.map(crate::types::agent::RouteBackendReference::try_from)
+			.collect::<Result<Vec<_>, _>>()?,
+		inline_policies: raw
+			.traffic_policies
+			.iter()
+			.map(|policy| materialize_xds_traffic_policy(policy, oidc_cookie_encoder))
+			.collect::<Result<Vec<_>, _>>()?,
+	};
+
+	Ok((route, strng::new(&raw.listener_key)))
+}
+
+fn materialize_xds_policy(
+	raw: &XdsPolicy,
+	oidc_cookie_encoder: Option<&Encoder>,
+) -> Result<TargetedPolicy, crate::types::proto::ProtoError> {
+	use crate::types::proto::agent::policy as pol;
+
+	let Some(pol::Kind::Traffic(spec)) = &raw.kind else {
+		return TargetedPolicy::try_from(raw);
+	};
+	if !has_xds_oidc(spec) {
+		return TargetedPolicy::try_from(raw);
+	}
+
+	let phase =
+		match crate::types::proto::agent::traffic_policy_spec::PolicyPhase::try_from(spec.phase)? {
+			crate::types::proto::agent::traffic_policy_spec::PolicyPhase::Route => PolicyPhase::Route,
+			crate::types::proto::agent::traffic_policy_spec::PolicyPhase::Gateway => PolicyPhase::Gateway,
+		};
+
+	Ok(TargetedPolicy {
+		key: strng::new(&raw.key),
+		name: raw.name.as_ref().map(Into::into),
+		target: raw
+			.target
+			.as_ref()
+			.ok_or(crate::types::proto::ProtoError::MissingRequiredField)
+			.and_then(PolicyTarget::try_from)?,
+		policy: PolicyType::Traffic(PhasedTrafficPolicy {
+			phase,
+			policy: materialize_xds_traffic_policy(spec, oidc_cookie_encoder)?,
+		}),
+	})
 }
 
 impl Store {
@@ -1228,7 +1413,12 @@ impl Store {
 		Ok(())
 	}
 
-	fn insert_xds(&mut self, name: Strng, res: ADPResource) -> anyhow::Result<()> {
+	fn insert_xds(
+		&mut self,
+		name: Strng,
+		res: ADPResource,
+		oidc_cookie_encoder: Option<&Encoder>,
+	) -> anyhow::Result<()> {
 		trace!(%name, "insert resource {res:?}");
 		match res.kind {
 			Some(XdsKind::Bind(w)) => {
@@ -1247,7 +1437,7 @@ impl Store {
 				self
 					.resources
 					.insert(name, ResourceKind::Route(strng::new(&w.key)));
-				self.insert_xds_route(w)
+				self.insert_xds_route(w, oidc_cookie_encoder)
 			},
 			Some(XdsKind::TcpRoute(w)) => {
 				self
@@ -1265,7 +1455,7 @@ impl Store {
 				self
 					.resources
 					.insert(name, ResourceKind::Policy(strng::new(&w.key)));
-				self.insert_xds_policy(w)
+				self.insert_xds_policy(w, oidc_cookie_encoder)
 			},
 			_ => Err(anyhow::anyhow!("unknown resource type")),
 		}
@@ -1287,8 +1477,12 @@ impl Store {
 		self.insert_listener(lis, bind_name);
 		Ok(())
 	}
-	fn insert_xds_route(&mut self, raw: XdsRoute) -> anyhow::Result<()> {
-		let (route, listener_name) = Route::try_from_xds(&raw)?;
+	fn insert_xds_route(
+		&mut self,
+		raw: XdsRoute,
+		oidc_cookie_encoder: Option<&Encoder>,
+	) -> anyhow::Result<()> {
+		let (route, listener_name) = materialize_xds_route(&raw, oidc_cookie_encoder)?;
 		if let Some(sk) = route.service_key.clone() {
 			self.insert_service_route(route, sk);
 			Ok(())
@@ -1313,8 +1507,12 @@ impl Store {
 		self.insert_backend(key, backend);
 		Ok(())
 	}
-	fn insert_xds_policy(&mut self, raw: XdsPolicy) -> anyhow::Result<()> {
-		let policy: TargetedPolicy = (&raw).try_into()?;
+	fn insert_xds_policy(
+		&mut self,
+		raw: XdsPolicy,
+		oidc_cookie_encoder: Option<&Encoder>,
+	) -> anyhow::Result<()> {
+		let policy = materialize_xds_policy(&raw, oidc_cookie_encoder)?;
 		self.insert_policy(policy);
 		Ok(())
 	}
@@ -1323,6 +1521,7 @@ impl Store {
 #[derive(Clone, Debug)]
 pub struct StoreUpdater {
 	state: Arc<RwLock<Store>>,
+	oidc_cookie_encoder: Option<crate::http::sessionpersistence::Encoder>,
 }
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1339,8 +1538,14 @@ pub struct Dump {
 }
 
 impl StoreUpdater {
-	pub fn new(state: Arc<RwLock<Store>>) -> StoreUpdater {
-		Self { state }
+	pub fn new(
+		state: Arc<RwLock<Store>>,
+		oidc_cookie_encoder: Option<crate::http::sessionpersistence::Encoder>,
+	) -> StoreUpdater {
+		Self {
+			state,
+			oidc_cookie_encoder,
+		}
 	}
 	pub fn read(&self) -> std::sync::RwLockReadGuard<'_, Store> {
 		self.state.read().expect("mutex acquired")
@@ -1438,9 +1643,10 @@ impl agent_xds::Handler<ADPResource> for StoreUpdater {
 		updates: Box<&mut dyn Iterator<Item = XdsUpdate<ADPResource>>>,
 	) -> Result<(), Vec<RejectedConfig>> {
 		let mut state = self.state.write().unwrap();
+		let oidc_cookie_encoder = self.oidc_cookie_encoder.as_ref();
 		let handle = |res: XdsUpdate<ADPResource>| {
 			match res {
-				XdsUpdate::Update(w) => state.insert_xds(w.name, w.resource)?,
+				XdsUpdate::Update(w) => state.insert_xds(w.name, w.resource, oidc_cookie_encoder)?,
 				XdsUpdate::Remove(name) => {
 					debug!("handling delete {}", name);
 					state.remove_resource(&strng::new(name))?
@@ -1473,6 +1679,74 @@ mod tests {
 	use super::*;
 	use crate::telemetry::log::OrderedStringMap;
 	use crate::types::frontend::LoggingPolicy;
+
+	const TEST_OIDC_JWKS: &str = r#"{"keys":[{"use":"sig","kty":"EC","kid":"kid-1","crv":"P-256","alg":"ES256","x":"WM7udBHga09KxC5kxq6GhrZ9M3Y8S9ZThq_XxsOcDhk","y":"xc7T4afkXmwjEbJMzQXCdQcU3PZKiLFlHl23GE1z4ug"}]}"#;
+	const TEST_OIDC_COOKIE_SECRET: &str =
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+	fn test_oidc_cookie_encoder() -> Encoder {
+		Encoder::aes(TEST_OIDC_COOKIE_SECRET).expect("valid OIDC cookie encoder")
+	}
+
+	fn test_oidc_spec(
+		token_endpoint_auth: crate::types::proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth,
+		policy_id: &str,
+		provider_backend: Option<crate::types::proto::agent::BackendReference>,
+	) -> crate::types::proto::agent::TrafficPolicySpec {
+		crate::types::proto::agent::TrafficPolicySpec {
+			phase: crate::types::proto::agent::traffic_policy_spec::PolicyPhase::Route as i32,
+			kind: Some(crate::types::proto::agent::traffic_policy_spec::Kind::Oidc(
+				crate::types::proto::agent::traffic_policy_spec::Oidc {
+					issuer: "https://issuer.example.com".into(),
+					authorization_endpoint: "https://issuer.example.com/authorize".into(),
+					token_endpoint: "https://issuer.example.com/token".into(),
+					token_endpoint_auth: token_endpoint_auth as i32,
+					jwks_inline: TEST_OIDC_JWKS.into(),
+					client_id: "client-id".into(),
+					client_secret: "client-secret".into(),
+					redirect_uri: "https://app.example.com/oauth/callback".into(),
+					scopes: vec!["openid".into(), "profile".into()],
+					policy_id: policy_id.into(),
+					provider_backend,
+				},
+			)),
+		}
+	}
+
+	fn test_xds_policy(spec: crate::types::proto::agent::TrafficPolicySpec) -> XdsPolicy {
+		XdsPolicy {
+			key: "default/example-policy".into(),
+			name: None,
+			target: Some(crate::types::proto::agent::PolicyTarget {
+				kind: Some(crate::types::proto::agent::policy_target::Kind::Gateway(
+					crate::types::proto::agent::policy_target::GatewayTarget {
+						name: "gw".into(),
+						namespace: "default".into(),
+						listener: Some("listener".into()),
+					},
+				)),
+			}),
+			kind: Some(crate::types::proto::agent::policy::Kind::Traffic(spec)),
+		}
+	}
+
+	fn test_xds_route(spec: crate::types::proto::agent::TrafficPolicySpec) -> XdsRoute {
+		XdsRoute {
+			key: "default/example-route".into(),
+			service_key: None,
+			name: Some(crate::types::proto::agent::RouteName {
+				name: "example-route".into(),
+				namespace: "default".into(),
+				rule_name: None,
+				kind: "HTTPRoute".into(),
+			}),
+			hostnames: Vec::new(),
+			matches: Vec::new(),
+			backends: Vec::new(),
+			traffic_policies: vec![spec],
+			listener_key: "default/gw/listener".into(),
+		}
+	}
 
 	fn listener() -> ListenerName {
 		ListenerName {
@@ -1736,6 +2010,121 @@ mod tests {
 				})
 				.is_err()
 		);
+	}
+
+	#[test]
+	fn materialize_xds_policy_materializes_oidc_with_explicit_policy_id()
+	-> Result<(), crate::types::proto::ProtoError> {
+		let raw = test_xds_policy(test_oidc_spec(
+			crate::types::proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth::ClientSecretBasic,
+			"policy/default/example-policy",
+			None,
+		));
+
+		let encoder = test_oidc_cookie_encoder();
+		let policy = materialize_xds_policy(&raw, Some(&encoder))?;
+
+		let PolicyType::Traffic(phased) = policy.policy else {
+			panic!("expected traffic policy");
+		};
+		let TrafficPolicy::Oidc(policy) = phased.policy else {
+			panic!("expected OIDC policy");
+		};
+		assert_eq!(policy.policy_id.as_str(), "policy/default/example-policy");
+		assert_eq!(
+			policy.client.token_endpoint_auth,
+			crate::http::oidc::TokenEndpointAuth::ClientSecretBasic
+		);
+		assert_eq!(policy.scopes, vec!["openid", "profile"]);
+		Ok(())
+	}
+
+	#[test]
+	fn materialize_xds_route_materializes_inline_oidc_with_route_policy_id()
+	-> Result<(), crate::types::proto::ProtoError> {
+		let raw = test_xds_route(test_oidc_spec(
+			crate::types::proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth::ClientSecretPost,
+			"route/default/example-route",
+			None,
+		));
+
+		let encoder = test_oidc_cookie_encoder();
+		let (route, listener_name) = materialize_xds_route(&raw, Some(&encoder))?;
+
+		assert_eq!(listener_name.as_str(), "default/gw/listener");
+		let [TrafficPolicy::Oidc(policy)] = route.inline_policies.as_slice() else {
+			panic!("expected exactly one inline OIDC policy");
+		};
+		assert_eq!(policy.policy_id.as_str(), "route/default/example-route");
+		assert_eq!(
+			policy.client.token_endpoint_auth,
+			crate::http::oidc::TokenEndpointAuth::ClientSecretPost
+		);
+		Ok(())
+	}
+
+	#[test]
+	fn materialize_xds_policy_preserves_provider_backend()
+	-> Result<(), crate::types::proto::ProtoError> {
+		let provider_backend = crate::types::proto::agent::BackendReference {
+			kind: Some(
+				crate::types::proto::agent::backend_reference::Kind::Backend("default/dummy-idp".into()),
+			),
+			port: 0,
+		};
+		let raw = test_xds_policy(test_oidc_spec(
+			crate::types::proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth::ClientSecretBasic,
+			"policy/default/example-policy",
+			Some(provider_backend),
+		));
+
+		let encoder = test_oidc_cookie_encoder();
+		let policy = materialize_xds_policy(&raw, Some(&encoder))?;
+
+		let PolicyType::Traffic(phased) = policy.policy else {
+			panic!("expected traffic policy");
+		};
+		let TrafficPolicy::Oidc(policy) = phased.policy else {
+			panic!("expected OIDC policy");
+		};
+		assert!(matches!(
+			policy.provider.provider_backend.as_ref(),
+			Some(crate::types::agent::SimpleBackendReference::Backend(key))
+				if key == &strng::new("default/dummy-idp")
+		));
+		Ok(())
+	}
+
+	#[test]
+	fn materialize_xds_policy_rejects_unspecified_token_endpoint_auth() {
+		let raw = test_xds_policy(test_oidc_spec(
+			crate::types::proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth::Unspecified,
+			"policy/default/example-policy",
+			None,
+		));
+
+		let encoder = test_oidc_cookie_encoder();
+		let err = materialize_xds_policy(&raw, Some(&encoder))
+			.expect_err("unspecified token endpoint auth should fail");
+		assert!(
+			err
+				.to_string()
+				.contains("oidc token endpoint auth must be explicitly set")
+		);
+	}
+
+	#[test]
+	fn materialize_xds_policy_rejects_policy_id_without_key() {
+		let raw = test_xds_policy(test_oidc_spec(
+			crate::types::proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth::ClientSecretBasic,
+			"policy/",
+			None,
+		));
+
+		let encoder = test_oidc_cookie_encoder();
+		let err =
+			materialize_xds_policy(&raw, Some(&encoder)).expect_err("policy_id without key should fail");
+		assert!(err.to_string().contains("invalid oidc policy_id"));
 	}
 
 	#[test]

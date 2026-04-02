@@ -186,7 +186,6 @@ func NewAgwCollections(
 		agwCollections.InferencePools = krt.WrapClient(kclient.NewDelayedInformer[*inf.InferencePool](client, inferencePoolGVR, kubetypes.StandardInformer, kclient.Filter{ObjectFilter: client.ObjectFilter()}), krtOptions.ToOptions("informer/InferencePools")...)
 	}
 	agwCollections.SetupIndexes()
-
 	return agwCollections, nil
 }
 

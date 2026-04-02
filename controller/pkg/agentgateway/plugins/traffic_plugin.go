@@ -54,6 +54,7 @@ const (
 	retryPolicySuffix              = ":retry"
 	timeoutPolicySuffix            = ":timeout"
 	jwtPolicySuffix                = ":jwt"
+	oidcPolicySuffix               = ":oidc"
 	basicAuthPolicySuffix          = ":basicauth"
 	apiKeyPolicySuffix             = ":apikeyauth" //nolint:gosec
 	directResponseSuffix           = ":direct-response"
@@ -466,6 +467,10 @@ func translateTrafficPolicyToAgw(
 
 	if traffic.JWTAuthentication != nil {
 		appendPolicy("jwtAuthentication")(processJWTAuthenticationPolicy(ctx, traffic.JWTAuthentication, traffic.Phase, basePolicyName, policyName))
+	}
+
+	if traffic.OIDCAuthentication != nil {
+		appendPolicy("oidcAuthentication")(processOIDCAuthenticationPolicy(ctx, policy, traffic.OIDCAuthentication, traffic.Phase, basePolicyName, policyName))
 	}
 
 	if traffic.APIKeyAuthentication != nil {
@@ -1570,6 +1575,11 @@ func referencedBackendsFromPolicy(policy *agentgateway.AgentgatewayPolicy) []uti
 					app(p.JWKS.Remote.BackendRef)
 				}
 			}
+		}
+		if s.Traffic.OIDCAuthentication != nil &&
+			s.Traffic.OIDCAuthentication.Discovery != nil &&
+			s.Traffic.OIDCAuthentication.Discovery.BackendRef != nil {
+			app(*s.Traffic.OIDCAuthentication.Discovery.BackendRef)
 		}
 	}
 	if s.Frontend != nil {

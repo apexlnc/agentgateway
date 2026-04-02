@@ -695,17 +695,18 @@ impl TCPRoute {
 	}
 }
 
-impl Route {
-	pub fn try_from_xds(s: &proto::agent::Route) -> Result<(Self, ListenerKey), ProtoError> {
-		let name: RouteName = s
-			.name
-			.as_ref()
-			.ok_or(ProtoError::MissingRequiredField)?
-			.into();
-		let r = Route {
+impl TryFrom<&proto::agent::Route> for Route {
+	type Error = ProtoError;
+
+	fn try_from(s: &proto::agent::Route) -> Result<Self, Self::Error> {
+		Ok(Route {
 			key: strng::new(&s.key),
 			service_key: service_key_from_proto(s.service_key.as_ref()),
-			name,
+			name: s
+				.name
+				.as_ref()
+				.ok_or(ProtoError::MissingRequiredField)?
+				.into(),
 			hostnames: s.hostnames.iter().map(strng::new).collect(),
 			matches: s
 				.matches
@@ -722,8 +723,7 @@ impl Route {
 				.iter()
 				.map(TrafficPolicy::try_from)
 				.collect::<Result<Vec<_>, _>>()?,
-		};
-		Ok((r, strng::new(&s.listener_key)))
+		})
 	}
 }
 
@@ -1247,17 +1247,20 @@ fn convert_health(h: &proto::agent::backend_policy_spec::Health) -> health::Poli
 	}
 }
 
+fn decode_policy_phase(spec: &proto::agent::TrafficPolicySpec) -> Result<PolicyPhase, ProtoError> {
+	match proto::agent::traffic_policy_spec::PolicyPhase::try_from(spec.phase)? {
+		proto::agent::traffic_policy_spec::PolicyPhase::Route => Ok(PolicyPhase::Route),
+		proto::agent::traffic_policy_spec::PolicyPhase::Gateway => Ok(PolicyPhase::Gateway),
+	}
+}
+
 impl TryFrom<&proto::agent::TrafficPolicySpec> for PhasedTrafficPolicy {
 	type Error = ProtoError;
 
 	fn try_from(spec: &proto::agent::TrafficPolicySpec) -> Result<Self, Self::Error> {
-		let tp = TrafficPolicy::try_from(spec)?;
 		Ok(PhasedTrafficPolicy {
-			phase: match proto::agent::traffic_policy_spec::PolicyPhase::try_from(spec.phase)? {
-				proto::agent::traffic_policy_spec::PolicyPhase::Route => PolicyPhase::Route,
-				proto::agent::traffic_policy_spec::PolicyPhase::Gateway => PolicyPhase::Gateway,
-			},
-			policy: tp,
+			phase: decode_policy_phase(spec)?,
+			policy: TrafficPolicy::try_from(spec)?,
 		})
 	}
 }
@@ -1736,6 +1739,11 @@ impl TryFrom<&proto::agent::TrafficPolicySpec> for TrafficPolicy {
 					.collect::<Result<Vec<_>, _>>()?;
 				TrafficPolicy::APIKey(http::apikey::APIKeyAuthentication::new(keys, mode))
 			},
+			Some(tps::Kind::Oidc(_)) => {
+				return Err(ProtoError::Generic(
+					"xDS OIDC policies require a runtime cookie encoder".into(),
+				));
+			},
 			Some(tps::Kind::HostRewrite(hr)) => {
 				let mode = tps::host_rewrite::Mode::try_from(hr.mode)?;
 				TrafficPolicy::HostRewrite(match mode {
@@ -2055,7 +2063,10 @@ impl TryFrom<&proto::agent::Policy> for TargetedPolicy {
 			.and_then(PolicyTarget::try_from)?;
 
 		let policy = match &p.kind {
-			Some(pol::Kind::Traffic(spec)) => PolicyType::Traffic(PhasedTrafficPolicy::try_from(spec)?),
+			Some(pol::Kind::Traffic(spec)) => PolicyType::Traffic(PhasedTrafficPolicy {
+				phase: decode_policy_phase(spec)?,
+				policy: TrafficPolicy::try_from(spec)?,
+			}),
 			Some(pol::Kind::Backend(spec)) => PolicyType::Backend(BackendPolicy::try_from(spec)?),
 			Some(pol::Kind::Frontend(spec)) => PolicyType::Frontend(FrontendPolicy::try_from(spec)?),
 			None => return Err(ProtoError::MissingRequiredField),
@@ -2287,6 +2298,32 @@ mod tests {
 
 	use super::*;
 	use crate::types::proto::agent::backend_policy_spec::Ai;
+
+	const TEST_OIDC_JWKS: &str = r#"{"keys":[{"use":"sig","kty":"EC","kid":"kid-1","crv":"P-256","alg":"ES256","x":"WM7udBHga09KxC5kxq6GhrZ9M3Y8S9ZThq_XxsOcDhk","y":"xc7T4afkXmwjEbJMzQXCdQcU3PZKiLFlHl23GE1z4ug"}]}"#;
+
+	fn test_oidc_spec(
+		token_endpoint_auth: proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth,
+		policy_id: &str,
+	) -> proto::agent::TrafficPolicySpec {
+		proto::agent::TrafficPolicySpec {
+			phase: proto::agent::traffic_policy_spec::PolicyPhase::Route as i32,
+			kind: Some(proto::agent::traffic_policy_spec::Kind::Oidc(
+				proto::agent::traffic_policy_spec::Oidc {
+					issuer: "https://issuer.example.com".into(),
+					authorization_endpoint: "https://issuer.example.com/authorize".into(),
+					token_endpoint: "https://issuer.example.com/token".into(),
+					token_endpoint_auth: token_endpoint_auth as i32,
+					jwks_inline: TEST_OIDC_JWKS.into(),
+					client_id: "client-id".into(),
+					client_secret: "client-secret".into(),
+					redirect_uri: "https://app.example.com/oauth/callback".into(),
+					scopes: vec!["openid".into(), "profile".into()],
+					policy_id: policy_id.into(),
+					provider_backend: None,
+				},
+			)),
+		}
+	}
 
 	#[test]
 	fn test_policy_spec_to_csrf_policy() -> Result<(), ProtoError> {
@@ -2585,5 +2622,20 @@ mod tests {
 		};
 		assert_eq!(vertex.region.as_deref(), Some("us-central1"));
 		Ok(())
+	}
+
+	#[test]
+	fn test_xds_oidc_requires_runtime_cookie_encoder() {
+		let spec = test_oidc_spec(
+			proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth::ClientSecretBasic,
+			"policy/default/example-policy",
+		);
+
+		let err = TrafficPolicy::try_from(&spec).expect_err("xDS OIDC should require runtime config");
+		assert!(
+			err
+				.to_string()
+				.contains("xDS OIDC policies require a runtime cookie encoder")
+		);
 	}
 }

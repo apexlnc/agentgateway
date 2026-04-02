@@ -33,16 +33,20 @@ impl Default for Stores {
 
 impl Stores {
 	pub fn with_ipv6_enabled(ipv6_enabled: bool) -> Stores {
-		Self::new(ipv6_enabled, crate::ThreadingMode::Multithreaded)
+		Self::new(ipv6_enabled, crate::ThreadingMode::Multithreaded, None)
 	}
 
-	pub fn new(ipv6_enabled: bool, threading_mode: crate::ThreadingMode) -> Stores {
+	pub fn new(
+		ipv6_enabled: bool,
+		threading_mode: crate::ThreadingMode,
+		oidc_cookie_encoder: Option<crate::http::sessionpersistence::Encoder>,
+	) -> Stores {
 		Stores {
 			discovery: discovery::StoreUpdater::new(Arc::new(RwLock::new(discovery::Store::new()))),
-			binds: binds::StoreUpdater::new(Arc::new(RwLock::new(binds::Store::new(
-				ipv6_enabled,
-				threading_mode,
-			)))),
+			binds: binds::StoreUpdater::new(
+				Arc::new(RwLock::new(binds::Store::new(ipv6_enabled, threading_mode))),
+				oidc_cookie_encoder,
+			),
 		}
 	}
 	pub fn read_binds(&self) -> std::sync::RwLockReadGuard<'_, store::BindStore> {

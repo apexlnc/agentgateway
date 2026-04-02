@@ -24,6 +24,8 @@ import (
 	apisettings "github.com/agentgateway/agentgateway/controller/api/settings"
 	"github.com/agentgateway/agentgateway/controller/pkg/admin"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
+	agentoidcstore "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidcstore"
 	agwplugins "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/plugins"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/policyselection"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
@@ -253,6 +255,11 @@ func (s *setup) Start(ctx context.Context) error {
 			return fmt.Errorf("error creating jwks store %w", err)
 		}
 	}
+	if !runnablesRegistry.Contains(oidc.RunnableName) {
+		if err := buildOIDCStore(ctx, mgr, s.APIClient, agwCollections, resolver); err != nil {
+			return fmt.Errorf("error creating oidc store %w", err)
+		}
+	}
 
 	agw, err := s.buildSyncer(ctx, mgr, setupOpts, agwCollections, resolver, jwksLookup)
 	if err != nil {
@@ -376,6 +383,33 @@ func buildJwksStore(
 	jwksStoreCMCtrl := jwks.NewConfigMapController(apiClient, jwks.DefaultJwksStorePrefix, namespaces.GetPodNamespace(), jwksStore, persistedJWKS)
 	jwksStoreCMCtrl.Init(ctx)
 	if err := mgr.Add(jwksStoreCMCtrl); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func buildOIDCStore(ctx context.Context, mgr manager.Manager, apiClient apiclient.Client, agwCollections *agwplugins.AgwCollections, resolver remotehttp.Resolver) error {
+	policyCtrl := agentoidcstore.NewPolicyController(agwCollections, resolver)
+	policyCtrl.Init(ctx)
+	if err := mgr.Add(policyCtrl); err != nil {
+		return err
+	}
+
+	store := oidc.BuildOIDCStore(
+		apiClient,
+		agwCollections.KrtOpts,
+		policyCtrl.SourceChanges(),
+		oidc.DefaultProviderStorePrefix,
+		namespaces.GetPodNamespace(),
+	)
+	if err := mgr.Add(store); err != nil {
+		return err
+	}
+
+	cmCtrl := agentoidcstore.NewConfigMapsController(apiClient, oidc.DefaultProviderStorePrefix, namespaces.GetPodNamespace(), store)
+	cmCtrl.Init(ctx)
+	if err := mgr.Add(cmCtrl); err != nil {
 		return err
 	}
 

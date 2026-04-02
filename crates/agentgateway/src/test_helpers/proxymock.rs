@@ -911,7 +911,11 @@ pub fn setup_proxy_test(cfg: &str) -> anyhow::Result<TestBind> {
 
 pub fn setup_proxy_test_with_config(config: crate::Config) -> TestBind {
 	let encoder = config.session_encoder.clone();
-	let stores = Stores::new(config.ipv6_enabled, config.threading_mode);
+	let stores = Stores::new(
+		config.ipv6_enabled,
+		config.threading_mode,
+		config.oidc_cookie_encoder.clone(),
+	);
 	let client = client::Client::new(&config.dns, None, Default::default(), None);
 	let (drain_tx, drain_rx) = drain::new();
 	let pi = Arc::new(ProxyInputs {
