@@ -25,20 +25,21 @@ struct OidcDiscoveryDocument {
 	token_endpoint_auth_methods_supported: Option<Vec<String>>,
 }
 
-struct PreparedOidcProvider {
-	issuer: String,
-	authorization_endpoint: ProviderEndpoint,
-	token_endpoint: ProviderEndpoint,
-	token_endpoint_auth: TokenEndpointAuth,
-	id_token_jwks: JwkSet,
+pub(super) struct PreparedOidcProvider {
+	pub(super) issuer: String,
+	pub(super) authorization_endpoint: ProviderEndpoint,
+	pub(super) token_endpoint: ProviderEndpoint,
+	pub(super) token_endpoint_auth: TokenEndpointAuth,
+	pub(super) id_token_jwks: JwkSet,
+	pub(super) provider_backend: Option<crate::types::agent::SimpleBackendReference>,
 }
 
-struct PreparedOidcPolicy {
-	provider: PreparedOidcProvider,
-	client_id: String,
-	client_secret: SecretString,
-	redirect_uri: RedirectUri,
-	scopes: Vec<String>,
+pub(super) struct PreparedOidcPolicy {
+	pub(super) provider: PreparedOidcProvider,
+	pub(super) client_id: String,
+	pub(super) client_secret: SecretString,
+	pub(super) redirect_uri: RedirectUri,
+	pub(super) scopes: Vec<String>,
 }
 
 /// Browser-based OIDC authentication policy.
@@ -155,6 +156,7 @@ impl LocalOidcConfig {
 					token_endpoint: discovered.token_endpoint,
 					token_endpoint_auth: discovered.token_endpoint_auth,
 					id_token_jwks,
+					provider_backend: None,
 				}
 			},
 			3 => {
@@ -251,6 +253,7 @@ async fn resolve_explicit_provider(
 		token_endpoint,
 		token_endpoint_auth,
 		id_token_jwks,
+		provider_backend: None,
 	})
 }
 
@@ -293,6 +296,7 @@ impl PreparedOidcProvider {
 			issuer: self.issuer,
 			authorization_endpoint: self.authorization_endpoint,
 			token_endpoint: self.token_endpoint,
+			provider_backend: self.provider_backend,
 			id_token_validator: crate::http::jwt::Jwt::from_providers(
 				vec![provider],
 				crate::http::jwt::Mode::Strict,
@@ -302,7 +306,7 @@ impl PreparedOidcProvider {
 }
 
 impl PreparedOidcPolicy {
-	fn compile(
+	pub(super) fn compile(
 		self,
 		policy_id: PolicyId,
 		oidc_cookie_encoder: &crate::http::sessionpersistence::Encoder,

@@ -52,6 +52,72 @@ impl PolicyId {
 	}
 }
 
+impl std::str::FromStr for PolicyId {
+	type Err = String;
+
+	fn from_str(value: &str) -> Result<Self, Self::Err> {
+		let (kind, key) = value
+			.split_once('/')
+			.ok_or_else(|| "policy_id must start with 'policy/' or 'route/'".to_string())?;
+		if key.is_empty() {
+			return Err("policy_id must include a non-empty key".into());
+		}
+		match kind {
+			"policy" | "route" => Ok(Self(value.to_owned())),
+			_ => Err("policy_id must start with 'policy/' or 'route/'".into()),
+		}
+	}
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedOidcConfig {
+	pub issuer: String,
+	pub authorization_endpoint: String,
+	pub token_endpoint: String,
+	pub token_endpoint_auth: TokenEndpointAuth,
+	pub jwks_inline: String,
+	pub provider_backend: Option<crate::types::agent::SimpleBackendReference>,
+	pub client_id: String,
+	pub client_secret: SecretString,
+	pub redirect_uri: String,
+	pub scopes: Vec<String>,
+}
+
+impl ResolvedOidcConfig {
+	pub fn compile(
+		self,
+		policy_id: PolicyId,
+		oidc_cookie_encoder: &crate::http::sessionpersistence::Encoder,
+	) -> Result<OidcPolicy, Error> {
+		let authorization_endpoint = self
+			.authorization_endpoint
+			.parse()
+			.map_err(|e| Error::Config(format!("invalid authorization endpoint: {e}")))?;
+		let token_endpoint = self
+			.token_endpoint
+			.parse()
+			.map_err(|e| Error::Config(format!("invalid token endpoint: {e}")))?;
+		let id_token_jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_str(&self.jwks_inline)
+			.map_err(|e| Error::Config(format!("failed to parse inline oidc jwks: {e}")))?;
+
+		local::PreparedOidcPolicy {
+			provider: local::PreparedOidcProvider {
+				issuer: self.issuer,
+				authorization_endpoint,
+				token_endpoint,
+				token_endpoint_auth: self.token_endpoint_auth,
+				id_token_jwks,
+				provider_backend: self.provider_backend,
+			},
+			client_id: self.client_id,
+			client_secret: self.client_secret,
+			redirect_uri: RedirectUri::parse(self.redirect_uri)?,
+			scopes: self.scopes,
+		}
+		.compile(policy_id, oidc_cookie_encoder)
+	}
+}
+
 /// Validated absolute HTTP(S) endpoint used by an OIDC provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderEndpoint(url::Url);
@@ -59,6 +125,13 @@ pub struct ProviderEndpoint(url::Url);
 impl ProviderEndpoint {
 	pub fn as_str(&self) -> &str {
 		self.0.as_ref()
+	}
+
+	pub fn path_and_query(&self) -> String {
+		match self.0.query() {
+			Some(query) => format!("{}?{query}", self.0.path()),
+			None => self.0.path().to_string(),
+		}
 	}
 
 	pub fn with_query(&self, params: &[(&str, String)]) -> String {
@@ -140,6 +213,7 @@ pub struct Provider {
 	pub issuer: String,
 	pub authorization_endpoint: ProviderEndpoint,
 	pub token_endpoint: ProviderEndpoint,
+	pub provider_backend: Option<crate::types::agent::SimpleBackendReference>,
 	pub id_token_validator: jwt::Jwt,
 }
 

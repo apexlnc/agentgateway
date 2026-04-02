@@ -4,6 +4,7 @@ use ::http::{Method, StatusCode, header};
 use anyhow::Context;
 use base64::Engine;
 use secrecy::{ExposeSecret, SecretString};
+use tracing::warn;
 
 use crate::http::Body;
 use crate::http::filters::BackendRequestTimeout;
@@ -55,9 +56,14 @@ pub(crate) async fn exchange_code_with_timeout(
 		("redirect_uri", redirect_uri.to_string()),
 		("code_verifier", pkce_verifier.expose_secret().to_string()),
 	];
+	let token_endpoint_uri = provider
+		.provider_backend
+		.as_ref()
+		.map(|_| provider.token_endpoint.path_and_query())
+		.unwrap_or_else(|| provider.token_endpoint.as_str().to_string());
 	let mut req = ::http::Request::builder()
 		.method(Method::POST)
-		.uri(provider.token_endpoint.as_str())
+		.uri(token_endpoint_uri)
 		.header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
 		.header(header::ACCEPT, "application/json");
 	match client_config.token_endpoint_auth {
@@ -85,11 +91,20 @@ pub(crate) async fn exchange_code_with_timeout(
 		.body(Body::from(body))
 		.map_err(|e| Error::Config(format!("failed to build token exchange request: {e}")))?;
 	req.extensions_mut().insert(BackendRequestTimeout(timeout));
-	let resp = client
-		.simple_call(req)
-		.await
-		.map_err(anyhow::Error::from)
-		.map_err(Error::TokenExchangeFailed)?;
+	let resp = match provider.provider_backend.as_ref() {
+		Some(provider_backend) => client.call_reference(req, provider_backend).await,
+		None => client.simple_call(req).await,
+	}
+	.map_err(anyhow::Error::from)
+	.map_err(|e| {
+		warn!(
+			error = %e,
+			token_endpoint = %provider.token_endpoint,
+			has_provider_backend = provider.provider_backend.is_some(),
+			"oidc token exchange transport failed"
+		);
+		Error::TokenExchangeFailed(e)
+	})?;
 	let status = resp.status();
 	let (_, body) = {
 		let (parts, body) = resp.into_parts();
@@ -100,6 +115,13 @@ pub(crate) async fn exchange_code_with_timeout(
 		(parts, body)
 	};
 	if status != StatusCode::OK {
+		warn!(
+			%status,
+			token_endpoint = %provider.token_endpoint,
+			has_provider_backend = provider.provider_backend.is_some(),
+			body = %format_token_endpoint_error_body(&body),
+			"oidc token exchange returned non-success status"
+		);
 		return Err(Error::TokenExchangeFailed(anyhow::anyhow!(
 			"token endpoint returned {status}: {}",
 			format_token_endpoint_error_body(&body)

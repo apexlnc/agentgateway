@@ -155,6 +155,20 @@ func TestApplyManagedSessionKeyDefaults_UsesUserProvidedSessionKey(t *testing.T)
 	assert.Nil(t, vals.SessionKeySecretName)
 }
 
+func TestApplyManagedOIDCCookieSecretDefaults_UsesUserProvidedOIDCCookieSecret(t *testing.T) {
+	vals := &AgentgatewayHelmGateway{
+		AgentgatewayParametersConfigs: agentgateway.AgentgatewayParametersConfigs{
+			Env: []corev1.EnvVar{
+				{Name: "OIDC_COOKIE_SECRET", Value: "inline-key"},
+			},
+		},
+	}
+
+	applyManagedOIDCCookieSecretDefaults(vals, "gw")
+
+	assert.Nil(t, vals.OIDCCookieSecretName)
+}
+
 func TestUsesManagedSessionKeyResolvedParameters_GatewayEnvDisablesManagedSecret(t *testing.T) {
 	resolved := &resolvedParameters{
 		gatewayClassAGWP: &agentgateway.AgentgatewayParameters{
@@ -174,6 +188,27 @@ func TestUsesManagedSessionKeyResolvedParameters_GatewayEnvDisablesManagedSecret
 	}
 
 	assert.False(t, usesManagedSessionKeyResolvedParameters(resolved))
+}
+
+func TestUsesManagedOIDCCookieSecretResolvedParameters_GatewayEnvDisablesManagedSecret(t *testing.T) {
+	resolved := &resolvedParameters{
+		gatewayClassAGWP: &agentgateway.AgentgatewayParameters{
+			Spec: agentgateway.AgentgatewayParametersSpec{
+				AgentgatewayParametersConfigs: agentgateway.AgentgatewayParametersConfigs{
+					Env: []corev1.EnvVar{{Name: "RUST_LOG", Value: "info"}},
+				},
+			},
+		},
+		gatewayAGWP: &agentgateway.AgentgatewayParameters{
+			Spec: agentgateway.AgentgatewayParametersSpec{
+				AgentgatewayParametersConfigs: agentgateway.AgentgatewayParametersConfigs{
+					Env: []corev1.EnvVar{{Name: "OIDC_COOKIE_SECRET", Value: "inline-key"}},
+				},
+			},
+		},
+	}
+
+	assert.False(t, usesManagedOIDCCookieSecretResolvedParameters(resolved))
 }
 
 func TestAgentgatewayParametersApplier_ApplyOverlaysToObjects(t *testing.T) {
@@ -427,6 +462,41 @@ func TestBuildSessionKeySecret_RejectsInvalidExistingKey(t *testing.T) {
 	_, err := generator.buildSessionKeySecret(context.Background(), gw, "gw-session-key")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "contains an invalid key")
+}
+
+func TestBuildOIDCCookieSecret_UsesExistingValidKey(t *testing.T) {
+	const existingKey = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gw-oidc-cookie-secret",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			"key": []byte(existingKey),
+		},
+	}
+	generator := &agentgatewayParametersHelmValuesGenerator{
+		secretClient: newSyncedSecretClient(t, secret),
+		oidcCookieGen: func() (string, error) {
+			return "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100", nil
+		},
+	}
+	gw := &gwv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gw",
+			Namespace: "default",
+		},
+		Spec: gwv1.GatewaySpec{
+			GatewayClassName: "agentgateway",
+		},
+	}
+
+	managedSecret, err := generator.buildOIDCCookieSecret(context.Background(), gw, "gw-oidc-cookie-secret")
+	require.NoError(t, err)
+	require.NotNil(t, managedSecret)
+	assert.Equal(t, existingKey, string(managedSecret.Data["key"]))
+	assert.Equal(t, corev1.SecretTypeOpaque, managedSecret.Type)
+	assert.Equal(t, "gw-oidc-cookie-secret", managedSecret.Name)
 }
 
 func TestAddSessionKeyChecksumAnnotation(t *testing.T) {

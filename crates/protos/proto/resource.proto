@@ -758,6 +758,36 @@ message TrafficPolicySpec {
     Mode mode = 2;
   }
 
+  message OIDC {
+    enum TokenEndpointAuth {
+      TOKEN_ENDPOINT_AUTH_UNSPECIFIED = 0;
+      CLIENT_SECRET_BASIC = 1;
+      CLIENT_SECRET_POST = 2;
+    }
+
+    string issuer = 1;
+    string authorization_endpoint = 2;
+    string token_endpoint = 3;
+    TokenEndpointAuth token_endpoint_auth = 4;
+    string jwks_inline = 5;
+
+    string client_id = 6;
+    string client_secret = 7;
+    string redirect_uri = 8;
+    repeated string scopes = 9;
+
+    reserved 10;
+    reserved "cookie_secret";
+
+    // Stable runtime identity used for cookie naming and session binding.
+    string policy_id = 11;
+
+    // Optional backend used for runtime provider calls such as token exchange.
+    // When set, the dataplane should use normal backend resolution and TLS
+    // policies instead of dialing token_endpoint with generic system trust.
+    BackendReference provider_backend = 12;
+  }
+
   message TransformationPolicy {
     message Transform {
       repeated HeaderTransformation set = 1;
@@ -838,6 +868,7 @@ message TrafficPolicySpec {
     BasicAuthentication basic_auth = 19;
     APIKey api_key_auth = 20;
     HostRewrite host_rewrite = 21;
+    OIDC oidc = 22;
   }
 }
 
