@@ -89,10 +89,14 @@ wIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQBtestcertdata
 				t.Helper()
 				assert.Contains(t, outputYaml, "name: SESSION_KEY",
 					"deployment should inject the managed session key via env")
+				assert.Contains(t, outputYaml, "name: OIDC_COOKIE_SECRET",
+					"deployment should inject the managed oidc cookie secret via env")
 				assert.Contains(t, outputYaml, "secretKeyRef:",
 					"deployment should reference the session key Secret from env")
 				assert.Contains(t, outputYaml, "name: gw-session-key",
 					"deployment should reference the controller-managed session key Secret")
+				assert.Contains(t, outputYaml, "name: gw-oidc-cookie-secret",
+					"deployment should reference the controller-managed oidc cookie Secret")
 				assert.Contains(t, outputYaml, "kind: Secret",
 					"rendered objects should include the controller-managed session key Secret")
 				assert.Contains(t, outputYaml, "type: Opaque",

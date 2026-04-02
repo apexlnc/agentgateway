@@ -31,6 +31,7 @@ import (
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/shared"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks_url"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/utils"
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/reporter"
@@ -53,6 +54,7 @@ const (
 	retryPolicySuffix              = ":retry"
 	timeoutPolicySuffix            = ":timeout"
 	jwtPolicySuffix                = ":jwt"
+	oidcPolicySuffix               = ":oidc"
 	basicAuthPolicySuffix          = ":basicauth"
 	apiKeyPolicySuffix             = ":apikeyauth" //nolint:gosec
 	directResponseSuffix           = ":direct-response"
@@ -85,7 +87,7 @@ func ConvertStatusCollection[T controllers.Object, S any](col krt.Collection[krt
 }
 
 // NewAgentPlugin creates a new AgentgatewayPolicy plugin
-func NewAgentPlugin(agw *AgwCollections) AgwPlugin {
+func NewAgentPlugin(agw *AgwCollections, resolver *remotehttp.Resolver) AgwPlugin {
 	backendReferences := krt.NewManyCollection(agw.AgentgatewayPolicies, func(ctx krt.HandlerContext, policy *agentgateway.AgentgatewayPolicy) []*PolicyAttachment {
 		return BackendReferencesFromPolicy(policy)
 	})
@@ -97,7 +99,7 @@ func NewAgentPlugin(agw *AgwCollections) AgwPlugin {
 						*gwv1.PolicyStatus,
 						[]AgwPolicy,
 					) {
-						return TranslateAgentgatewayPolicy(krtctx, policyCR, agw, input.References)
+						return TranslateAgentgatewayPolicy(krtctx, policyCR, agw, input.References, resolver)
 					}, agw.KrtOpts.ToOptions("AgentgatewayPolicy")...)
 					return ConvertStatusCollection(policyStatusCol), policyCol
 				},
@@ -113,6 +115,7 @@ type PolicyCtx struct {
 	Krt         krt.HandlerContext
 	Collections *AgwCollections
 	References  ReferenceIndex
+	Resolver    *remotehttp.Resolver
 }
 
 type ResolvedTarget struct {
@@ -123,10 +126,10 @@ type ResolvedTarget struct {
 }
 
 // TranslateAgentgatewayPolicy generates policies for a single traffic policy
-func TranslateAgentgatewayPolicy(ctx krt.HandlerContext, policy *agentgateway.AgentgatewayPolicy, agw *AgwCollections, references ReferenceIndex) (*gwv1.PolicyStatus, []AgwPolicy) {
+func TranslateAgentgatewayPolicy(ctx krt.HandlerContext, policy *agentgateway.AgentgatewayPolicy, agw *AgwCollections, references ReferenceIndex, resolver *remotehttp.Resolver) (*gwv1.PolicyStatus, []AgwPolicy) {
 	var agwPolicies []AgwPolicy
 
-	pctx := PolicyCtx{Krt: ctx, Collections: agw, References: references}
+	pctx := PolicyCtx{Krt: ctx, Collections: agw, References: references, Resolver: resolver}
 	var ancestors []gwv1.PolicyAncestorStatus
 	var attachmentErrors []string
 	// TODO: add selectors
@@ -461,6 +464,10 @@ func translateTrafficPolicyToAgw(
 
 	if traffic.JWTAuthentication != nil {
 		appendPolicy("jwtAuthentication")(processJWTAuthenticationPolicy(ctx, traffic.JWTAuthentication, traffic.Phase, basePolicyName, policyName))
+	}
+
+	if traffic.OIDCAuthentication != nil {
+		appendPolicy("oidcAuthentication")(processOIDCAuthenticationPolicy(ctx, policy, traffic.OIDCAuthentication, traffic.Phase, basePolicyName, policyName))
 	}
 
 	if traffic.APIKeyAuthentication != nil {
@@ -1534,6 +1541,11 @@ func BackendReferencesFromPolicy(policy *agentgateway.AgentgatewayPolicy) []*Pol
 					app(p.JWKS.Remote.BackendRef)
 				}
 			}
+		}
+		if s.Traffic.OIDCAuthentication != nil &&
+			s.Traffic.OIDCAuthentication.Discovery != nil &&
+			s.Traffic.OIDCAuthentication.Discovery.BackendRef != nil {
+			app(*s.Traffic.OIDCAuthentication.Discovery.BackendRef)
 		}
 	}
 	if s.Frontend != nil {

@@ -183,6 +183,9 @@ func (dt DeployerTester) RunHelmChartTest(
 	gwParams.WithSessionKeyGenerator(func() (string, error) {
 		return testSessionKey, nil
 	})
+	gwParams.WithOIDCCookieSecretGenerator(func() (string, error) {
+		return testSessionKey, nil
+	})
 	if tt.HelmValuesGeneratorOverride != nil {
 		gwParams.WithHelmValuesGeneratorOverride(tt.HelmValuesGeneratorOverride(inputs))
 	}

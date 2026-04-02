@@ -21,6 +21,7 @@ import (
 	apisettings "github.com/agentgateway/agentgateway/controller/api/settings"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	agwplugins "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/plugins"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
 	"github.com/agentgateway/agentgateway/controller/pkg/deployer"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk"
@@ -69,6 +70,7 @@ type StartConfig struct {
 	Client apiclient.Client
 
 	AgwCollections *agwplugins.AgwCollections
+	Resolver       *remotehttp.Resolver
 
 	KrtOptions                     krtutil.KrtOptions
 	ExtraAgwResourceStatusHandlers map[schema.GroupVersionKind]syncer.ResourceStatusSyncer
@@ -165,9 +167,9 @@ func NewControllerBuilder(ctx context.Context, cfg StartConfig) (*ControllerBuil
 }
 
 // Plugins registers all built-in policy plugins
-func Plugins(agw *agwplugins.AgwCollections) []agwplugins.AgwPlugin {
+func Plugins(agw *agwplugins.AgwCollections, resolver *remotehttp.Resolver) []agwplugins.AgwPlugin {
 	return []agwplugins.AgwPlugin{
-		agwplugins.NewAgentPlugin(agw),
+		agwplugins.NewAgentPlugin(agw, resolver),
 		agwplugins.NewInferencePlugin(agw),
 		agwplugins.NewA2APlugin(agw),
 		agwplugins.NewBackendTLSPlugin(agw),
@@ -177,7 +179,7 @@ func Plugins(agw *agwplugins.AgwCollections) []agwplugins.AgwPlugin {
 
 func agwPluginFactory(cfg StartConfig) func(ctx context.Context, agw *agwplugins.AgwCollections) agwplugins.AgwPlugin {
 	return func(ctx context.Context, agw *agwplugins.AgwCollections) agwplugins.AgwPlugin {
-		plugins := Plugins(agw)
+		plugins := Plugins(agw, cfg.Resolver)
 		if cfg.ExtraAgwPlugins != nil {
 			plugins = append(plugins, cfg.ExtraAgwPlugins(ctx, agw)...)
 		}

@@ -1,14 +1,24 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/go-jose/go-jose/v4"
+	"github.com/golang-jwt/jwt/v5"
 
 	_ "embed"
 )
@@ -19,13 +29,14 @@ var cert []byte
 //go:embed dummy-idp.key
 var key []byte
 
-func startDummyIDP() (shutdownFunc, error) {
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(cert) {
-		return nil, fmt.Errorf("failed to append Cert from PEM")
-	}
+var oidcJwks []byte
 
-	cert, err := tls.X509KeyPair(cert, key)
+func startDummyIDP() (shutdownFunc, error) {
+	serverCert, err := buildDummyIDPServerCertificate()
+	if err != nil {
+		return nil, err
+	}
+	oidcJwks, err = buildOIDCJWKS()
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +81,8 @@ func startDummyIDP() (shutdownFunc, error) {
 	mux.HandleFunc("/token", handleToken)
 	// Handle .well-known paths - register each path explicitly
 	mux.HandleFunc("/.well-known/jwks.json", handleJWKS)
+	mux.HandleFunc("/.well-known/oidc-jwks.json", handleOIDCJWKS)
+	mux.HandleFunc("/.well-known/openid-configuration", handleOIDCDiscovery)
 	mux.HandleFunc("/.well-known/oauth-authorization-server", handleDiscovery)
 
 	// Add CORS middleware for all routes
@@ -83,8 +96,7 @@ func startDummyIDP() (shutdownFunc, error) {
 
 	// nolint: gosec // Test code only
 	cfg := &tls.Config{
-		RootCAs:      roots,
-		Certificates: []tls.Certificate{cert},
+		Certificates: []tls.Certificate{serverCert},
 		NextProtos:   []string{"http/1.1"},
 	}
 
@@ -101,6 +113,61 @@ func startDummyIDP() (shutdownFunc, error) {
 	}), nil
 }
 
+func buildDummyIDPServerCertificate() (tls.Certificate, error) {
+	caCert, err := tls.X509KeyPair(cert, key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	if len(caCert.Certificate) == 0 {
+		return tls.Certificate{}, fmt.Errorf("dummy-idp CA certificate is empty")
+	}
+
+	caLeaf, err := x509.ParseCertificate(caCert.Certificate[0])
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	serverKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	notBefore := time.Now().Add(-time.Minute)
+	notAfter := notBefore.Add(365 * 24 * time.Hour)
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: "dummy-idp.default",
+		},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		DNSNames:              []string{"dummy-idp.default", "dummy-idp.default.svc.cluster.local"},
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, template, caLeaf, &serverKey.PublicKey, caCert.PrivateKey)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	serverCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	serverKeyBytes, err := x509.MarshalPKCS8PrivateKey(serverKey)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	serverKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: serverKeyBytes})
+
+	return tls.X509KeyPair(serverCertPEM, serverKeyPEM)
+}
+
 // OAuth2/OIDC constants
 const (
 	hardcodedClientID = "mcp_gi3APARn2_uHv2oxfJJqq2yZBDV4OyNo"
@@ -109,7 +176,15 @@ const (
 	hardcodedClientSecret = "secret_2nGx_bjvo9z72Aw3-hKTWMusEo2-yTfH"
 	hardcodedRefreshToken = "fixed_refresh_token_123"
 	redirectURI           = "http://localhost:8081/callback"
+	oidcIssuer            = "https://agentgateway.dev"
+	oidcKeyID             = "oidc-test-key"
 )
+
+const oidcSigningKeyPEM = `-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgltxBTVDLg7C6vE1T
+7OtwJIZ/dpm8ygE2MBTjPCY3hgahRANCAARYzu50EeBrT0rELmTGroaGtn0zdjxL
+1lOGr9fGw5wOGcXO0+Gn5F5sIxGyTM0FwnUHFNz2SoixZR5dtxhNc+Lo
+-----END PRIVATE KEY-----`
 
 // sendJSONResponse sends a JSON response with CORS headers
 func sendJSONResponse(w http.ResponseWriter, r *http.Request, data any, statusCode int) {
@@ -163,13 +238,24 @@ func handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	clientID := query.Get("client_id")
 	redirectURI := query.Get("redirect_uri")
 
-	if clientID != hardcodedClientID {
+	if clientID != hardcodedClientID || redirectURI == "" {
 		sendJSONResponse(w, r, map[string]string{"error": "invalid_client"}, http.StatusBadRequest)
 		return
 	}
 
-	callbackURL := fmt.Sprintf("%s?code=%s", redirectURI, hardcodedCode)
-	sendJSONResponse(w, r, map[string]string{"redirect_to": callbackURL}, http.StatusOK)
+	callbackURL, err := url.Parse(redirectURI)
+	if err != nil {
+		sendJSONResponse(w, r, map[string]string{"error": "invalid_redirect_uri"}, http.StatusBadRequest)
+		return
+	}
+
+	values := callbackURL.Query()
+	values.Set("code", authorizationCodeForNonce(query.Get("nonce")))
+	if state := query.Get("state"); state != "" {
+		values.Set("state", state)
+	}
+	callbackURL.RawQuery = values.Encode()
+	sendJSONResponse(w, r, map[string]string{"redirect_to": callbackURL.String()}, http.StatusOK)
 }
 
 // handleToken handles OAuth2 token endpoint
@@ -212,6 +298,14 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 			"token_type":    "bearer",
 			"expires_in":    3600,
 		}
+		if nonce := nonceFromAuthorizationCode(r.FormValue("code")); nonce != "" {
+			idToken, err := signOIDCIDToken(nonce, clientID)
+			if err != nil {
+				sendJSONResponse(w, r, map[string]string{"error": "server_error"}, http.StatusInternalServerError)
+				return
+			}
+			response["id_token"] = idToken
+		}
 		sendJSONResponse(w, r, response, http.StatusOK)
 
 	case "refresh_token":
@@ -253,8 +347,27 @@ func handleJWKS(w http.ResponseWriter, r *http.Request) {
 	w.Write(orgOneJwks)
 }
 
+// handleOIDCJWKS handles the OIDC-specific JWKS endpoint.
+func handleOIDCJWKS(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		sendJSONResponse(w, r, map[string]string{"error": "method_not_allowed"}, http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(oidcJwks)
+}
+
 // handleDiscovery handles OAuth2 discovery endpoint
 func handleDiscovery(w http.ResponseWriter, r *http.Request) {
+	handleDiscoveryDocument(w, r, "/.well-known/jwks.json", false)
+}
+
+func handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
+	handleDiscoveryDocument(w, r, "/.well-known/oidc-jwks.json", true)
+}
+
+func handleDiscoveryDocument(w http.ResponseWriter, r *http.Request, jwksPath string, includeOIDC bool) {
 	if r.Method != http.MethodGet {
 		sendJSONResponse(w, r, map[string]string{"error": "method_not_allowed"}, http.StatusMethodNotAllowed)
 		return
@@ -272,17 +385,97 @@ func handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	baseURL := fmt.Sprintf("%s://%s", scheme, host)
 
 	discovery := map[string]any{
-		"issuer":                                "https://kgateway.dev",
+		"issuer":                                oidcIssuer,
 		"authorization_endpoint":                fmt.Sprintf("%s/authorize", baseURL),
 		"token_endpoint":                        fmt.Sprintf("%s/token", baseURL),
-		"jwks_uri":                              fmt.Sprintf("%s/.well-known/jwks.json", baseURL),
+		"jwks_uri":                              fmt.Sprintf("%s%s", baseURL, jwksPath),
 		"registration_endpoint":                 fmt.Sprintf("%s/register", baseURL),
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_basic", "client_secret_post"},
 		"code_challenge_methods_supported":      []string{"S256"},
 	}
+	if includeOIDC {
+		discovery["subject_types_supported"] = []string{"public"}
+		discovery["id_token_signing_alg_values_supported"] = []string{"ES256"}
+	}
 	sendJSONResponse(w, r, discovery, http.StatusOK)
+}
+
+func authorizationCodeForNonce(nonce string) string {
+	if nonce == "" {
+		return hardcodedCode
+	}
+	return hardcodedCode + "." + nonce
+}
+
+func nonceFromAuthorizationCode(code string) string {
+	prefix := hardcodedCode + "."
+	if !strings.HasPrefix(code, prefix) {
+		return ""
+	}
+	return strings.TrimPrefix(code, prefix)
+}
+
+func buildOIDCJWKS() ([]byte, error) {
+	signingKey, err := parseOIDCSigningKey()
+	if err != nil {
+		return nil, err
+	}
+
+	jwks, err := json.Marshal(&jose.JSONWebKeySet{
+		Keys: []jose.JSONWebKey{{
+			Key:       &signingKey.PublicKey,
+			KeyID:     oidcKeyID,
+			Use:       "sig",
+			Algorithm: string(jose.ES256),
+		}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode oidc jwks: %w", err)
+	}
+	return jwks, nil
+}
+
+func signOIDCIDToken(nonce, clientID string) (string, error) {
+	signingKey, err := parseOIDCSigningKey()
+	if err != nil {
+		return "", err
+	}
+	if clientID == "" {
+		clientID = hardcodedClientID
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{
+		"iss":   oidcIssuer,
+		"sub":   "ignore@agentgateway.dev",
+		"aud":   clientID,
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"iat":   time.Now().Unix(),
+		"nbf":   time.Now().Unix(),
+		"nonce": nonce,
+		"email": "ignore@agentgateway.dev",
+	})
+	token.Header["kid"] = oidcKeyID
+	return token.SignedString(signingKey)
+}
+
+func parseOIDCSigningKey() (*ecdsa.PrivateKey, error) {
+	block, _ := pem.Decode([]byte(oidcSigningKeyPEM))
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode oidc signing key pem")
+	}
+
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse oidc signing key: %w", err)
+	}
+
+	signingKey, ok := key.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("unexpected oidc signing key type %T", key)
+	}
+	return signingKey, nil
 }
 
 // handleOPTIONS handles CORS preflight requests

@@ -26,7 +26,10 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks_url"
 	agentjwksstore "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwksstore"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
+	agentoidcstore "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidcstore"
 	agwplugins "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/plugins"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
 	"github.com/agentgateway/agentgateway/controller/pkg/common"
 	"github.com/agentgateway/agentgateway/controller/pkg/controller"
@@ -216,7 +219,13 @@ func (s *setup) Start(ctx context.Context) error {
 		return err
 	}
 
-	jwksUrlFactory := jwks_url.NewJwksUrlFactory(agwCollections.ConfigMaps, agwCollections.Backends, agwCollections.AgentgatewayPolicies)
+	resolver := remotehttp.NewResolver(
+		agwCollections.ConfigMaps,
+		agwCollections.Backends,
+		agwCollections.AgentgatewayPolicies,
+	)
+
+	jwksUrlFactory := jwks_url.NewJwksUrlFactoryFromResolver(resolver)
 	jwks_url.JwksUrlBuilderFactory = func() jwks_url.JwksUrlBuilder { return jwksUrlFactory }
 
 	for _, mgrCfgFunc := range s.ExtraManagerConfig {
@@ -246,8 +255,13 @@ func (s *setup) Start(ctx context.Context) error {
 			return fmt.Errorf("error creating jwks store %w", err)
 		}
 	}
+	if !runnablesRegistry.Contains(oidc.RunnableName) {
+		if err := buildOIDCStore(ctx, mgr, s.APIClient, agwCollections, resolver); err != nil {
+			return fmt.Errorf("error creating oidc store %w", err)
+		}
+	}
 
-	agw, err := s.buildSyncer(ctx, mgr, setupOpts, agwCollections)
+	agw, err := s.buildSyncer(ctx, mgr, setupOpts, agwCollections, resolver)
 	if err != nil {
 		return err
 	}
@@ -273,6 +287,7 @@ func (s *setup) buildSyncer(
 	mgr manager.Manager,
 	setupOpts *controller.SetupOpts,
 	agwCollections *agwplugins.AgwCollections,
+	resolver *remotehttp.Resolver,
 ) (*syncer.Syncer, error) {
 	slog.Info("creating krt collections")
 	krtOpts := krtutil.NewKrtOptions(ctx.Done(), setupOpts.KrtDebugger)
@@ -299,6 +314,7 @@ func (s *setup) buildSyncer(
 		Dev:                            logging.MustGetLevel(logging.DefaultComponent) <= logging.LevelTrace,
 		KrtOptions:                     krtOpts,
 		AgwCollections:                 agwCollections,
+		Resolver:                       resolver,
 		ExtraAgwResourceStatusHandlers: s.ExtraStatusHandlers,
 		GatewayControllerExtension:     s.GatewayControllerExtension,
 		AgentgatewaySyncerOptions:      s.AgentGatewaySyncerOptions,
@@ -357,6 +373,33 @@ func buildJwksStore(ctx context.Context, mgr manager.Manager, apiClient apiclien
 	jwksStoreCMCtrl := agentjwksstore.NewJWKSStoreConfigMapsController(apiClient, jwks.DefaultJwksStorePrefix, namespaces.GetPodNamespace(), jwksStore)
 	jwksStoreCMCtrl.Init(ctx)
 	if err := mgr.Add(jwksStoreCMCtrl); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func buildOIDCStore(ctx context.Context, mgr manager.Manager, apiClient apiclient.Client, agwCollections *agwplugins.AgwCollections, resolver *remotehttp.Resolver) error {
+	policyCtrl := agentoidcstore.NewPolicyController(agwCollections, resolver)
+	policyCtrl.Init(ctx)
+	if err := mgr.Add(policyCtrl); err != nil {
+		return err
+	}
+
+	store := oidc.BuildOIDCStore(
+		apiClient,
+		agwCollections.KrtOpts,
+		policyCtrl.SourceChanges(),
+		oidc.DefaultProviderStorePrefix,
+		namespaces.GetPodNamespace(),
+	)
+	if err := mgr.Add(store); err != nil {
+		return err
+	}
+
+	cmCtrl := agentoidcstore.NewConfigMapsController(apiClient, oidc.DefaultProviderStorePrefix, namespaces.GetPodNamespace(), store)
+	cmCtrl.Init(ctx)
+	if err := mgr.Add(cmCtrl); err != nil {
 		return err
 	}
 

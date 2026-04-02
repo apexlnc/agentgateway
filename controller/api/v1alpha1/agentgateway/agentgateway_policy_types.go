@@ -531,7 +531,7 @@ const (
 	PolicyPhasePostRouting PolicyPhase = "PostRouting"
 )
 
-// +kubebuilder:validation:IfThenOnlyFields:if="has(self.phase) && self.phase == 'PreRouting'",fields=phase;transformation;extProc;extAuth;jwtAuthentication;basicAuthentication;apiKeyAuthentication,message="phase PreRouting only supports extAuth, transformation, extProc, jwtAuthentication, basicAuthentication, and apiKeyAuthentication"
+// +kubebuilder:validation:IfThenOnlyFields:if="has(self.phase) && self.phase == 'PreRouting'",fields=phase;transformation;extProc;extAuth;jwtAuthentication;oidcAuthentication;basicAuthentication;apiKeyAuthentication,message="phase PreRouting only supports extAuth, transformation, extProc, jwtAuthentication, oidcAuthentication, basicAuthentication, and apiKeyAuthentication"
 type Traffic struct {
 	// The phase to apply the traffic policy to. If the phase is `PreRouting`,
 	// the `targetRef` must be a `Gateway` or a `Listener`. `PreRouting` is
@@ -616,6 +616,11 @@ type Traffic struct {
 	// `jwtAuthentication` authenticates users based on JWT tokens.
 	// +optional
 	JWTAuthentication *JWTAuthentication `json:"jwtAuthentication,omitempty"`
+
+	// `oidcAuthentication` authenticates browser users with the OIDC
+	// authorization code flow.
+	// +optional
+	OIDCAuthentication *OIDCAuthentication `json:"oidcAuthentication,omitempty"`
 
 	// `basicAuthentication` authenticates users based on the `Basic`
 	// authentication scheme (RFC 7617), where a username and password are
@@ -752,6 +757,53 @@ type RemoteJWKS struct {
 	// connection to the remote `jwks` source.
 	// +required
 	BackendRef gwv1.BackendObjectReference `json:"backendRef"`
+}
+
+type OIDCAuthentication struct {
+	// `issuer` is used for issuer validation and default discovery URL derivation.
+	// +required
+	Issuer ShortString `json:"issuer"`
+
+	// `discovery` configures how the controller should perform OIDC discovery.
+	// +optional
+	Discovery *OIDCDiscovery `json:"discovery,omitempty"`
+
+	// `clientId` is the OAuth2 client identifier.
+	// +required
+	ClientID ShortString `json:"clientId"`
+
+	// `clientSecretRef` references a Kubernetes Secret containing the
+	// `clientSecret` key.
+	// +required
+	ClientSecretRef corev1.LocalObjectReference `json:"clientSecretRef"`
+
+	// `redirectURI` is the absolute callback URI handled by the gateway.
+	// +required
+	RedirectURI string `json:"redirectURI"`
+
+	// Additional OAuth2 scopes to request. `openid` is always added by the runtime.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +optional
+	Scopes []string `json:"scopes,omitempty"`
+}
+
+type OIDCDiscovery struct {
+	// `backendRef` optionally performs discovery against a referenced Service or
+	// static AgentgatewayBackend instead of the issuer URL directly.
+	// +optional
+	BackendRef *gwv1.BackendObjectReference `json:"backendRef,omitempty"`
+
+	// `path` is the relative discovery path. If unset, discovery defaults to
+	// `/.well-known/openid-configuration`.
+	// +optional
+	Path *string `json:"path,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="matches(self, '^([0-9]{1,5}(h|m|s|ms)){1,4}$')",message="invalid duration value"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5m')",message="cacheDuration must be at least 5m."
+	// +kubebuilder:default="5m"
+	CacheDuration *metav1.Duration `json:"cacheDuration,omitempty"`
 }
 
 // +kubebuilder:validation:Enum=Strict;Optional

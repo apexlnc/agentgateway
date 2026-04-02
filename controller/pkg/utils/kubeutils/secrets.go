@@ -22,8 +22,17 @@ func GetSecret(secrets krt.Collection[*corev1.Secret], krtctx krt.HandlerContext
 // GetSecretValue extracts a value from a Kubernetes secret, handling both Data and StringData fields.
 // It prioritizes StringData over Data if both are present.
 func GetSecretValue(secret *corev1.Secret, key string) (string, bool) {
+	if value, exists := GetSecretValueExact(secret, key); exists {
+		return strings.TrimSpace(value), true
+	}
+
+	return "", false
+}
+
+// GetSecretValueExact extracts a UTF-8 value from a Kubernetes secret without trimming it.
+func GetSecretValueExact(secret *corev1.Secret, key string) (string, bool) {
 	if value, exists := secret.Data[key]; exists && utf8.Valid(value) {
-		return strings.TrimSpace(string(value)), true
+		return string(value), true
 	}
 
 	return "", false
