@@ -2319,7 +2319,6 @@ mod tests {
 					redirect_uri: "https://app.example.com/oauth/callback".into(),
 					scopes: vec!["openid".into(), "profile".into()],
 					policy_id: policy_id.into(),
-					provider_backend: None,
 				},
 			)),
 		}

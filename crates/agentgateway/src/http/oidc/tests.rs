@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ::http::{Method, Request as HttpRequest, header};
-use agent_core::strng;
 use base64::Engine as _;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use jsonwebtoken::jwk::JwkSet;
@@ -11,7 +10,6 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use serde_json::json;
 use wiremock::matchers::{method, path};
-use wiremock::tls_certs::MockTlsCertificates;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
@@ -19,9 +17,6 @@ use crate::client;
 use crate::http::jwt;
 use crate::serdes::FileInlineOrRemote;
 use crate::test_helpers::proxymock::setup_proxy_test;
-use crate::types::agent::{
-	Backend, BackendPolicy, BackendWithPolicies, ResourceName, SimpleBackendReference, Target,
-};
 
 const TEST_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgltxBTVDLg7C6vE1T
@@ -124,7 +119,6 @@ fn test_policy() -> OidcPolicy {
 			issuer: TEST_ISSUER.into(),
 			authorization_endpoint: provider_endpoint("https://issuer.example.com/authorize"),
 			token_endpoint: provider_endpoint("https://issuer.example.com/token"),
-			provider_backend: None,
 			id_token_validator: test_id_token_validator(),
 		}),
 		client: ClientConfig {
@@ -144,7 +138,6 @@ fn test_callback_policy(token_endpoint: ProviderEndpoint) -> OidcPolicy {
 		issuer: TEST_ISSUER.into(),
 		authorization_endpoint: provider_endpoint("https://issuer.example.com/authorize"),
 		token_endpoint,
-		provider_backend: None,
 		id_token_validator: test_id_token_validator(),
 	});
 	policy
@@ -488,7 +481,6 @@ async fn token_endpoint_auth_modes_shape_exchange_requests() {
 			issuer: TEST_ISSUER.into(),
 			authorization_endpoint: provider_endpoint("https://issuer.example.com/authorize"),
 			token_endpoint: provider_endpoint(format!("{}/token", mock.uri())),
-			provider_backend: None,
 			id_token_validator: test_id_token_validator(),
 		};
 		let client_config = ClientConfig {
@@ -580,7 +572,6 @@ async fn token_exchange_bounds_transport_failures() {
 			issuer: TEST_ISSUER.into(),
 			authorization_endpoint: provider_endpoint("https://issuer.example.com/authorize"),
 			token_endpoint: provider_endpoint(format!("{}/token", mock.uri())),
-			provider_backend: None,
 			id_token_validator: test_id_token_validator(),
 		};
 		let client_config = ClientConfig {
@@ -617,154 +608,6 @@ async fn token_exchange_bounds_transport_failures() {
 		.expect_err(name);
 		assert!(matches!(err, Error::TokenExchangeFailed(_)), "{name}");
 	}
-}
-
-#[tokio::test]
-async fn token_exchange_supports_provider_backend_over_tls() {
-	let _ = rustls::crypto::CryptoProvider::install_default(Arc::unwrap_or_clone(
-		crate::transport::tls::provider(),
-	));
-	let certs = MockTlsCertificates::random();
-	let mock = MockServer::builder()
-		.start_https(certs.get_server_config())
-		.await;
-	let backend_name = ResourceName::new("oidc-provider".into(), "default".into());
-	let backend = Backend::Opaque(
-		backend_name.clone(),
-		Target::Hostname("localhost".into(), mock.address().port()),
-	);
-	let backend_tls = crate::http::backendtls::ResolvedBackendTLS {
-		root: Some(certs.root_cert.pem().into_bytes()),
-		..Default::default()
-	}
-	.try_into()
-	.expect("backend tls");
-	let proxy = setup_proxy_test("{}")
-		.expect("proxy test harness")
-		.with_raw_backend(BackendWithPolicies {
-			backend: backend.clone(),
-			inline_policies: vec![BackendPolicy::BackendTLS(backend_tls)],
-		});
-
-	let id_token = signed_id_token(TEST_NONCE);
-	Mock::given(method("POST"))
-		.and(path("/token"))
-		.respond_with(ResponseTemplate::new(200).set_body_json(json!({
-			"id_token": id_token,
-		})))
-		.mount(&mock)
-		.await;
-
-	let provider = Provider {
-		issuer: TEST_ISSUER.into(),
-		authorization_endpoint: provider_endpoint("https://issuer.example.com/authorize"),
-		token_endpoint: provider_endpoint("https://issuer.example.com/token"),
-		provider_backend: Some(SimpleBackendReference::Backend(backend.name())),
-		id_token_validator: test_id_token_validator(),
-	};
-	let client_config = ClientConfig {
-		client_id: TEST_CLIENT_ID.into(),
-		client_secret: SecretString::new("client-secret".into()),
-		token_endpoint_auth: TokenEndpointAuth::ClientSecretBasic,
-	};
-
-	let token = provider::exchange_code(
-		crate::proxy::httpproxy::PolicyClient {
-			inputs: proxy.inputs(),
-		},
-		&provider,
-		&client_config,
-		"https://app.example.com/oauth/callback",
-		"code",
-		&SecretString::new("verifier".into()),
-	)
-	.await
-	.expect("token exchange via provider backend");
-
-	assert_eq!(token.id_token.as_deref(), Some(id_token.as_str()));
-}
-
-#[tokio::test]
-async fn token_exchange_supports_xds_decoded_provider_backend_over_tls() {
-	let _ = rustls::crypto::CryptoProvider::install_default(Arc::unwrap_or_clone(
-		crate::transport::tls::provider(),
-	));
-	let certs = MockTlsCertificates::random();
-	let mock = MockServer::builder()
-		.start_https(certs.get_server_config())
-		.await;
-	let backend_key = strng::new("default/oidc-provider");
-	let proto_backend = crate::types::proto::agent::Backend {
-		key: backend_key.to_string(),
-		name: Some(crate::types::proto::agent::ResourceName {
-			name: "oidc-provider".into(),
-			namespace: "default".into(),
-		}),
-		kind: Some(crate::types::proto::agent::backend::Kind::Static(
-			crate::types::proto::agent::StaticBackend {
-				host: "localhost".into(),
-				port: mock.address().port() as i32,
-			},
-		)),
-		inline_policies: vec![crate::types::proto::agent::BackendPolicySpec {
-			kind: Some(
-				crate::types::proto::agent::backend_policy_spec::Kind::BackendTls(
-					crate::types::proto::agent::backend_policy_spec::BackendTls {
-						cert: None,
-						key: None,
-						root: Some(certs.root_cert.pem().into_bytes()),
-						verification:
-							crate::types::proto::agent::backend_policy_spec::backend_tls::VerificationMode::Strict
-								as i32,
-						hostname: None,
-						verify_subject_alt_names: Vec::new(),
-						alpn: None,
-					},
-				),
-			),
-		}],
-	};
-	let backend: BackendWithPolicies = (&proto_backend).try_into().expect("xds backend decode");
-	let proxy = setup_proxy_test("{}")
-		.expect("proxy test harness")
-		.with_raw_backend(backend);
-
-	let id_token = signed_id_token(TEST_NONCE);
-	Mock::given(method("POST"))
-		.and(path("/token"))
-		.respond_with(ResponseTemplate::new(200).set_body_json(json!({
-			"id_token": id_token,
-		})))
-		.mount(&mock)
-		.await;
-
-	let provider = Provider {
-		issuer: TEST_ISSUER.into(),
-		authorization_endpoint: provider_endpoint("https://issuer.example.com/authorize"),
-		token_endpoint: provider_endpoint("https://issuer.example.com/token"),
-		provider_backend: Some(SimpleBackendReference::Backend(backend_key)),
-		id_token_validator: test_id_token_validator(),
-	};
-	let client_config = ClientConfig {
-		client_id: TEST_CLIENT_ID.into(),
-		client_secret: SecretString::new("client-secret".into()),
-		token_endpoint_auth: TokenEndpointAuth::ClientSecretBasic,
-	};
-
-	let token = provider::exchange_code(
-		crate::proxy::httpproxy::PolicyClient {
-			inputs: proxy.inputs(),
-		},
-		&provider,
-		&client_config,
-		"https://app.example.com/oauth/callback",
-		"code",
-		&SecretString::new("verifier".into()),
-	)
-	.await
-	.expect("token exchange via xds backend");
-
-	assert_eq!(token.id_token.as_deref(), Some(id_token.as_str()));
 }
 
 #[tokio::test]

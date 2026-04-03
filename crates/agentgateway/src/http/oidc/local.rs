@@ -31,7 +31,6 @@ pub(super) struct PreparedOidcProvider {
 	pub(super) token_endpoint: ProviderEndpoint,
 	pub(super) token_endpoint_auth: TokenEndpointAuth,
 	pub(super) id_token_jwks: JwkSet,
-	pub(super) provider_backend: Option<crate::types::agent::SimpleBackendReference>,
 }
 
 pub(super) struct PreparedOidcPolicy {
@@ -156,7 +155,6 @@ impl LocalOidcConfig {
 					token_endpoint: discovered.token_endpoint,
 					token_endpoint_auth: discovered.token_endpoint_auth,
 					id_token_jwks,
-					provider_backend: None,
 				}
 			},
 			3 => {
@@ -253,7 +251,6 @@ async fn resolve_explicit_provider(
 		token_endpoint,
 		token_endpoint_auth,
 		id_token_jwks,
-		provider_backend: None,
 	})
 }
 
@@ -296,7 +293,6 @@ impl PreparedOidcProvider {
 			issuer: self.issuer,
 			authorization_endpoint: self.authorization_endpoint,
 			token_endpoint: self.token_endpoint,
-			provider_backend: self.provider_backend,
 			id_token_validator: crate::http::jwt::Jwt::from_providers(
 				vec![provider],
 				crate::http::jwt::Mode::Strict,
