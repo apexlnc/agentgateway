@@ -101,16 +101,27 @@ func startDummyIDP() (shutdownFunc, error) {
 	}
 
 	// nolint: gosec // Test code only
-	srv := &http.Server{
-		Addr:         "0.0.0.0:8443",
-		Handler:      muxWithCORS,
-		TLSConfig:    cfg,
-		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler), 0),
+	httpsSrv := &http.Server{
+		Addr:              "0.0.0.0:8443",
+		Handler:           muxWithCORS,
+		TLSConfig:         cfg,
+		TLSNextProto:      make(map[string]func(*http.Server, *tls.Conn, http.Handler), 0),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	httpSrv := &http.Server{
+		Addr:              "0.0.0.0:8081",
+		Handler:           muxWithCORS,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	return serveHTTP("dummy-idp", srv, func() error {
-		return srv.ListenAndServeTLS("", "")
-	}), nil
+	return chainShutdowns(
+		serveHTTP("dummy-idp-https", httpsSrv, func() error {
+			return httpsSrv.ListenAndServeTLS("", "")
+		}),
+		serveHTTP("dummy-idp-http", httpSrv, func() error {
+			return httpSrv.ListenAndServe()
+		}),
+	), nil
 }
 
 func buildDummyIDPServerCertificate() (tls.Certificate, error) {
@@ -380,7 +391,11 @@ func handleDiscoveryDocument(w http.ResponseWriter, r *http.Request, jwksPath st
 	}
 	host := r.Host
 	if host == "" {
-		host = "localhost:8443"
+		if scheme == "https" {
+			host = "localhost:8443"
+		} else {
+			host = "localhost:8081"
+		}
 	}
 	baseURL := fmt.Sprintf("%s://%s", scheme, host)
 

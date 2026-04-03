@@ -4,7 +4,8 @@ Single e2e helper image used by multiple tests.
 
 Ports:
 - `80/443/7070/9090`: Istio echo app server (`backend` service)
-- `8443`: dummy-idp/auth0-mock
+- `8443`: dummy-idp/auth0-mock over HTTPS
+- `8081`: dummy-idp over plain HTTP
 - `18080`: ext-proc gRPC server
 - `9000`: ext-authz gRPC server
 - `8000`: mcp-website-fetcher

@@ -114,8 +114,8 @@ func (s *testingSuite) assertOIDCFlow(routeName, policyName, host string) {
 	loginURL, err := url.Parse(loginLocation)
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), "/authorize", loginURL.Path)
-	assert.Equal(s.T(), "dummy-idp.default:8443", loginURL.Host)
-	assert.Equal(s.T(), "https", loginURL.Scheme)
+	assert.Equal(s.T(), "dummy-idp.default:8081", loginURL.Host)
+	assert.Equal(s.T(), "http", loginURL.Scheme)
 	assert.Equal(s.T(), clientID, loginURL.Query().Get("client_id"))
 	assert.Equal(s.T(), true, strings.Contains(loginURL.Query().Get("scope"), "openid"))
 

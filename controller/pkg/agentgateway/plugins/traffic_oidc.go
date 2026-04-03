@@ -45,13 +45,6 @@ func processOIDCAuthenticationPolicy(
 	if err != nil {
 		return nil, err
 	}
-	var providerBackend *api.BackendReference
-	if authn.Discovery != nil && authn.Discovery.BackendRef != nil {
-		providerBackend, err = buildBackendRef(ctx, *authn.Discovery.BackendRef, policy.Namespace)
-		if err != nil {
-			return nil, fmt.Errorf("resolve oidc provider backend: %w", err)
-		}
-	}
 	clientSecret, err := resolveOIDCClientSecret(ctx, policy.Namespace, authn.ClientSecretRef)
 	if err != nil {
 		return nil, err
@@ -81,7 +74,6 @@ func processOIDCAuthenticationPolicy(
 						RedirectUri:           authn.RedirectURI,
 						Scopes:                authn.Scopes,
 						PolicyId:              "policy/" + policyKey,
-						ProviderBackend:       providerBackend,
 					},
 				},
 			},
