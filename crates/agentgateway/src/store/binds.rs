@@ -411,30 +411,6 @@ fn has_xds_oidc(spec: &crate::types::proto::agent::TrafficPolicySpec) -> bool {
 	)
 }
 
-fn materialize_simple_reference(
-	target: Option<&crate::types::proto::agent::BackendReference>,
-) -> Result<crate::types::agent::SimpleBackendReference, crate::types::proto::ProtoError> {
-	let Some(target) = target else {
-		return Ok(crate::types::agent::SimpleBackendReference::Invalid);
-	};
-	Ok(match target.kind.as_ref() {
-		None => crate::types::agent::SimpleBackendReference::Invalid,
-		Some(crate::types::proto::agent::backend_reference::Kind::Service(svc)) => {
-			let ns = NamespacedHostname {
-				namespace: Strng::from(&svc.namespace),
-				hostname: Strng::from(&svc.hostname),
-			};
-			crate::types::agent::SimpleBackendReference::Service {
-				name: ns,
-				port: target.port as u16,
-			}
-		},
-		Some(crate::types::proto::agent::backend_reference::Kind::Backend(name)) => {
-			crate::types::agent::SimpleBackendReference::Backend(name.into())
-		},
-	})
-}
-
 fn materialize_xds_traffic_policy(
 	spec: &crate::types::proto::agent::TrafficPolicySpec,
 	oidc_cookie_encoder: Option<&Encoder>,
@@ -481,10 +457,6 @@ fn materialize_xds_traffic_policy(
 				token_endpoint: oidc_spec.token_endpoint.clone(),
 				token_endpoint_auth,
 				jwks_inline: oidc_spec.jwks_inline.clone(),
-				provider_backend: match materialize_simple_reference(oidc_spec.provider_backend.as_ref())? {
-					crate::types::agent::SimpleBackendReference::Invalid => None,
-					backend => Some(backend),
-				},
 				client_id: oidc_spec.client_id.clone(),
 				client_secret: SecretString::new(oidc_spec.client_secret.clone().into()),
 				redirect_uri: oidc_spec.redirect_uri.clone(),
@@ -1691,7 +1663,6 @@ mod tests {
 	fn test_oidc_spec(
 		token_endpoint_auth: crate::types::proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth,
 		policy_id: &str,
-		provider_backend: Option<crate::types::proto::agent::BackendReference>,
 	) -> crate::types::proto::agent::TrafficPolicySpec {
 		crate::types::proto::agent::TrafficPolicySpec {
 			phase: crate::types::proto::agent::traffic_policy_spec::PolicyPhase::Route as i32,
@@ -1707,7 +1678,6 @@ mod tests {
 					redirect_uri: "https://app.example.com/oauth/callback".into(),
 					scopes: vec!["openid".into(), "profile".into()],
 					policy_id: policy_id.into(),
-					provider_backend,
 				},
 			)),
 		}
@@ -2015,7 +1985,6 @@ mod tests {
 		let raw = test_xds_policy(test_oidc_spec(
 			crate::types::proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth::ClientSecretBasic,
 			"policy/default/example-policy",
-			None,
 		));
 
 		let encoder = test_oidc_cookie_encoder();
@@ -2042,7 +2011,6 @@ mod tests {
 		let raw = test_xds_route(test_oidc_spec(
 			crate::types::proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth::ClientSecretPost,
 			"route/default/example-route",
-			None,
 		));
 
 		let encoder = test_oidc_cookie_encoder();
@@ -2061,43 +2029,10 @@ mod tests {
 	}
 
 	#[test]
-	fn materialize_xds_policy_preserves_provider_backend()
-	-> Result<(), crate::types::proto::ProtoError> {
-		let provider_backend = crate::types::proto::agent::BackendReference {
-			kind: Some(
-				crate::types::proto::agent::backend_reference::Kind::Backend("default/dummy-idp".into()),
-			),
-			port: 0,
-		};
-		let raw = test_xds_policy(test_oidc_spec(
-			crate::types::proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth::ClientSecretBasic,
-			"policy/default/example-policy",
-			Some(provider_backend),
-		));
-
-		let encoder = test_oidc_cookie_encoder();
-		let policy = materialize_xds_policy(&raw, Some(&encoder))?;
-
-		let PolicyType::Traffic(phased) = policy.policy else {
-			panic!("expected traffic policy");
-		};
-		let TrafficPolicy::Oidc(policy) = phased.policy else {
-			panic!("expected OIDC policy");
-		};
-		assert!(matches!(
-			policy.provider.provider_backend.as_ref(),
-			Some(crate::types::agent::SimpleBackendReference::Backend(key))
-				if key == &strng::new("default/dummy-idp")
-		));
-		Ok(())
-	}
-
-	#[test]
 	fn materialize_xds_policy_rejects_unspecified_token_endpoint_auth() {
 		let raw = test_xds_policy(test_oidc_spec(
 			crate::types::proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth::Unspecified,
 			"policy/default/example-policy",
-			None,
 		));
 
 		let encoder = test_oidc_cookie_encoder();
@@ -2115,7 +2050,6 @@ mod tests {
 		let raw = test_xds_policy(test_oidc_spec(
 			crate::types::proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth::ClientSecretBasic,
 			"policy/",
-			None,
 		));
 
 		let encoder = test_oidc_cookie_encoder();

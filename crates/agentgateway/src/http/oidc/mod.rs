@@ -76,7 +76,6 @@ pub struct ResolvedOidcConfig {
 	pub token_endpoint: String,
 	pub token_endpoint_auth: TokenEndpointAuth,
 	pub jwks_inline: String,
-	pub provider_backend: Option<crate::types::agent::SimpleBackendReference>,
 	pub client_id: String,
 	pub client_secret: SecretString,
 	pub redirect_uri: String,
@@ -107,7 +106,6 @@ impl ResolvedOidcConfig {
 				token_endpoint,
 				token_endpoint_auth: self.token_endpoint_auth,
 				id_token_jwks,
-				provider_backend: self.provider_backend,
 			},
 			client_id: self.client_id,
 			client_secret: self.client_secret,
@@ -125,13 +123,6 @@ pub struct ProviderEndpoint(url::Url);
 impl ProviderEndpoint {
 	pub fn as_str(&self) -> &str {
 		self.0.as_ref()
-	}
-
-	pub fn path_and_query(&self) -> String {
-		match self.0.query() {
-			Some(query) => format!("{}?{query}", self.0.path()),
-			None => self.0.path().to_string(),
-		}
 	}
 
 	pub fn with_query(&self, params: &[(&str, String)]) -> String {
@@ -213,7 +204,6 @@ pub struct Provider {
 	pub issuer: String,
 	pub authorization_endpoint: ProviderEndpoint,
 	pub token_endpoint: ProviderEndpoint,
-	pub provider_backend: Option<crate::types::agent::SimpleBackendReference>,
 	pub id_token_validator: jwt::Jwt,
 }
 

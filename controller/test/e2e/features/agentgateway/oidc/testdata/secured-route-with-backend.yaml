@@ -31,7 +31,7 @@ spec:
           group: agentgateway.dev
           kind: AgentgatewayBackend
           name: dummy-idp
-          port: 8443
+          port: 8081
       clientId: mcp_gi3APARn2_uHv2oxfJJqq2yZBDV4OyNo
       clientSecretRef:
         name: oidc-client
@@ -46,10 +46,6 @@ metadata:
   name: dummy-idp
   namespace: agentgateway-base
 spec:
-  policies:
-    tls:
-      caCertificateRefs:
-        - name: ca
   static:
     host: dummy-idp.default
-    port: 8443
+    port: 8081

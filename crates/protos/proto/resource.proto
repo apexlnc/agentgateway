@@ -781,11 +781,8 @@ message TrafficPolicySpec {
 
     // Stable runtime identity used for cookie naming and session binding.
     string policy_id = 11;
-
-    // Optional backend used for runtime provider calls such as token exchange.
-    // When set, the dataplane should use normal backend resolution and TLS
-    // policies instead of dialing token_endpoint with generic system trust.
-    BackendReference provider_backend = 12;
+    reserved 12;
+    reserved "provider_backend";
   }
 
   message TransformationPolicy {

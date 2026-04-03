@@ -123,9 +123,6 @@ func TestProcessOIDCAuthenticationPolicy(t *testing.T) {
 	if oidcPolicy.TokenEndpointAuth != api.TrafficPolicySpec_OIDC_CLIENT_SECRET_BASIC {
 		t.Fatalf("unexpected token endpoint auth %v", oidcPolicy.TokenEndpointAuth)
 	}
-	if oidcPolicy.ProviderBackend == nil || oidcPolicy.ProviderBackend.GetBackend() == "" {
-		t.Fatalf("expected provider backend to be set, got %#v", oidcPolicy.ProviderBackend)
-	}
 	if traffic.Phase != api.TrafficPolicySpec_GATEWAY {
 		t.Fatalf("unexpected phase %v", traffic.Phase)
 	}
