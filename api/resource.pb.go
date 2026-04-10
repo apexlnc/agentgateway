@@ -11798,13 +11798,7 @@ const file_resource_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05valueB\x06\n" +
 	"\x04kind\"?\n" +
 	"\x14JWTValidationOptions\x12'\n" +
-<<<<<<< HEAD
-	"\x0frequired_claims\x18\x01 \x03(\tR\x0erequiredClaims\"\xd6D\n" +
-||||||| parent of f98913d5 (ref(oidc): Drop backend-mediated token exchange)
-	"\x0frequired_claims\x18\x01 \x03(\tR\x0erequiredClaims\"\x97D\n" +
-=======
-	"\x0frequired_claims\x18\x01 \x03(\tR\x0erequiredClaims\"\xd7C\n" +
->>>>>>> f98913d5 (ref(oidc): Drop backend-mediated token exchange)
+	"\x0frequired_claims\x18\x01 \x03(\tR\x0erequiredClaims\"\x96D\n" +
 	"\x11TrafficPolicySpec\x12N\n" +
 	"\x05phase\x18\x01 \x01(\x0e28.agentgateway.dev.resource.TrafficPolicySpec.PolicyPhaseR\x05phase\x12>\n" +
 	"\atimeout\x18\x02 \x01(\v2\".agentgateway.dev.resource.TimeoutH\x00R\atimeout\x128\n" +
