@@ -125,61 +125,103 @@ func (f *ProviderFetcher) AddOrUpdateSource(source ProviderSource) error {
 
 func (f *ProviderFetcher) RemoveSource(source ProviderSource) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	if existing, ok := f.sources[source.RequestKey]; ok {
 		existing.Deleted = true
 		delete(f.sources, source.RequestKey)
+		f.mu.Unlock()
+
 		f.cache.Delete(source.RequestKey)
-		for _, subscriber := range f.subscribers {
-			subscriber <- map[remotehttp.FetchKey]struct{}{source.RequestKey: {}}
-		}
+		f.notifySubscribers(map[remotehttp.FetchKey]struct{}{source.RequestKey: {}})
+		return
 	}
+	f.mu.Unlock()
 }
 
 func (f *ProviderFetcher) maybeFetchProviders(ctx context.Context) {
-	updates := make(map[remotehttp.FetchKey]struct{})
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	now := time.Now()
-	for {
-		next := f.schedule.Peek()
-		if next == nil || next.at.After(now) {
-			break
-		}
+	pending := f.popDueFetches(now)
+	if len(pending) == 0 {
+		return
+	}
 
-		fetch := heap.Pop(&f.schedule).(fetchAt)
+	updates := make(map[remotehttp.FetchKey]struct{})
+	for _, fetch := range pending {
 		if fetch.source.Deleted {
 			continue
 		}
 
 		cfg, err := fetchProviderConfig(ctx, f.defaultClient, *fetch.source)
 		if err != nil {
-			multiplier := time.Duration(math.Pow(2, float64(fetch.retryAttempt+1)))
-			delay := min(100*time.Millisecond*multiplier, 15*time.Second)
+			delay := min(100*time.Millisecond*time.Duration(math.Pow(2, float64(fetch.retryAttempt+1))), 15*time.Second)
 			fetchLogger.Error("error fetching oidc provider", "request_key", fetch.source.RequestKey, "error", err, "retryAttempt", fetch.retryAttempt, "next", delay.String())
-			heap.Push(&f.schedule, fetchAt{
-				at:           now.Add(delay),
-				source:       fetch.source,
-				retryAttempt: fetch.retryAttempt + 1,
-			})
+			f.reschedule(fetch, now.Add(delay), fetch.retryAttempt+1)
 			continue
 		}
 
-		f.cache.Set(fetch.source.RequestKey, cfg)
-		heap.Push(&f.schedule, fetchAt{
-			at:     now.Add(fetch.source.TTL),
-			source: fetch.source,
-		})
+		if !f.applyFetchedConfig(fetch, cfg, now.Add(fetch.source.TTL)) {
+			continue
+		}
 		updates[fetch.source.RequestKey] = struct{}{}
 	}
 
 	if len(updates) > 0 {
-		for _, subscriber := range f.subscribers {
-			subscriber <- updates
+		f.notifySubscribers(updates)
+	}
+}
+
+func (f *ProviderFetcher) popDueFetches(now time.Time) []fetchAt {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var pending []fetchAt
+	for {
+		next := f.schedule.Peek()
+		if next == nil || next.at.After(now) {
+			return pending
 		}
+		pending = append(pending, heap.Pop(&f.schedule).(fetchAt))
+	}
+}
+
+func (f *ProviderFetcher) reschedule(fetch fetchAt, at time.Time, retryAttempt int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	current, ok := f.sources[fetch.source.RequestKey]
+	if !ok || current != fetch.source || fetch.source.Deleted {
+		return
+	}
+	heap.Push(&f.schedule, fetchAt{
+		at:           at,
+		source:       fetch.source,
+		retryAttempt: retryAttempt,
+	})
+}
+
+func (f *ProviderFetcher) applyFetchedConfig(fetch fetchAt, cfg ProviderConfig, next time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	current, ok := f.sources[fetch.source.RequestKey]
+	if !ok || current != fetch.source || fetch.source.Deleted {
+		return false
+	}
+
+	f.cache.Set(fetch.source.RequestKey, cfg)
+	heap.Push(&f.schedule, fetchAt{
+		at:     next,
+		source: fetch.source,
+	})
+	return true
+}
+
+func (f *ProviderFetcher) notifySubscribers(updates map[remotehttp.FetchKey]struct{}) {
+	f.mu.Lock()
+	subscribers := append([]chan map[remotehttp.FetchKey]struct{}(nil), f.subscribers...)
+	f.mu.Unlock()
+
+	for _, subscriber := range subscribers {
+		subscriber <- updates
 	}
 }
 

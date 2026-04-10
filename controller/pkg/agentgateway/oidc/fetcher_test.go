@@ -1,6 +1,7 @@
 package oidc
 
 import (
+	"container/heap"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -175,4 +176,122 @@ func TestParseTokenEndpointAuthMethodsDefaultsAndRejectsUnsupported(t *testing.T
 	_, err = parseTokenEndpointAuthMethods([]string{"private_key_jwt", "none"})
 	require.Error(t, err)
 	require.True(t, strings.Contains(err.Error(), "clientSecretBasic") || strings.Contains(err.Error(), "clientSecretPost"))
+}
+
+func TestMaybeFetchProvidersDoesNotHoldFetcherLockDuringNetworkIO(t *testing.T) {
+	t.Parallel()
+
+	jwksJSON := testJWKSJSON(t)
+	fetchStarted := make(chan struct{})
+	releaseFetch := make(chan struct{})
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			close(fetchStarted)
+			<-releaseFetch
+			_, _ = w.Write([]byte(`{
+				"issuer":"` + testOIDCIssuer + `",
+				"authorization_endpoint":"` + testOIDCIssuer + `/authorize",
+				"token_endpoint":"` + testOIDCIssuer + `/token",
+				"jwks_uri":"` + server.URL + `/jwks",
+				"token_endpoint_auth_methods_supported":["client_secret_basic"]
+			}`))
+		case "/jwks":
+			_, _ = w.Write([]byte(jwksJSON))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	fetcher := NewProviderFetcher(NewProviderCache())
+	require.NoError(t, fetcher.AddOrUpdateSource(ProviderSource{
+		Issuer:     testOIDCIssuer,
+		RequestKey: remotehttp.FetchKey("blocking-fetch"),
+		Target: remotehttp.FetchTarget{
+			URL: server.URL + "/.well-known/openid-configuration",
+		},
+		TLSConfig: testTLSConfig(server),
+		TTL:       time.Minute,
+	}))
+
+	fetchDone := make(chan struct{})
+	go func() {
+		defer close(fetchDone)
+		fetcher.maybeFetchProviders(context.Background())
+	}()
+
+	select {
+	case <-fetchStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for discovery fetch to start")
+	}
+
+	updateDone := make(chan error, 1)
+	go func() {
+		updateDone <- fetcher.AddOrUpdateSource(ProviderSource{
+			Issuer:     testOIDCIssuer,
+			RequestKey: remotehttp.FetchKey("second-source"),
+			Target: remotehttp.FetchTarget{
+				URL: "https://issuer.example.com/.well-known/openid-configuration",
+			},
+			TTL: time.Minute,
+		})
+	}()
+
+	select {
+	case err := <-updateDone:
+		require.NoError(t, err)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("AddOrUpdateSource blocked behind an in-flight provider fetch")
+	}
+
+	close(releaseFetch)
+
+	select {
+	case <-fetchDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for provider fetch to complete")
+	}
+
+	_, ok := fetcher.cache.Get(remotehttp.FetchKey("blocking-fetch"))
+	require.True(t, ok, "expected fetched provider config to be cached")
+}
+
+func TestMaybeFetchProvidersSkipsStaleResultsAfterSourceReplacement(t *testing.T) {
+	t.Parallel()
+
+	fetcher := NewProviderFetcher(NewProviderCache())
+
+	oldSource := ProviderSource{
+		Issuer:     testOIDCIssuer,
+		RequestKey: remotehttp.FetchKey("shared-key"),
+		Target:     remotehttp.FetchTarget{URL: "https://issuer.example.com/.well-known/openid-configuration"},
+		TTL:        time.Minute,
+	}
+	require.NoError(t, fetcher.AddOrUpdateSource(oldSource))
+
+	fetcher.mu.Lock()
+	staleFetch := heap.Pop(&fetcher.schedule).(fetchAt)
+	fetcher.mu.Unlock()
+
+	replacement := oldSource
+	replacement.Target.URL = "https://issuer.example.com/alternate"
+	require.NoError(t, fetcher.AddOrUpdateSource(replacement))
+
+	require.False(t, fetcher.applyFetchedConfig(staleFetch, ProviderConfig{
+		RequestKey:            oldSource.RequestKey,
+		DiscoveryURL:          oldSource.Target.URL,
+		FetchedAt:             time.Now().UTC(),
+		Issuer:                testOIDCIssuer,
+		AuthorizationEndpoint: testOIDCIssuer + "/authorize",
+		TokenEndpoint:         testOIDCIssuer + "/token",
+		TokenEndpointAuth:     "clientSecretBasic",
+		JwksURI:               testOIDCIssuer + "/jwks",
+		JwksInline:            testJWKSJSON(t),
+	}, time.Now().Add(time.Minute)))
+
+	_, ok := fetcher.cache.Get(oldSource.RequestKey)
+	require.False(t, ok, "stale fetch result should not populate the cache")
 }
