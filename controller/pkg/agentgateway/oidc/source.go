@@ -65,3 +65,8 @@ func BuildProviderSource(
 		TTL:        ttl,
 	}, nil
 }
+
+type ProviderSourceChange struct {
+	ProviderSource
+	InitialSyncComplete bool
+}

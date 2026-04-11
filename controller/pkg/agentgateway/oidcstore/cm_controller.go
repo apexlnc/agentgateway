@@ -10,6 +10,7 @@ import (
 	"istio.io/istio/pkg/kube/kclient"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
@@ -65,10 +66,6 @@ func (c *ConfigMapsController) Start(ctx context.Context) error {
 	cmLogger.Info("waiting for cache to sync")
 	c.apiClient.Core().WaitForCacheSync("kube oidc store ConfigMap syncer", ctx.Done(), c.waitForSync...)
 
-	c.cmClient.AddEventHandler(controllers.FromEventHandler(func(o controllers.Event) {
-		c.eventQueue.AddObject(o.Latest())
-	}))
-
 	go func() {
 		for {
 			select {
@@ -81,6 +78,17 @@ func (c *ConfigMapsController) Start(ctx context.Context) error {
 			}
 		}
 	}()
+
+	if !c.store.WaitForSourceSync(ctx) {
+		return nil
+	}
+
+	c.cmClient.AddEventHandler(controllers.FromEventHandler(func(o controllers.Event) {
+		c.eventQueue.AddObject(o.Latest())
+	}))
+	for _, cm := range c.cmClient.List(c.deploymentNamespace, labels.Everything()) {
+		c.eventQueue.AddObject(cm)
+	}
 	go c.eventQueue.Run(ctx.Done())
 
 	<-ctx.Done()

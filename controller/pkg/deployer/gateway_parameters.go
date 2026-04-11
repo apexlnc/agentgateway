@@ -10,7 +10,9 @@ import (
 	"strings"
 
 	"helm.sh/helm/v3/pkg/chart"
+	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/kclient"
+	"istio.io/istio/pkg/kube/krt"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +32,7 @@ type Inputs struct {
 	ControlPlane               ControlPlaneInfo
 	NoListenersDummyPort       uint16
 	AgwCollections             *agwplugins.AgwCollections
+	TrafficOIDCGateways        krt.Collection[agwplugins.GatewayTrafficOIDC]
 	AgentgatewayClassName      string
 	AgentgatewayControllerName string
 }
@@ -118,6 +121,15 @@ func (gp *GatewayParameters) GetCacheSyncHandlers() []cache.InformerSynced {
 	return handlers
 }
 
+func (gp *GatewayParameters) RegisterGatewayChangeHandlers(queue controllers.Queue) {
+	if gp.helmValuesGeneratorOverride != nil {
+		return
+	}
+	if gp.agwHelmValuesGenerator != nil {
+		gp.agwHelmValuesGenerator.RegisterGatewayChangeHandlers(queue)
+	}
+}
+
 // PostProcessObjects implements deployer.ObjectPostProcessor.
 // It applies GatewayParameters or AgentgatewayParameters overlays to the rendered objects.
 // When both GatewayClass and Gateway have parameters, the overlays
@@ -189,7 +201,7 @@ func (gp *GatewayParameters) PostProcessObjects(ctx context.Context, obj client.
 			}
 			rendered = append(rendered, sessionKeySecret)
 		}
-		if usesManagedOIDCCookieSecretResolvedParameters(resolved) {
+		if usesManagedOIDCCookieSecretResolvedParameters(resolved) && gp.agwHelmValuesGenerator.gatewayRequiresOIDCCookieSecret(gw) {
 			oidcCookieSecret, err := gp.agwHelmValuesGenerator.buildOIDCCookieSecret(
 				ctx,
 				gw,

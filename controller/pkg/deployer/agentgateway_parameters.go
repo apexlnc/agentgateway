@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"istio.io/istio/pkg/kube/kclient"
+	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/util/smallset"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -169,17 +170,18 @@ func (a *AgentgatewayParametersApplier) ApplyOverlaysToObjects(objs []client.Obj
 }
 
 type agentgatewayParametersHelmValuesGenerator struct {
-	agwParamClient kclient.Client[*agentgateway.AgentgatewayParameters]
-	gwClassClient  kclient.Client[*gwv1.GatewayClass]
-	secretClient   kclient.Client[*corev1.Secret]
-	inputs         *Inputs
-	sessionKeyGen  func() (string, error)
-	oidcCookieGen  func() (string, error)
+	agwParamClient       kclient.Client[*agentgateway.AgentgatewayParameters]
+	gwClassClient        kclient.Client[*gwv1.GatewayClass]
+	secretClient         kclient.Client[*corev1.Secret]
+	oidcRequiredGateways krt.Collection[oidcGatewayUsage]
+	inputs               *Inputs
+	sessionKeyGen        func() (string, error)
+	oidcCookieGen        func() (string, error)
 }
 
 func newAgentgatewayParametersHelmValuesGenerator(cli apiclient.Client, inputs *Inputs) *agentgatewayParametersHelmValuesGenerator {
 	filter := kclient.Filter{ObjectFilter: cli.ObjectFilter()}
-	return &agentgatewayParametersHelmValuesGenerator{
+	g := &agentgatewayParametersHelmValuesGenerator{
 		agwParamClient: kclient.NewFilteredDelayed[*agentgateway.AgentgatewayParameters](cli, wellknown.AgentgatewayParametersGVR, filter),
 		gwClassClient:  kclient.NewFilteredDelayed[*gwv1.GatewayClass](cli, wellknown.GatewayClassGVR, filter),
 		secretClient: kclient.NewFiltered[*corev1.Secret](cli, kclient.Filter{
@@ -190,6 +192,11 @@ func newAgentgatewayParametersHelmValuesGenerator(cli apiclient.Client, inputs *
 		sessionKeyGen: generateSessionKey,
 		oidcCookieGen: generateSessionKey,
 	}
+	if inputs != nil && inputs.AgwCollections != nil {
+		agwParamCollection := krt.WrapClient(g.agwParamClient, inputs.AgwCollections.KrtOpts.ToOptions("deployer/AgentgatewayParameters")...)
+		g.oidcRequiredGateways = buildOIDCRequiredGatewaysCollection(inputs, agwParamCollection)
+	}
+	return g
 }
 
 // GetValues returns helm values derived from AgentgatewayParameters.
@@ -220,7 +227,7 @@ func (g *agentgatewayParametersHelmValuesGenerator) GetValues(ctx context.Contex
 		applier.ApplyToHelmValues(vals)
 	}
 	applyManagedSessionKeyDefaults(vals.Agentgateway, gw.Name)
-	applyManagedOIDCCookieSecretDefaults(vals.Agentgateway, gw.Name)
+	applyManagedOIDCCookieSecretDefaults(vals.Agentgateway, gw.Name, g.gatewayRequiresOIDCCookieSecret(gw))
 
 	if g.inputs.ControlPlane.XdsTLS {
 		if err := injectXdsCACertificate(g.inputs.ControlPlane.XdsTlsCaPath, vals); err != nil {
@@ -246,50 +253,15 @@ type resolvedParameters struct {
 // It returns both GatewayClass-level and Gateway-level
 // separately to support ordered overlay merging (GatewayClass first, then Gateway).
 func (g *agentgatewayParametersHelmValuesGenerator) resolveParameters(gw *gwv1.Gateway) (*resolvedParameters, error) {
-	result := &resolvedParameters{}
-
-	// Get GatewayClass parameters first
-	gwc := g.gwClassClient.Get(string(gw.Spec.GatewayClassName), metav1.NamespaceNone)
-	if gwc != nil && gwc.Spec.ParametersRef != nil {
-		ref := gwc.Spec.ParametersRef
-
-		// Check for AgentgatewayParameters on GatewayClass
-		if ref.Group == agentgateway.GroupName && string(ref.Kind) == wellknown.AgentgatewayParametersGVK.Kind {
-			agwpNamespace := ""
-			if ref.Namespace != nil {
-				agwpNamespace = string(*ref.Namespace)
-			}
-			agwp := g.agwParamClient.Get(ref.Name, agwpNamespace)
-			if agwp == nil {
-				return nil, fmt.Errorf("for GatewayClass %s, AgentgatewayParameters %s/%s not found",
-					gwc.GetName(), agwpNamespace, ref.Name)
-			}
-			result.gatewayClassAGWP = agwp
-		} else {
-			return nil, fmt.Errorf("the GatewayClass %s references parameters of a type other than AgentgatewayParameters: %s",
-				gwc.GetName(), ref.Name)
-		}
-	}
-
-	// Check if Gateway has its own parametersRef
-	if gw.Spec.Infrastructure != nil && gw.Spec.Infrastructure.ParametersRef != nil {
-		ref := gw.Spec.Infrastructure.ParametersRef
-
-		if ref.Group == agentgateway.GroupName && ref.Kind == gwv1.Kind(wellknown.AgentgatewayParametersGVK.Kind) {
-			agwp := g.agwParamClient.Get(ref.Name, gw.GetNamespace())
-			if agwp == nil {
-				return nil, fmt.Errorf("AgentgatewayParameters %s/%s not found for Gateway %s/%s",
-					gw.GetNamespace(), ref.Name, gw.GetNamespace(), gw.GetName())
-			}
-			result.gatewayAGWP = agwp
-			return result, nil
-		}
-
-		return nil, fmt.Errorf("infrastructure.parametersRef on Gateway %s/%s references unsupported type: group=%s kind=%s; use AgentgatewayParameters instead",
-			gw.GetNamespace(), gw.GetName(), ref.Group, ref.Kind)
-	}
-
-	return result, nil
+	return resolveParametersWithLookup(
+		gw,
+		func(name string) *gwv1.GatewayClass {
+			return g.gwClassClient.Get(name, metav1.NamespaceNone)
+		},
+		func(name, namespace string) *agentgateway.AgentgatewayParameters {
+			return g.agwParamClient.Get(name, namespace)
+		},
+	)
 }
 
 func usesManagedSessionKeyResolvedParameters(resolved *resolvedParameters) bool {
@@ -335,8 +307,12 @@ func applyManagedSessionKeyDefaults(gtw *AgentgatewayHelmGateway, gatewayName st
 	gtw.SessionKeySecretName = &sessionKeySecretName
 }
 
-func applyManagedOIDCCookieSecretDefaults(gtw *AgentgatewayHelmGateway, gatewayName string) {
+func applyManagedOIDCCookieSecretDefaults(gtw *AgentgatewayHelmGateway, gatewayName string, enabled bool) {
 	if gtw == nil {
+		return
+	}
+	if !enabled {
+		gtw.OIDCCookieSecretName = nil
 		return
 	}
 	if !usesManagedOIDCCookieSecretEnv(gtw.Env) {
@@ -349,7 +325,11 @@ func applyManagedOIDCCookieSecretDefaults(gtw *AgentgatewayHelmGateway, gatewayN
 }
 
 func (g *agentgatewayParametersHelmValuesGenerator) GetCacheSyncHandlers() []cache.InformerSynced {
-	return []cache.InformerSynced{g.agwParamClient.HasSynced, g.gwClassClient.HasSynced, g.secretClient.HasSynced}
+	handlers := []cache.InformerSynced{g.agwParamClient.HasSynced, g.gwClassClient.HasSynced, g.secretClient.HasSynced}
+	if g.oidcRequiredGateways != nil {
+		handlers = append(handlers, g.oidcRequiredGateways.HasSynced)
+	}
+	return handlers
 }
 
 // GetResolvedParametersForGateway returns both the GatewayClass-level and Gateway-level
@@ -357,6 +337,52 @@ func (g *agentgatewayParametersHelmValuesGenerator) GetCacheSyncHandlers() []cac
 // in order (GatewayClass first, then Gateway).
 func (g *agentgatewayParametersHelmValuesGenerator) GetResolvedParametersForGateway(gw *gwv1.Gateway) (*resolvedParameters, error) {
 	return g.resolveParameters(gw)
+}
+
+func resolveParametersWithLookup(
+	gw *gwv1.Gateway,
+	getGatewayClass func(name string) *gwv1.GatewayClass,
+	getAgentgatewayParameters func(name, namespace string) *agentgateway.AgentgatewayParameters,
+) (*resolvedParameters, error) {
+	result := &resolvedParameters{}
+
+	gwc := getGatewayClass(string(gw.Spec.GatewayClassName))
+	if gwc != nil && gwc.Spec.ParametersRef != nil {
+		ref := gwc.Spec.ParametersRef
+		if ref.Group == agentgateway.GroupName && string(ref.Kind) == wellknown.AgentgatewayParametersGVK.Kind {
+			agwpNamespace := ""
+			if ref.Namespace != nil {
+				agwpNamespace = string(*ref.Namespace)
+			}
+			agwp := getAgentgatewayParameters(ref.Name, agwpNamespace)
+			if agwp == nil {
+				return nil, fmt.Errorf("for GatewayClass %s, AgentgatewayParameters %s/%s not found",
+					gwc.GetName(), agwpNamespace, ref.Name)
+			}
+			result.gatewayClassAGWP = agwp
+		} else {
+			return nil, fmt.Errorf("the GatewayClass %s references parameters of a type other than AgentgatewayParameters: %s",
+				gwc.GetName(), ref.Name)
+		}
+	}
+
+	if gw.Spec.Infrastructure != nil && gw.Spec.Infrastructure.ParametersRef != nil {
+		ref := gw.Spec.Infrastructure.ParametersRef
+		if ref.Group == agentgateway.GroupName && ref.Kind == gwv1.Kind(wellknown.AgentgatewayParametersGVK.Kind) {
+			agwp := getAgentgatewayParameters(ref.Name, gw.GetNamespace())
+			if agwp == nil {
+				return nil, fmt.Errorf("AgentgatewayParameters %s/%s not found for Gateway %s/%s",
+					gw.GetNamespace(), ref.Name, gw.GetNamespace(), gw.GetName())
+			}
+			result.gatewayAGWP = agwp
+			return result, nil
+		}
+
+		return nil, fmt.Errorf("infrastructure.parametersRef on Gateway %s/%s references unsupported type: group=%s kind=%s; use AgentgatewayParameters instead",
+			gw.GetNamespace(), gw.GetName(), ref.Group, ref.Kind)
+	}
+
+	return result, nil
 }
 func DefaultGatewayIRGetter(gw *gwv1.Gateway, agwCollections *agwplugins.AgwCollections) *collections.GatewayForDeployer {
 	gwKey := collections.ObjectSource{

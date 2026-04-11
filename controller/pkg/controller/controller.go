@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+	"istio.io/istio/pkg/kube/krt"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -34,6 +35,8 @@ type GatewayConfig struct {
 	ControlPlane deployer.ControlPlaneInfo
 	// AgwCollections used to fetch ir.Gateways for the deployer to generate the ports for the proxy service
 	AgwCollections *agwplugins.AgwCollections
+	// TrafficOIDCGateways is the canonical syncer output for gateways with compiled traffic OIDC policy.
+	TrafficOIDCGateways krt.Collection[agwplugins.GatewayTrafficOIDC]
 	// AgentgatewayClassName is the configured agent gateway class name.
 	AgentgatewayClassName string
 	// Additional GatewayClass definitions to support extending to other well-known gateway classes
@@ -81,6 +84,7 @@ func watchGw(
 		ControlPlane:               cfg.ControlPlane,
 		NoListenersDummyPort:       cfg.AgwCollections.Settings.NoListenersDummyPort,
 		AgwCollections:             cfg.AgwCollections,
+		TrafficOIDCGateways:        cfg.TrafficOIDCGateways,
 		AgentgatewayClassName:      cfg.AgentgatewayClassName,
 		AgentgatewayControllerName: cfg.AgwControllerName,
 	}

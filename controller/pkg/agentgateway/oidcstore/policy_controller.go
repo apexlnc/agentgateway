@@ -20,14 +20,14 @@ var policyLogger = logging.New("oidc_store_policy_controller")
 type PolicyController struct {
 	agw           *plugins.AgwCollections
 	sources       krt.Collection[oidc.ProviderSource]
-	sourceChanges chan oidc.ProviderSource
+	sourceChanges chan oidc.ProviderSourceChange
 	resolver      *remotehttp.Resolver
 }
 
 func NewPolicyController(agw *plugins.AgwCollections, resolver *remotehttp.Resolver) *PolicyController {
 	return &PolicyController{
 		agw:           agw,
-		sourceChanges: make(chan oidc.ProviderSource),
+		sourceChanges: make(chan oidc.ProviderSourceChange, 1024),
 		resolver:      resolver,
 	}
 }
@@ -48,16 +48,26 @@ func (c *PolicyController) Init(_ context.Context) {
 
 func (c *PolicyController) Start(ctx context.Context) error {
 	policyLogger.Info("starting oidc store policy controller")
-	c.sources.Register(func(event krt.Event[oidc.ProviderSource]) {
+	reg := c.sources.Register(func(event krt.Event[oidc.ProviderSource]) {
+		change := oidc.ProviderSourceChange{}
 		switch event.Event {
 		case controllers.EventAdd, controllers.EventUpdate:
-			c.sourceChanges <- *event.New
+			change.ProviderSource = *event.New
 		case controllers.EventDelete:
 			deleted := *event.Old
 			deleted.Deleted = true
-			c.sourceChanges <- deleted
+			change.ProviderSource = deleted
 		}
+		c.sourceChanges <- change
 	})
+	if !reg.WaitUntilSynced(ctx.Done()) {
+		return nil
+	}
+	select {
+	case c.sourceChanges <- oidc.ProviderSourceChange{InitialSyncComplete: true}:
+	case <-ctx.Done():
+		return nil
+	}
 
 	<-ctx.Done()
 	return nil
@@ -67,7 +77,7 @@ func (c *PolicyController) NeedLeaderElection() bool {
 	return true
 }
 
-func (c *PolicyController) SourceChanges() chan oidc.ProviderSource {
+func (c *PolicyController) SourceChanges() chan oidc.ProviderSourceChange {
 	return c.sourceChanges
 }
 

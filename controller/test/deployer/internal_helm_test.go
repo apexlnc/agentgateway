@@ -88,14 +88,16 @@ wIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQBtestcertdata
 				t.Helper()
 				assert.Contains(t, outputYaml, "name: SESSION_KEY",
 					"deployment should inject the managed session key via env")
-				assert.Contains(t, outputYaml, "name: OIDC_COOKIE_SECRET",
-					"deployment should inject the managed oidc cookie secret via env")
 				assert.Contains(t, outputYaml, "secretKeyRef:",
 					"deployment should reference the session key Secret from env")
 				assert.Contains(t, outputYaml, "name: gw-session-key",
 					"deployment should reference the controller-managed session key Secret")
-				assert.Contains(t, outputYaml, "name: gw-oidc-cookie-secret",
-					"deployment should reference the controller-managed oidc cookie Secret")
+				assert.NotContains(t, outputYaml, "name: OIDC_COOKIE_SECRET",
+					"deployment should not inject the managed oidc cookie secret env when OIDC is not configured")
+				assert.NotContains(t, outputYaml, "name: gw-oidc-cookie-secret",
+					"rendered objects should not include the controller-managed oidc cookie Secret when OIDC is not configured")
+				assert.NotContains(t, outputYaml, "checksum/oidc-cookie-secret:",
+					"deployment pod template should not roll on an oidc cookie secret when OIDC is not configured")
 				assert.Contains(t, outputYaml, "kind: Secret",
 					"rendered objects should include the controller-managed session key Secret")
 				assert.Contains(t, outputYaml, "type: Opaque",
@@ -174,6 +176,19 @@ wIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQBtestcertdata
 					"binds config should be present in ConfigMap as a top-level config.yaml key")
 				assert.Contains(t, outputYaml, "port: 3000",
 					"binds port 3000 should be present")
+			},
+		},
+		{
+			Name:      "agentgateway rawConfig with local oidc",
+			InputFile: "agentgateway-rawconfig-oidc",
+			Validate: func(t *testing.T, outputYaml string) {
+				t.Helper()
+				assert.Contains(t, outputYaml, "name: OIDC_COOKIE_SECRET",
+					"deployment should inject the managed oidc cookie secret env when local OIDC is configured")
+				assert.Contains(t, outputYaml, "name: gw-oidc-cookie-secret",
+					"rendered objects should include the controller-managed oidc cookie Secret when local OIDC is configured")
+				assert.Contains(t, outputYaml, "checksum/oidc-cookie-secret: 2a8abfa8cb9906290437854193ca6bca41d4d4e26d1d454bd66a35158095e737",
+					"deployment pod template should roll when the managed oidc cookie secret changes")
 			},
 		},
 		{

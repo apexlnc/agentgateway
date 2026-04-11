@@ -773,6 +773,9 @@ type OIDCAuthentication struct {
 
 	// `redirectURI` is the absolute callback URI handled by the gateway.
 	// +required
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Format=uri
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('http://') || self.startsWith('https://')",message="redirectURI must be an absolute http(s) URL"
 	RedirectURI string `json:"redirectURI"`
 
 	// Additional OAuth2 scopes to request. `openid` is always added by the runtime.
@@ -782,6 +785,11 @@ type OIDCAuthentication struct {
 	Scopes []string `json:"scopes,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!has(self.path) || self.path.startsWith('/')",message="path must start with /"
+// +kubebuilder:validation:XValidation:rule="!has(self.backendRef) || !has(self.backendRef.kind) || self.backendRef.kind in ['Service', 'AgentgatewayBackend']",message="backendRef.kind must be Service or AgentgatewayBackend"
+// +kubebuilder:validation:XValidation:rule="!has(self.backendRef) || !has(self.backendRef.group) || has(self.backendRef.kind) || self.backendRef.group == ”",message="backendRef.group requires backendRef.kind when set"
+// +kubebuilder:validation:XValidation:rule="!has(self.backendRef) || !has(self.backendRef.kind) || self.backendRef.kind != 'Service' || !has(self.backendRef.group) || self.backendRef.group == ”",message="backendRef.group must be empty when backendRef.kind is Service"
+// +kubebuilder:validation:XValidation:rule="!has(self.backendRef) || !has(self.backendRef.kind) || self.backendRef.kind != 'AgentgatewayBackend' || (has(self.backendRef.group) && self.backendRef.group == 'agentgateway.dev')",message="backendRef.group must be agentgateway.dev when backendRef.kind is AgentgatewayBackend"
 type OIDCDiscovery struct {
 	// `backendRef` optionally performs discovery against a referenced Service or
 	// static AgentgatewayBackend instead of the issuer URL directly.
@@ -791,6 +799,8 @@ type OIDCDiscovery struct {
 	// `path` is the relative discovery path. If unset, discovery defaults to
 	// `/.well-known/openid-configuration`.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2000
 	Path *string `json:"path,omitempty"`
 
 	// +optional

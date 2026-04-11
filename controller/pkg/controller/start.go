@@ -232,6 +232,7 @@ func (c *ControllerBuilder) Build() (*syncer.Syncer, error) {
 			XdsTlsCaPath: apisettings.TLSRootCAPath,
 		},
 		AgwCollections:        c.cfg.AgwCollections,
+		TrafficOIDCGateways:   c.agwSyncer.Outputs.TrafficOIDCGateways,
 		AgentgatewayClassName: c.cfg.AgentgatewayClassName,
 		CertWatcher:           c.cfg.SetupOpts.CertWatcher,
 	}

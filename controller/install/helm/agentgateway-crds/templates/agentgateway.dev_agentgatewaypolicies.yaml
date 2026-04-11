@@ -7911,8 +7911,32 @@ spec:
                             description: |-
                               `path` is the relative discovery path. If unset, discovery defaults to
                               `/.well-known/openid-configuration`.
+                            maxLength: 2000
+                            minLength: 1
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: path must start with /
+                          rule: '!has(self.path) || self.path.startsWith(''/'')'
+                        - message: backendRef.kind must be Service or AgentgatewayBackend
+                          rule: '!has(self.backendRef) || !has(self.backendRef.kind)
+                            || self.backendRef.kind in [''Service'', ''AgentgatewayBackend'']'
+                        - message: backendRef.group requires backendRef.kind when
+                            set
+                          rule: '!has(self.backendRef) || !has(self.backendRef.group)
+                            || has(self.backendRef.kind) || self.backendRef.group
+                            == '''''
+                        - message: backendRef.group must be empty when backendRef.kind
+                            is Service
+                          rule: '!has(self.backendRef) || !has(self.backendRef.kind)
+                            || self.backendRef.kind != ''Service'' || !has(self.backendRef.group)
+                            || self.backendRef.group == '''''
+                        - message: backendRef.group must be agentgateway.dev when
+                            backendRef.kind is AgentgatewayBackend
+                          rule: '!has(self.backendRef) || !has(self.backendRef.kind)
+                            || self.backendRef.kind != ''AgentgatewayBackend'' ||
+                            (has(self.backendRef.group) && self.backendRef.group ==
+                            ''agentgateway.dev'')'
                       issuer:
                         description: '`issuer` is used for issuer validation and default
                           discovery URL derivation.'
@@ -7922,7 +7946,12 @@ spec:
                       redirectURI:
                         description: '`redirectURI` is the absolute callback URI handled
                           by the gateway.'
+                        format: uri
+                        maxLength: 2048
                         type: string
+                        x-kubernetes-validations:
+                        - message: redirectURI must be an absolute http(s) URL
+                          rule: self.startsWith('http://') || self.startsWith('https://')
                       scopes:
                         description: Additional OAuth2 scopes to request. `openid`
                           is always added by the runtime.
