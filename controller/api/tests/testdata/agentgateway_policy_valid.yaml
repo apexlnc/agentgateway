@@ -258,6 +258,29 @@ spec:
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayPolicy
 metadata:
+  name: traffic-oidc-valid
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: dummy
+  traffic:
+    oidcAuthentication:
+      issuer: https://issuer.example.com
+      discovery:
+        backendRef:
+          kind: Service
+          name: dummy-idp
+          port: 8443
+        path: /.well-known/openid-configuration
+      clientId: client-id
+      clientSecretRef:
+        name: oidc-client
+      redirectURI: https://app.example.com/oauth/callback
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
   name: traffic-extproc
 spec:
   targetRefs:

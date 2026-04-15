@@ -45,7 +45,7 @@ func (s ProviderSource) Equals(other ProviderSource) bool {
 	return s.OwnerKey == other.OwnerKey &&
 		s.Issuer == other.Issuer &&
 		s.RequestKey == other.RequestKey &&
-		s.Target == other.Target &&
+		reflect.DeepEqual(s.Target, other.Target) &&
 		s.TTL == other.TTL &&
 		s.Deleted == other.Deleted &&
 		reflect.DeepEqual(s.TLSConfig, other.TLSConfig)

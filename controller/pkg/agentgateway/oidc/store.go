@@ -18,17 +18,19 @@ type OIDCStore struct {
 	providerCache       *providerCache
 	providerFetcher     *ProviderFetcher
 	configMapSyncer     *configMapSyncer
-	sourceChanges       <-chan ProviderSource
+	sourceChanges       <-chan ProviderSourceChange
 
 	mu             sync.Mutex
 	ownerToSource  map[OwnerKey]ProviderSource
 	requestToOwner map[remotehttp.FetchKey]map[OwnerKey]struct{}
+	sourceSyncDone chan struct{}
+	sourceSyncOnce sync.Once
 }
 
 func BuildOIDCStore(
 	cli apiclient.Client,
 	krtOpts krtutil.KrtOptions,
-	sourceChanges <-chan ProviderSource,
+	sourceChanges <-chan ProviderSourceChange,
 	providerStorePrefix, deploymentNamespace string,
 ) *OIDCStore {
 	cache := NewProviderCache()
@@ -40,6 +42,7 @@ func BuildOIDCStore(
 		sourceChanges:       sourceChanges,
 		ownerToSource:       make(map[OwnerKey]ProviderSource),
 		requestToOwner:      make(map[remotehttp.FetchKey]map[OwnerKey]struct{}),
+		sourceSyncDone:      make(chan struct{}),
 	}
 }
 
@@ -71,15 +74,38 @@ func (s *OIDCStore) ProviderByConfigMapName(name string) (remotehttp.FetchKey, P
 		return "", ProviderConfig{}, false
 	}
 	key := remotehttp.FetchKey(name[len(prefix):])
+
+	s.mu.Lock()
+	_, live := s.requestToOwner[key]
+	s.mu.Unlock()
+	if !live {
+		return key, ProviderConfig{}, false
+	}
+
 	cfg, ok := s.providerCache.Get(key)
 	return key, cfg, ok
+}
+
+func (s *OIDCStore) WaitForSourceSync(ctx context.Context) bool {
+	select {
+	case <-s.sourceSyncDone:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (s *OIDCStore) updateSources(ctx context.Context) {
 	for {
 		select {
-		case source := <-s.sourceChanges:
-			s.handleSourceChange(source)
+		case change := <-s.sourceChanges:
+			if change.InitialSyncComplete {
+				s.sourceSyncOnce.Do(func() {
+					close(s.sourceSyncDone)
+				})
+				continue
+			}
+			s.handleSourceChange(change.ProviderSource)
 		case <-ctx.Done():
 			return
 		}

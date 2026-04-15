@@ -10,6 +10,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/ptr"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -155,12 +156,12 @@ func (dt DeployerTester) RunHelmChartTest(t *testing.T, tt HelmTestCase, scheme 
 	filePath := filepath.Join(dir, "testdata/", tt.InputFile)
 	outputFile := filePath + "-out.yaml"
 
-	_, gtw := ExtractCommonObjs(t, objs)
+	commonObjs, gtw := ExtractCommonObjs(t, objs)
 	if gtw == nil {
 		t.Log("No Gateway found in test files, failing...")
 		t.FailNow()
 	}
-	agwCols := NewAgwCols(t)
+	agwCols := NewAgwCols(t, commonObjs...)
 	inputs := DefaultDeployerInputs(dt, agwCols)
 	if tt.Inputs != nil {
 		inputs = tt.Inputs
@@ -190,6 +191,7 @@ func (dt DeployerTester) RunHelmChartTest(t *testing.T, tt HelmTestCase, scheme 
 
 	ctx := t.Context()
 	fakeClient.RunAndWait(ctx.Done())
+	kube.WaitForCacheSync("deployer test", ctx.Done(), gwParams.GetCacheSyncHandlers()...)
 
 	// Get post-processed objects (what actually gets deployed)
 	deployObjs, err := deployer.GetObjsToDeploy(ctx, gtw)

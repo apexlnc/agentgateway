@@ -10,10 +10,12 @@ import (
 func newTestOIDCStore() *OIDCStore {
 	cache := NewProviderCache()
 	return &OIDCStore{
-		providerCache:   cache,
-		providerFetcher: NewProviderFetcher(cache),
-		ownerToSource:   make(map[OwnerKey]ProviderSource),
-		requestToOwner:  make(map[remotehttp.FetchKey]map[OwnerKey]struct{}),
+		providerStorePrefix: DefaultProviderStorePrefix,
+		providerCache:       cache,
+		providerFetcher:     NewProviderFetcher(cache),
+		ownerToSource:       make(map[OwnerKey]ProviderSource),
+		requestToOwner:      make(map[remotehttp.FetchKey]map[OwnerKey]struct{}),
+		sourceSyncDone:      make(chan struct{}),
 	}
 }
 
@@ -26,6 +28,19 @@ func testProviderSource(owner OwnerKey, ttl time.Duration) ProviderSource {
 			URL: "https://issuer.example.com/.well-known/openid-configuration",
 		},
 		TTL: ttl,
+	}
+}
+
+func testProviderConfig(key remotehttp.FetchKey) ProviderConfig {
+	return ProviderConfig{
+		RequestKey:            key,
+		DiscoveryURL:          "https://issuer.example.com/.well-known/openid-configuration",
+		Issuer:                testOIDCIssuer,
+		AuthorizationEndpoint: "https://issuer.example.com/authorize",
+		TokenEndpoint:         "https://issuer.example.com/token",
+		TokenEndpointAuth:     "clientSecretBasic",
+		JwksURI:               "https://issuer.example.com/jwks",
+		JwksInline:            `{"keys":[]}`,
 	}
 }
 
@@ -64,5 +79,38 @@ func TestOIDCStoreRecomputesSharedTTLWhenOwnerIsRemoved(t *testing.T) {
 	store.handleSourceChange(ProviderSource{OwnerKey: "policy/default/a", Deleted: true})
 	if _, ok := store.providerFetcher.sources[remotehttp.FetchKey("shared-provider")]; ok {
 		t.Fatal("expected shared provider source to be removed when last owner is deleted")
+	}
+}
+
+func TestOIDCStoreProviderByConfigMapNameRequiresLiveSource(t *testing.T) {
+	t.Parallel()
+
+	store := newTestOIDCStore()
+	key := remotehttp.FetchKey("shared-provider")
+	store.providerCache.Set(key, testProviderConfig(key))
+
+	_, _, ok := store.ProviderByConfigMapName(ProviderConfigMapName(DefaultProviderStorePrefix, key))
+	if ok {
+		t.Fatal("expected cached provider without live owners to be treated as stale")
+	}
+}
+
+func TestOIDCStoreProviderByConfigMapNameReturnsLiveProvider(t *testing.T) {
+	t.Parallel()
+
+	store := newTestOIDCStore()
+	source := testProviderSource("policy/default/a", 5*time.Minute)
+	store.providerCache.Set(source.RequestKey, testProviderConfig(source.RequestKey))
+	store.handleSourceChange(source)
+
+	gotKey, gotCfg, ok := store.ProviderByConfigMapName(ProviderConfigMapName(DefaultProviderStorePrefix, source.RequestKey))
+	if !ok {
+		t.Fatal("expected live provider to be returned")
+	}
+	if gotKey != source.RequestKey {
+		t.Fatalf("expected request key %q, got %q", source.RequestKey, gotKey)
+	}
+	if gotCfg.RequestKey != source.RequestKey {
+		t.Fatalf("expected provider config for %q, got %q", source.RequestKey, gotCfg.RequestKey)
 	}
 }

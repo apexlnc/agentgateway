@@ -216,6 +216,7 @@ func NewGatewayReconciler(
 		logger.Debug("explicitly reconciling Gateway for deployer due to GatewayForDeployer change", "ref", ref)
 		r.queue.Add(ref)
 	})
+	r.gwParams.RegisterGatewayChangeHandlers(r.queue)
 
 	if controllerExtension != nil {
 		controllerExtension.Register(r.queue, agwParamEventHandler)

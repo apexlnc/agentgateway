@@ -208,8 +208,6 @@ func BuildMockPolicyContext(t test.Failer, inputs []any) plugins.PolicyCtx {
 		Collections: collections,
 		Resolver:    resolver,
 		JWKSLookup:  jwks.NewLookup(jwks.NewPersistedEntriesFromCollection(collections.ConfigMaps, jwks.DefaultJwksStorePrefix, collections.SystemNamespace), jwks.NewResolver(resolver)),
-		Resolver:    resolver,
-		JWKSLookup:  jwks.NewLookup(jwks.NewPersistedEntriesFromCollection(collections.ConfigMaps, jwks.DefaultJwksStorePrefix, collections.SystemNamespace), jwks.NewResolver(resolver)),
 	}
 }
 

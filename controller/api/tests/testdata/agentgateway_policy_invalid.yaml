@@ -253,13 +253,102 @@ kind: AgentgatewayPolicy
 metadata:
   name: traffic-extauth-invalid-failure-mode
 spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: dummy
   traffic:
     extAuth:
       backendRef:
         name: auth-server
         kind: Service
+        port: 80
       failureMode: IgnoreErrors
       grpc: {}
+---
+_err: 'redirectURI must be an absolute http(s) URL'
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: traffic-oidc-invalid-redirect-uri
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: dummy
+  traffic:
+    oidcAuthentication:
+      issuer: https://issuer.example.com
+      clientId: client-id
+      clientSecretRef:
+        name: oidc-client
+      redirectURI: urn:ietf:wg:oauth:2.0:oob
+---
+_err: 'path must start with /'
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: traffic-oidc-invalid-discovery-path
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: dummy
+  traffic:
+    oidcAuthentication:
+      issuer: https://issuer.example.com
+      discovery:
+        path: .well-known/openid-configuration
+      clientId: client-id
+      clientSecretRef:
+        name: oidc-client
+      redirectURI: https://app.example.com/oauth/callback
+---
+_err: 'backendRef.kind must be Service or AgentgatewayBackend'
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: traffic-oidc-invalid-discovery-kind
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: dummy
+  traffic:
+    oidcAuthentication:
+      issuer: https://issuer.example.com
+      discovery:
+        backendRef:
+          group: ""
+          kind: Secret
+          name: dummy-idp
+      clientId: client-id
+      clientSecretRef:
+        name: oidc-client
+      redirectURI: https://app.example.com/oauth/callback
+---
+_err: 'backendRef.group must be agentgateway.dev when backendRef.kind is AgentgatewayBackend'
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: traffic-oidc-invalid-discovery-group
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: dummy
+  traffic:
+    oidcAuthentication:
+      issuer: https://issuer.example.com
+      discovery:
+        backendRef:
+          group: gateway.networking.k8s.io
+          kind: AgentgatewayBackend
+          name: dummy-idp
+      clientId: client-id
+      clientSecretRef:
+        name: oidc-client
+      redirectURI: https://app.example.com/oauth/callback
 ---
 _err: 'failureMode: Unsupported value'
 apiVersion: agentgateway.dev/v1alpha1

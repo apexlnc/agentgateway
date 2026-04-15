@@ -117,9 +117,10 @@ func (s *Syncer) StatusCollections() *status.StatusCollections {
 }
 
 type OutputCollections struct {
-	Resources  krt.Collection[agwir.AgwResource]
-	Addresses  krt.Collection[Address]
-	References plugins.ReferenceIndex
+	Resources           krt.Collection[agwir.AgwResource]
+	Addresses           krt.Collection[Address]
+	References          plugins.ReferenceIndex
+	TrafficOIDCGateways krt.Collection[plugins.GatewayTrafficOIDC]
 }
 
 type CustomResourceCollectionsConfig struct {
@@ -158,7 +159,7 @@ func (s *Syncer) buildResourceCollections(krtopts krtutil.KrtOptions) {
 	gatewayInitialStatus, gateways := s.buildGatewayCollection(gatewayClasses, listenerSets, refGrants, krtopts)
 
 	// Build Agw resources for gateway
-	agwResources, routeAttachments, ancestorCollection := s.buildAgwResources(gateways, refGrants, krtopts)
+	agwResources, routeAttachments, ancestorCollection, trafficOIDCGateways := s.buildAgwResources(gateways, refGrants, krtopts)
 
 	gatewayFinalStatus := s.buildFinalGatewayStatus(gatewayInitialStatus, routeAttachments, krtopts)
 	status.RegisterStatus(s.statusCollections, gatewayFinalStatus, translator.GetStatus)
@@ -191,6 +192,7 @@ func (s *Syncer) buildResourceCollections(krtopts krtutil.KrtOptions) {
 	s.Outputs.Resources = agwResources
 	s.Outputs.Addresses = addresses
 	s.Outputs.References = ancestorCollection
+	s.Outputs.TrafficOIDCGateways = trafficOIDCGateways
 }
 
 func (s *Syncer) buildFinalGatewayStatus(
@@ -398,7 +400,16 @@ func (s *Syncer) buildListenerSetCollection(
 		}, krtopts.ToOptions("ListenerSets")...)
 }
 
-func (s *Syncer) buildAgwResources(gateways krt.Collection[*translator.GatewayListener], refGrants translator.ReferenceGrants, krtopts krtutil.KrtOptions) (krt.Collection[agwir.AgwResource], krt.Collection[*plugins.RouteAttachment], plugins.ReferenceIndex) {
+func (s *Syncer) buildAgwResources(
+	gateways krt.Collection[*translator.GatewayListener],
+	refGrants translator.ReferenceGrants,
+	krtopts krtutil.KrtOptions,
+) (
+	krt.Collection[agwir.AgwResource],
+	krt.Collection[*plugins.RouteAttachment],
+	plugins.ReferenceIndex,
+	krt.Collection[plugins.GatewayTrafficOIDC],
+) {
 	// filter gateway collections to only include gateways which use a built-in gateway class
 	// (resources for additional gateway classes should be created by the downstream providing them)
 	filteredGateways := krt.NewCollection(gateways, func(ctx krt.HandlerContext, gw *translator.GatewayListener) **translator.GatewayListener {
@@ -514,10 +525,11 @@ func (s *Syncer) buildAgwResources(gateways krt.Collection[*translator.GatewayLi
 	referenceIndex = referenceIndex.WithPolicyAttachments(policyReferencesIndexCollection)
 
 	// Phase 2: Build policies with the fully-populated reference index.
-	agwPolicies, policyStatuses := BuildPolicies(s.agwPlugins, referenceIndex, krtopts)
+	typedPolicies, agwPolicies, policyStatuses := BuildPolicies(s.agwPlugins, referenceIndex, krtopts)
 	for _, col := range policyStatuses {
 		status.RegisterStatus(s.statusCollections, col, translator.GetStatus)
 	}
+	trafficOIDCGateways := GatewayTrafficOIDCCollection(s.agwCollections.Gateways, typedPolicies, krtopts)
 
 	// Build the backend collection with backend+route references
 	agwBackends, agwBackendStatus := AgwBackendCollection(s.agwPlugins, referenceIndex, krtopts)
@@ -527,7 +539,7 @@ func (s *Syncer) buildAgwResources(gateways krt.Collection[*translator.GatewayLi
 	// Join all Agw resources
 	allAgwResources := krt.JoinCollection([]krt.Collection[agwir.AgwResource]{binds, listeners, agwRoutes, agwPolicies, agwBackends}, krtopts.ToOptions("Resources")...)
 
-	return allAgwResources, routeAttachments, referenceIndex
+	return allAgwResources, routeAttachments, referenceIndex, trafficOIDCGateways
 }
 
 // buildListenerFromGateway creates a listener resource from a gateway

@@ -164,7 +164,7 @@ func TestApplyManagedOIDCCookieSecretDefaults_UsesUserProvidedOIDCCookieSecret(t
 		},
 	}
 
-	applyManagedOIDCCookieSecretDefaults(vals, "gw")
+	applyManagedOIDCCookieSecretDefaults(vals, "gw", true)
 
 	assert.Nil(t, vals.OIDCCookieSecretName)
 }

@@ -240,7 +240,14 @@ func TestBackendReferencesFromPolicyIncludesOIDCDiscoveryBackend(t *testing.T) {
 		},
 	}
 
-	attachments := BackendReferencesFromPolicy(policy)
+	ctx := buildMockOIDCPolicyContext(t, []any{
+		&gwv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "default"},
+		},
+		policy,
+	})
+
+	attachments := BackendReferencesFromPolicy(ctx.Krt, policy, ctx.References)
 	if len(attachments) != 1 {
 		t.Fatalf("expected 1 backend attachment, got %d", len(attachments))
 	}
