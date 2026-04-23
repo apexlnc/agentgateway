@@ -1874,6 +1874,11 @@ fn resolved_oidc_from_proto(
 			oidc.token_endpoint_auth
 		))
 	})? {
+		ProtoAuth::Unspecified => {
+			return Err(ProtoError::Generic(
+				"oidc token_endpoint_auth must not be unspecified".into(),
+			));
+		},
 		ProtoAuth::ClientSecretBasic => http::oauth::TokenEndpointAuth::ClientSecretBasic,
 		ProtoAuth::ClientSecretPost => http::oauth::TokenEndpointAuth::ClientSecretPost,
 	};
@@ -2815,8 +2820,12 @@ mod tests {
 
 		let policy = TrafficPolicy::try_from(&spec)?;
 
-		let TrafficPolicy::PendingOidc(cfg) = policy else {
-			panic!("Expected PendingOidc, got: {policy:?}");
+		assert!(
+			matches!(&policy, TrafficPolicy::PendingOidc(_)),
+			"Expected PendingOidc, got: {policy:?}"
+		);
+		let TrafficPolicy::PendingOidc(cfg) = &policy else {
+			unreachable!("PendingOidc asserted above");
 		};
 		assert_eq!(cfg.policy_id.as_str(), "policy/default/my-policy");
 		assert_eq!(cfg.issuer, "https://issuer.example.com");
@@ -2838,6 +2847,24 @@ mod tests {
 		assert!(
 			msg.contains("invalid oidc policy_id"),
 			"unexpected error: {msg}",
+		);
+	}
+
+	#[test]
+	fn test_oidc_spec_rejects_unspecified_token_endpoint_auth() {
+		use proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth;
+
+		let mut oidc = sample_oidc_proto();
+		oidc.token_endpoint_auth = TokenEndpointAuth::Unspecified as i32;
+		let spec = proto::agent::TrafficPolicySpec {
+			phase: proto::agent::traffic_policy_spec::PolicyPhase::Route as i32,
+			kind: Some(proto::agent::traffic_policy_spec::Kind::Oidc(oidc)),
+		};
+
+		let err = TrafficPolicy::try_from(&spec).expect_err("unspecified token_endpoint_auth");
+		assert!(
+			err.to_string().contains("token_endpoint_auth"),
+			"unexpected: {err}"
 		);
 	}
 

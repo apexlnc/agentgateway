@@ -839,19 +839,22 @@ func (TrafficPolicySpec_APIKey_Mode) EnumDescriptor() ([]byte, []int) {
 type TrafficPolicySpec_OIDC_TokenEndpointAuth int32
 
 const (
-	TrafficPolicySpec_OIDC_CLIENT_SECRET_BASIC TrafficPolicySpec_OIDC_TokenEndpointAuth = 0
-	TrafficPolicySpec_OIDC_CLIENT_SECRET_POST  TrafficPolicySpec_OIDC_TokenEndpointAuth = 1
+	TrafficPolicySpec_OIDC_TOKEN_ENDPOINT_AUTH_UNSPECIFIED TrafficPolicySpec_OIDC_TokenEndpointAuth = 0
+	TrafficPolicySpec_OIDC_CLIENT_SECRET_BASIC             TrafficPolicySpec_OIDC_TokenEndpointAuth = 1
+	TrafficPolicySpec_OIDC_CLIENT_SECRET_POST              TrafficPolicySpec_OIDC_TokenEndpointAuth = 2
 )
 
 // Enum value maps for TrafficPolicySpec_OIDC_TokenEndpointAuth.
 var (
 	TrafficPolicySpec_OIDC_TokenEndpointAuth_name = map[int32]string{
-		0: "CLIENT_SECRET_BASIC",
-		1: "CLIENT_SECRET_POST",
+		0: "TOKEN_ENDPOINT_AUTH_UNSPECIFIED",
+		1: "CLIENT_SECRET_BASIC",
+		2: "CLIENT_SECRET_POST",
 	}
 	TrafficPolicySpec_OIDC_TokenEndpointAuth_value = map[string]int32{
-		"CLIENT_SECRET_BASIC": 0,
-		"CLIENT_SECRET_POST":  1,
+		"TOKEN_ENDPOINT_AUTH_UNSPECIFIED": 0,
+		"CLIENT_SECRET_BASIC":             1,
+		"CLIENT_SECRET_POST":              2,
 	}
 )
 
@@ -8623,7 +8626,7 @@ func (x *TrafficPolicySpec_OIDC) GetTokenEndpointAuth() TrafficPolicySpec_OIDC_T
 	if x != nil {
 		return x.TokenEndpointAuth
 	}
-	return TrafficPolicySpec_OIDC_CLIENT_SECRET_BASIC
+	return TrafficPolicySpec_OIDC_TOKEN_ENDPOINT_AUTH_UNSPECIFIED
 }
 
 func (x *TrafficPolicySpec_OIDC) GetJwksInline() string {
@@ -12515,7 +12518,7 @@ const file_resource_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05valueB\x06\n" +
 	"\x04kind\"?\n" +
 	"\x14JWTValidationOptions\x12'\n" +
-	"\x0frequired_claims\x18\x01 \x03(\tR\x0erequiredClaims\"\xffE\n" +
+	"\x0frequired_claims\x18\x01 \x03(\tR\x0erequiredClaims\"\xa4F\n" +
 	"\x11TrafficPolicySpec\x12N\n" +
 	"\x05phase\x18\x01 \x01(\x0e28.agentgateway.dev.resource.TrafficPolicySpec.PolicyPhaseR\x05phase\x12>\n" +
 	"\atimeout\x18\x02 \x01(\v2\".agentgateway.dev.resource.TimeoutH\x00R\atimeout\x128\n" +
@@ -12659,7 +12662,7 @@ const file_resource_proto_rawDesc = "" +
 	"\x04Mode\x12\n" +
 	"\n" +
 	"\x06STRICT\x10\x00\x12\f\n" +
-	"\bOPTIONAL\x10\x01\x1a\xf2\x03\n" +
+	"\bOPTIONAL\x10\x01\x1a\x97\x04\n" +
 	"\x04OIDC\x12\x1b\n" +
 	"\tpolicy_id\x18\x01 \x01(\tR\bpolicyId\x12\x16\n" +
 	"\x06issuer\x18\x02 \x01(\tR\x06issuer\x125\n" +
@@ -12672,10 +12675,11 @@ const file_resource_proto_rawDesc = "" +
 	"\rclient_secret\x18\b \x01(\tR\fclientSecret\x12!\n" +
 	"\fredirect_uri\x18\t \x01(\tR\vredirectUri\x12\x16\n" +
 	"\x06scopes\x18\n" +
-	" \x03(\tR\x06scopes\"D\n" +
-	"\x11TokenEndpointAuth\x12\x17\n" +
-	"\x13CLIENT_SECRET_BASIC\x10\x00\x12\x16\n" +
-	"\x12CLIENT_SECRET_POST\x10\x01\x1a\xbf\x05\n" +
+	" \x03(\tR\x06scopes\"i\n" +
+	"\x11TokenEndpointAuth\x12#\n" +
+	"\x1fTOKEN_ENDPOINT_AUTH_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13CLIENT_SECRET_BASIC\x10\x01\x12\x16\n" +
+	"\x12CLIENT_SECRET_POST\x10\x02\x1a\xbf\x05\n" +
 	"\x14TransformationPolicy\x12e\n" +
 	"\arequest\x18\x01 \x01(\v2K.agentgateway.dev.resource.TrafficPolicySpec.TransformationPolicy.TransformR\arequest\x12g\n" +
 	"\bresponse\x18\x02 \x01(\v2K.agentgateway.dev.resource.TrafficPolicySpec.TransformationPolicy.TransformR\bresponse\x1a\xd6\x03\n" +

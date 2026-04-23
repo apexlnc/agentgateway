@@ -7,6 +7,7 @@ import (
 	"istio.io/istio/pkg/kube/krt"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/agentgateway/agentgateway/api"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	oidcpkg "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 )
@@ -84,6 +85,9 @@ func TestProcessOIDCPolicyHappyPath(t *testing.T) {
 	if len(oidcSpec.Scopes) != 2 || oidcSpec.Scopes[0] != "openid" || oidcSpec.Scopes[1] != "email" {
 		t.Errorf("scopes: got %v, want [openid email]", oidcSpec.Scopes)
 	}
+	if oidcSpec.TokenEndpointAuth != api.TrafficPolicySpec_OIDC_CLIENT_SECRET_BASIC {
+		t.Errorf("token_endpoint_auth: got %v, want %v", oidcSpec.TokenEndpointAuth, api.TrafficPolicySpec_OIDC_CLIENT_SECRET_BASIC)
+	}
 	// client_secret must remain empty (delivered out-of-band in Phase 6)
 	if oidcSpec.ClientSecret != "" {
 		t.Errorf("client_secret must be empty, got %q", oidcSpec.ClientSecret)
@@ -128,6 +132,50 @@ func TestProcessOIDCPolicyKeyUsesOIDCSuffix(t *testing.T) {
 	wantKey := "traffic/default/my-policy" + oidcPolicySuffix
 	if result.Key != wantKey {
 		t.Errorf("policy key: got %q, want %q", result.Key, wantKey)
+	}
+}
+
+func TestProcessOIDCPolicyTokenEndpointAuthUsesDiscoveryValue(t *testing.T) {
+	oidcCfg := makeOIDC()
+	provider := makeDiscoveredProvider()
+	provider.TokenEndpointAuthMethodsSupported = []string{"client_secret_post"}
+
+	result, err := processOIDCPolicy(
+		PolicyCtx{Krt: krt.TestingDummyContext{}},
+		oidcCfg,
+		"traffic/default/my-policy",
+		types.NamespacedName{Namespace: "default", Name: "my-policy"},
+		stubOIDCLookup{provider: provider},
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := result.GetTraffic().GetOidc().GetTokenEndpointAuth(); got != api.TrafficPolicySpec_OIDC_CLIENT_SECRET_POST {
+		t.Errorf("token_endpoint_auth: got %v, want %v", got, api.TrafficPolicySpec_OIDC_CLIENT_SECRET_POST)
+	}
+}
+
+func TestProcessOIDCPolicyTokenEndpointAuthOverrideWins(t *testing.T) {
+	oidcCfg := makeOIDC()
+	override := "ClientSecretBasic"
+	oidcCfg.TokenEndpointAuthMethod = &override
+	provider := makeDiscoveredProvider()
+	provider.TokenEndpointAuthMethodsSupported = []string{"client_secret_post"}
+
+	result, err := processOIDCPolicy(
+		PolicyCtx{Krt: krt.TestingDummyContext{}},
+		oidcCfg,
+		"traffic/default/my-policy",
+		types.NamespacedName{Namespace: "default", Name: "my-policy"},
+		stubOIDCLookup{provider: provider},
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := result.GetTraffic().GetOidc().GetTokenEndpointAuth(); got != api.TrafficPolicySpec_OIDC_CLIENT_SECRET_BASIC {
+		t.Errorf("token_endpoint_auth: got %v, want %v", got, api.TrafficPolicySpec_OIDC_CLIENT_SECRET_BASIC)
 	}
 }
 

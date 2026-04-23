@@ -6,6 +6,7 @@ package oidc
 
 import (
 	"crypto/tls"
+	"fmt"
 	"reflect"
 	"time"
 
@@ -36,6 +37,20 @@ type DiscoveredProvider struct {
 
 // OwnerKey identifies the owner of an OIDC discovery request.
 type OwnerKey = OidcOwnerID
+
+// PolicyID is the canonical xDS identifier parsed by the dataplane's
+// http::oidc::PolicyId helper.
+type PolicyID string
+
+func (p PolicyID) String() string {
+	return string(p)
+}
+
+// PolicyIDForPolicy returns the canonical policy-scoped identifier encoded as
+// "policy/<namespace>/<name>".
+func PolicyIDForPolicy(namespace, name string) PolicyID {
+	return PolicyID(fmt.Sprintf("policy/%s/%s", namespace, name))
+}
 
 // OidcSource is a per-owner OIDC discovery request before KRT collapses
 // equivalent sources onto a shared request key.

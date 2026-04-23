@@ -48,23 +48,35 @@ func OwnersFromPolicy(policy *agentgateway.AgentgatewayPolicy) []RemoteOidcOwner
 		return nil
 	}
 
-	if policy.Spec.Traffic == nil || policy.Spec.Traffic.OIDC == nil {
+	if policy.Spec.Traffic == nil {
 		return nil
 	}
 
-	oidcCfg := *policy.Spec.Traffic.OIDC
-	return []RemoteOidcOwner{
-		{
-			ID: OidcOwnerID{
-				Namespace: policy.Namespace,
-				Name:      policy.Name,
-				Path:      "spec.traffic.oidc",
-			},
-			DefaultNamespace: policy.Namespace,
-			Config:           oidcCfg,
-			TTL:              TTLForOIDC(oidcCfg),
-		},
+	owner, ok := PolicyOIDCLookupOwner(policy.Namespace, policy.Name, policy.Spec.Traffic.OIDC)
+	if !ok {
+		return nil
 	}
+
+	return []RemoteOidcOwner{
+		owner,
+	}
+}
+
+func PolicyOIDCLookupOwner(namespace, name string, oidcCfg *agentgateway.OIDC) (RemoteOidcOwner, bool) {
+	if oidcCfg == nil {
+		return RemoteOidcOwner{}, false
+	}
+
+	return RemoteOidcOwner{
+		ID: OidcOwnerID{
+			Namespace: namespace,
+			Name:      name,
+			Path:      "spec.traffic.oidc",
+		},
+		DefaultNamespace: namespace,
+		Config:           *oidcCfg.DeepCopy(),
+		TTL:              TTLForOIDC(*oidcCfg),
+	}, true
 }
 
 // TTLForOIDC returns the configured refresh interval for an OIDC provider,
