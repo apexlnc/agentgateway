@@ -188,8 +188,8 @@ func newAgentgatewayParametersHelmValuesGenerator(cli apiclient.Client, inputs *
 			ObjectFilter:  cli.ObjectFilter(),
 		}),
 		inputs:        inputs,
-		sessionKeyGen: generateSessionKey,
-		oidcCookieGen: generateSessionKey,
+		sessionKeyGen: generateAES256Key,
+		oidcCookieGen: generateAES256Key,
 	}
 	g.oidcCollection = buildOIDCRequiredGatewaysCollection()
 	return g
@@ -445,10 +445,10 @@ func safeLabelValue(name string) string {
 	return fmt.Sprintf("%s-%s", prefix, hash)
 }
 
-func generateSessionKey() (string, error) {
+func generateAES256Key() (string, error) {
 	var key [32]byte
 	if _, err := rand.Read(key[:]); err != nil {
-		return "", fmt.Errorf("failed to generate session key: %w", err)
+		return "", fmt.Errorf("failed to generate AES-256 key: %w", err)
 	}
 	return hex.EncodeToString(key[:]), nil
 }
