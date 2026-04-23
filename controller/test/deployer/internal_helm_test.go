@@ -173,6 +173,19 @@ wIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQBtestcertdata
 			},
 		},
 		{
+			Name:      "agentgateway rawConfig with local oidc",
+			InputFile: "agentgateway-rawconfig-oidc",
+			Validate: func(t *testing.T, outputYaml string) {
+				t.Helper()
+				assert.Contains(t, outputYaml, "name: OIDC_COOKIE_SECRET",
+					"deployment should inject the managed oidc cookie secret env when local OIDC is configured")
+				assert.Contains(t, outputYaml, "name: gw-oidc-cookie-secret",
+					"rendered objects should include the controller-managed oidc cookie Secret when local OIDC is configured")
+				assert.Contains(t, outputYaml, "checksum/oidc-cookie-secret: 2a8abfa8cb9906290437854193ca6bca41d4d4e26d1d454bd66a35158095e737",
+					"deployment pod template should roll when the managed oidc cookie secret changes")
+			},
+		},
+		{
 			Name:      "agentgateway with repository only image override",
 			InputFile: "agentgateway-image-repo-only",
 			Validate: func(t *testing.T, outputYaml string) {

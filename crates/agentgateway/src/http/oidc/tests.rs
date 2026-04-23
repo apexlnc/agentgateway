@@ -1065,3 +1065,118 @@ async fn local_oidc_config_rejects_ambiguous_provider_source_configuration() {
 		assert!(err.to_string().contains(expected_error_fragment), "{name}");
 	}
 }
+
+#[test]
+fn policy_id_from_str_round_trips_canonical_forms() {
+	use std::str::FromStr;
+
+	for input in [
+		"route/default/my-route/rule-0",
+		"policy/default/my-policy",
+		"route/ns/r",
+		"policy/ns/p",
+	] {
+		let parsed = PolicyId::from_str(input).expect(input);
+		assert_eq!(parsed.as_str(), input);
+	}
+}
+
+#[test]
+fn policy_id_from_str_rejects_malformed_input() {
+	use std::str::FromStr;
+
+	for bad in [
+		"",              // missing prefix
+		"nope",          // missing '/'
+		"route/",        // empty identifier
+		"policy/",       // empty identifier
+		"gateway/ns/g",  // unsupported prefix
+		"/default/name", // empty prefix
+	] {
+		assert!(
+			PolicyId::from_str(bad).is_err(),
+			"expected PolicyId::from_str({bad:?}) to fail",
+		);
+	}
+}
+
+#[test]
+fn policy_id_constructors_match_from_str() {
+	use std::str::FromStr;
+
+	let route = PolicyId::route("default/my-route/rule-0");
+	assert_eq!(
+		PolicyId::from_str(route.as_str()).unwrap(),
+		route,
+		"route constructor output must round-trip",
+	);
+
+	let policy = PolicyId::policy("default/my-policy");
+	assert_eq!(
+		PolicyId::from_str(policy.as_str()).unwrap(),
+		policy,
+		"policy constructor output must round-trip",
+	);
+}
+
+fn resolved_test_config(policy_id: PolicyId) -> ResolvedOidcConfig {
+	ResolvedOidcConfig {
+		policy_id,
+		issuer: TEST_ISSUER.into(),
+		authorization_endpoint: provider_endpoint("https://issuer.example.com/authorize"),
+		token_endpoint: provider_endpoint("https://issuer.example.com/token"),
+		token_endpoint_auth: TokenEndpointAuth::ClientSecretBasic,
+		jwks_inline: serde_json::to_string(&test_jwks()).expect("jwks json"),
+		client_id: TEST_CLIENT_ID.into(),
+		client_secret: SecretString::new("client-secret".into()),
+		redirect_uri: test_redirect_uri(),
+		scopes: vec!["profile".into()],
+	}
+}
+
+#[test]
+fn resolved_oidc_config_compiles_to_policy() {
+	let policy_id = PolicyId::policy("default/my-policy");
+	let encoder = test_oidc_cookie_encoder();
+
+	let policy = resolved_test_config(policy_id.clone())
+		.compile(&encoder)
+		.expect("compile resolved oidc config");
+
+	assert_eq!(policy.policy_id, policy_id);
+	assert_eq!(policy.provider.issuer, TEST_ISSUER);
+	assert_eq!(policy.client.client_id, TEST_CLIENT_ID);
+	assert_eq!(policy.client.client_secret.expose_secret(), "client-secret");
+	assert_eq!(
+		policy.client.token_endpoint_auth,
+		TokenEndpointAuth::ClientSecretBasic,
+	);
+
+	// Scopes always include "openid", even when not explicitly requested.
+	assert_eq!(policy.scopes, vec!["openid".to_string(), "profile".into()]);
+
+	// Cookie names are deterministic from the policy id; the xDS path must
+	// derive the same cookie as the file-backed path.
+	let (expected_cookie, expected_transaction_prefix) =
+		super::session::derive_cookie_names(&policy_id);
+	assert_eq!(policy.session.cookie_name, expected_cookie);
+	assert_eq!(
+		policy.session.transaction_cookie_prefix,
+		expected_transaction_prefix
+	);
+}
+
+#[test]
+fn resolved_oidc_config_rejects_invalid_jwks_inline() {
+	let mut cfg = resolved_test_config(PolicyId::policy("default/p"));
+	cfg.jwks_inline = "not valid json".into();
+
+	let err = cfg
+		.compile(&test_oidc_cookie_encoder())
+		.expect_err("bad jwks must be rejected");
+	let msg = err.to_string();
+	assert!(
+		msg.contains("failed to parse inline oidc jwks"),
+		"expected jwks parse error, got: {msg}",
+	);
+}

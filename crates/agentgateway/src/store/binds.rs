@@ -15,8 +15,8 @@ use crate::proxy::httpproxy::PolicyClient;
 use crate::types::agent::{
 	A2aPolicy, Backend, BackendKey, BackendPolicy, BackendTargetRef, BackendWithPolicies, Bind,
 	BindKey, FrontendPolicy, JwtAuthentication, Listener, ListenerKey, ListenerName,
-	McpAuthentication, PolicyKey, PolicyTarget, Route, RouteGroupKey, RouteKey, RouteName, RouteSet,
-	TCPRoute, TCPRouteSet, TargetedPolicy, TrafficPolicy,
+	McpAuthentication, PolicyKey, PolicyTarget, PolicyType, Route, RouteGroupKey, RouteKey,
+	RouteName, RouteSet, TCPRoute, TCPRouteSet, TargetedPolicy, TrafficPolicy,
 };
 use crate::types::discovery::NamespacedHostname;
 use crate::types::proto::agent::resource::Kind as XdsKind;
@@ -95,6 +95,11 @@ pub struct Store {
 	pending_listeners: HashMap<BindKey, HashMap<ListenerKey, Listener>>,
 	http_routes: HbHashMap<RouteTarget, Arc<RouteSet>>,
 	tcp_routes: HbHashMap<RouteTarget, Arc<TCPRouteSet>>,
+
+	/// Cookie-crypto encoder applied to xDS-delivered OIDC policies at
+	/// Store ingestion. Set once at startup from the gateway runtime config;
+	/// when absent, OIDC policies arriving via xDS are rejected.
+	oidc_cookie_encoder: Option<crate::http::sessionpersistence::Encoder>,
 
 	tx: tokio::sync::mpsc::UnboundedSender<BindEvent>,
 	rx: Option<tokio::sync::mpsc::UnboundedReceiver<BindEvent>>,
@@ -510,9 +515,50 @@ impl Store {
 			pending_listeners: Default::default(),
 			http_routes: Default::default(),
 			tcp_routes: Default::default(),
+			oidc_cookie_encoder: None,
 			tx,
 			rx: Some(rx),
 		}
+	}
+
+	/// Install the ambient cookie-crypto encoder used to materialize xDS
+	/// OIDC policies. Must be called before xDS ingestion begins.
+	pub fn set_oidc_cookie_encoder(
+		&mut self,
+		encoder: Option<crate::http::sessionpersistence::Encoder>,
+	) {
+		self.oidc_cookie_encoder = encoder;
+	}
+
+	/// Materialize a pending xDS OIDC policy into a ready
+	/// [`crate::http::oidc::OidcPolicy`] using the ambient cookie encoder.
+	///
+	/// No-op for any other variant. Returns `Err` if the encoder is unset or
+	/// JWKS/compilation fails; callers must surface this as an xDS NACK so the
+	/// policy never lands in `policies_by_key`.
+	fn materialize_pending_oidc(&self, policy: &mut TrafficPolicy) -> anyhow::Result<()> {
+		if !matches!(policy, TrafficPolicy::PendingOidc(_)) {
+			return Ok(());
+		}
+		let encoder = self.oidc_cookie_encoder.as_ref().ok_or_else(|| {
+			anyhow::anyhow!(
+				"received xDS OIDC policy but OIDC_COOKIE_SECRET is not configured on this gateway"
+			)
+		})?;
+		// Swap in a cheap placeholder so we can take ownership of the boxed
+		// config without violating borrow rules on `*policy`.
+		let taken = std::mem::replace(
+			policy,
+			TrafficPolicy::Timeout(http::timeout::Policy::default()),
+		);
+		let TrafficPolicy::PendingOidc(cfg) = taken else {
+			unreachable!("guarded by matches! above");
+		};
+		let compiled = cfg
+			.compile(encoder)
+			.map_err(|e| anyhow::anyhow!("failed to materialize xDS OIDC policy: {e}"))?;
+		*policy = TrafficPolicy::Oidc(compiled);
+		Ok(())
 	}
 
 	fn listener_target_ref(listener: &ListenerKey) -> RouteTargetRef<'_> {
@@ -718,6 +764,13 @@ impl Store {
 				},
 				TrafficPolicy::CORS(p) => {
 					pol.cors.get_or_insert_with(|| p.clone());
+				},
+				TrafficPolicy::PendingOidc(_) => {
+					debug_assert!(
+						false,
+						"PendingOidc must be materialized at store ingestion; see Store::materialize_pending_oidc",
+					);
+					warn!("skipping unmaterialized PendingOidc policy (this is a bug)");
 				},
 			}
 		}
@@ -1307,7 +1360,10 @@ impl Store {
 		Ok(())
 	}
 	fn insert_xds_route(&mut self, raw: XdsRoute) -> anyhow::Result<()> {
-		let (route, listener_name, rgk) = Route::try_from_xds(&raw)?;
+		let (mut route, listener_name, rgk) = Route::try_from_xds(&raw)?;
+		for inline in route.inline_policies.iter_mut() {
+			self.materialize_pending_oidc(inline)?;
+		}
 		if let Some(sk) = route.service_key.clone() {
 			self.insert_service_route(route, sk);
 		} else if let Some(rgk) = rgk {
@@ -1334,7 +1390,10 @@ impl Store {
 		Ok(())
 	}
 	fn insert_xds_policy(&mut self, raw: XdsPolicy) -> anyhow::Result<()> {
-		let policy: TargetedPolicy = (&raw).try_into()?;
+		let mut policy: TargetedPolicy = (&raw).try_into()?;
+		if let PolicyType::Traffic(phased) = &mut policy.policy {
+			self.materialize_pending_oidc(&mut phased.policy)?;
+		}
 		self.insert_policy(policy);
 		Ok(())
 	}
@@ -2139,5 +2198,86 @@ mod tests {
 			(strng::new("x-foo"), strng::new("bar3")),
 			"Section attached policy (bar3) should win over backend attached policy (bar)"
 		);
+	}
+
+	fn test_resolved_oidc_config() -> crate::http::oidc::ResolvedOidcConfig {
+		use crate::http::oauth::TokenEndpointAuth;
+		use crate::http::oidc::{PolicyId, RedirectUri, ResolvedOidcConfig};
+		let jwks = serde_json::json!({
+			"keys": [{
+				"use": "sig",
+				"kty": "EC",
+				"kid": "kid-1",
+				"crv": "P-256",
+				"alg": "ES256",
+				"x": "WM7udBHga09KxC5kxq6GhrZ9M3Y8S9ZThq_XxsOcDhk",
+				"y": "xc7T4afkXmwjEbJMzQXCdQcU3PZKiLFlHl23GE1z4ug"
+			}]
+		})
+		.to_string();
+		ResolvedOidcConfig {
+			policy_id: PolicyId::policy("default/my-policy"),
+			issuer: "https://issuer.example.com".into(),
+			authorization_endpoint: "https://issuer.example.com/authorize"
+				.parse()
+				.expect("auth ep"),
+			token_endpoint: "https://issuer.example.com/token".parse().expect("tok ep"),
+			token_endpoint_auth: TokenEndpointAuth::ClientSecretBasic,
+			jwks_inline: jwks,
+			client_id: "client-id".into(),
+			client_secret: secrecy::SecretString::new("client-secret".into()),
+			redirect_uri: RedirectUri::parse("https://app.example.com/oauth/callback".into())
+				.expect("redirect"),
+			scopes: vec!["profile".into()],
+		}
+	}
+
+	fn test_cookie_encoder() -> crate::http::sessionpersistence::Encoder {
+		crate::http::sessionpersistence::Encoder::aes(
+			"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		)
+		.expect("aes encoder")
+	}
+
+	#[test]
+	fn materialize_pending_oidc_converts_to_resolved_variant() {
+		let mut store = Store::default();
+		store.set_oidc_cookie_encoder(Some(test_cookie_encoder()));
+
+		let mut policy = TrafficPolicy::PendingOidc(Box::new(test_resolved_oidc_config()));
+		store
+			.materialize_pending_oidc(&mut policy)
+			.expect("materialize with encoder");
+
+		assert!(
+			matches!(policy, TrafficPolicy::Oidc(_)),
+			"expected Oidc after materialization, got {policy:?}",
+		);
+	}
+
+	#[test]
+	fn materialize_pending_oidc_rejects_without_encoder() {
+		let store = Store::default();
+		// Encoder not set.
+
+		let mut policy = TrafficPolicy::PendingOidc(Box::new(test_resolved_oidc_config()));
+		let err = store
+			.materialize_pending_oidc(&mut policy)
+			.expect_err("materialize without encoder must fail");
+		assert!(
+			err.to_string().contains("OIDC_COOKIE_SECRET"),
+			"unexpected error: {err}",
+		);
+	}
+
+	#[test]
+	fn materialize_pending_oidc_is_noop_for_other_variants() {
+		let store = Store::default();
+
+		let mut policy = TrafficPolicy::Timeout(http::timeout::Policy::default());
+		store
+			.materialize_pending_oidc(&mut policy)
+			.expect("no-op on non-oidc");
+		assert!(matches!(policy, TrafficPolicy::Timeout(_)));
 	}
 }

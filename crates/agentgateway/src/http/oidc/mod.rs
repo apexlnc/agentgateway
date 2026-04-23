@@ -20,6 +20,7 @@ mod local;
 mod provider;
 mod redirect;
 mod session;
+mod xds;
 
 #[cfg(test)]
 mod tests;
@@ -31,6 +32,7 @@ pub use session::{
 	BrowserSession, CookieSecureMode, RESERVED_COOKIE_PREFIX, SameSiteMode, SessionConfig,
 	TransactionState,
 };
+pub use xds::ResolvedOidcConfig;
 
 #[derive(
 	Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -49,6 +51,29 @@ impl PolicyId {
 
 	pub fn policy(policy_key: impl std::fmt::Display) -> Self {
 		Self(format!("policy/{policy_key}"))
+	}
+}
+
+impl std::str::FromStr for PolicyId {
+	type Err = String;
+
+	/// Parse a PolicyId from its canonical string form, used to transport the
+	/// identity through xDS. The encoding is produced by [`PolicyId::route`]
+	/// and [`PolicyId::policy`]; any other shape is rejected so a malformed
+	/// identity never becomes a stable cookie prefix.
+	fn from_str(value: &str) -> Result<Self, Self::Err> {
+		let (prefix, rest) = value
+			.split_once('/')
+			.ok_or_else(|| format!("policy id '{value}' is missing a '<prefix>/' segment"))?;
+		if rest.is_empty() {
+			return Err(format!("policy id '{value}' has an empty identifier"));
+		}
+		match prefix {
+			"route" | "policy" => Ok(Self(value.to_string())),
+			other => Err(format!(
+				"policy id prefix '{other}' is not supported (expected 'route' or 'policy')"
+			)),
+		}
 	}
 }
 

@@ -25,20 +25,20 @@ struct OidcDiscoveryDocument {
 	token_endpoint_auth_methods_supported: Option<Vec<String>>,
 }
 
-struct PreparedOidcProvider {
-	issuer: String,
-	authorization_endpoint: ProviderEndpoint,
-	token_endpoint: ProviderEndpoint,
-	token_endpoint_auth: TokenEndpointAuth,
-	id_token_jwks: JwkSet,
+pub(super) struct PreparedOidcProvider {
+	pub(super) issuer: String,
+	pub(super) authorization_endpoint: ProviderEndpoint,
+	pub(super) token_endpoint: ProviderEndpoint,
+	pub(super) token_endpoint_auth: TokenEndpointAuth,
+	pub(super) id_token_jwks: JwkSet,
 }
 
-struct PreparedOidcPolicy {
-	provider: PreparedOidcProvider,
-	client_id: String,
-	client_secret: SecretString,
-	redirect_uri: RedirectUri,
-	scopes: Vec<String>,
+pub(super) struct PreparedOidcPolicy {
+	pub(super) provider: PreparedOidcProvider,
+	pub(super) client_id: String,
+	pub(super) client_secret: SecretString,
+	pub(super) redirect_uri: RedirectUri,
+	pub(super) scopes: Vec<String>,
 }
 
 /// Browser-based OIDC authentication policy.
@@ -280,7 +280,7 @@ async fn load_jwks(
 }
 
 impl PreparedOidcProvider {
-	fn compile(self, client_id: String) -> Result<Provider, Error> {
+	pub(super) fn compile(self, client_id: String) -> Result<Provider, Error> {
 		let provider = crate::http::jwt::Provider::from_jwks(
 			self.id_token_jwks,
 			self.issuer.clone(),
@@ -303,7 +303,7 @@ impl PreparedOidcProvider {
 }
 
 impl PreparedOidcPolicy {
-	fn compile(
+	pub(super) fn compile(
 		self,
 		policy_id: PolicyId,
 		oidc_cookie_encoder: &crate::http::sessionpersistence::Encoder,

@@ -501,3 +501,56 @@ spec:
       local:
         - requests: 100
           unit: Minutes
+---
+_err: "issuerURL in body should match"
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: traffic-oidc-bad-issuer
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: dummy
+  traffic:
+    oidc:
+      issuerURL: "not-a-url"
+      clientID: my-client
+      redirectURI: https://app.example.com/callback
+---
+_err: "traffic.oidc and traffic.jwtAuthentication are mutually exclusive"
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: traffic-oidc-and-jwt
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: dummy
+  traffic:
+    oidc:
+      issuerURL: https://idp.example.com
+      clientID: my-client
+      redirectURI: https://app.example.com/callback
+    jwtAuthentication:
+      providers:
+        - issuer: https://idp.example.com
+          jwks:
+            inline: '{"keys":[]}'
+---
+_err: "traffic.oidc may only target a Gateway, ListenerSet, or Route"
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: traffic-oidc-service-target
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: my-service
+  traffic:
+    oidc:
+      issuerURL: https://idp.example.com
+      clientID: my-client
+      redirectURI: https://app.example.com/callback

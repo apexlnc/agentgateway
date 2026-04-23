@@ -3,6 +3,18 @@ kind: Namespace
 metadata:
   name: agentgateway-base
 ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: base-gateway-oidc-cookie
+  namespace: agentgateway-base
+type: Opaque
+stringData:
+  # Fixed test key. Production deployments either provide their own Secret or
+  # let the deployer auto-generate one when an attached AgentgatewayPolicy uses
+  # traffic.oidc.
+  key: 8ecpxpapqVuPASAdw6MHlA5rdjUwFZGHeit8lUJ4z4U=
+---
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayParameters
 metadata:
@@ -15,6 +27,14 @@ spec:
       value: "200"
     - name: OTEL_BLRP_SCHEDULE_DELAY
       value: "200"
+    # Pre-set the OIDC cookie secret so the OIDC suite's traffic.oidc policies
+    # can materialize. Setting this env explicitly suppresses the deployer's
+    # managed-secret path; harmless for non-OIDC tests.
+    - name: OIDC_COOKIE_SECRET
+      valueFrom:
+        secretKeyRef:
+          name: base-gateway-oidc-cookie
+          key: key
 ---
 kind: Gateway
 apiVersion: gateway.networking.k8s.io/v1
@@ -276,8 +296,11 @@ metadata:
     app: dummy-idp
 spec:
   ports:
-    - name: http
+    - name: https
       port: 8443
       targetPort: 8443
+    - name: http
+      port: 8081
+      targetPort: 8081
   selector:
     app.kubernetes.io/name: testbox

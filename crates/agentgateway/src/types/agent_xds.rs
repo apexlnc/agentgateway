@@ -1495,6 +1495,9 @@ impl TryFrom<&proto::agent::TrafficPolicySpec> for TrafficPolicy {
 			Some(tps::Kind::Authorization(rbac)) => {
 				TrafficPolicy::Authorization(Authorization::from(rbac))
 			},
+			Some(tps::Kind::Oidc(oidc)) => {
+				TrafficPolicy::PendingOidc(Box::new(resolved_oidc_from_proto(oidc)?))
+			},
 			Some(tps::Kind::Jwt(jwt)) => {
 				let mode = match tps::jwt::Mode::try_from(jwt.mode)
 					.map_err(|_| ProtoError::EnumParse("invalid JWT mode".to_string()))?
@@ -1848,6 +1851,57 @@ impl TryFrom<&proto::agent::TrafficPolicySpec> for TrafficPolicy {
 
 fn convert_duration(d: prost_types::Duration) -> Duration {
 	Duration::from_secs(d.seconds as u64) + Duration::from_nanos(d.nanos as u64)
+}
+
+fn resolved_oidc_from_proto(
+	oidc: &proto::agent::traffic_policy_spec::Oidc,
+) -> Result<crate::http::oidc::ResolvedOidcConfig, ProtoError> {
+	use crate::http::oidc::{PolicyId, ProviderEndpoint, RedirectUri, ResolvedOidcConfig};
+	use proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth as ProtoAuth;
+	use std::str::FromStr;
+
+	let policy_id = PolicyId::from_str(&oidc.policy_id)
+		.map_err(|e| ProtoError::Generic(format!("invalid oidc policy_id: {e}")))?;
+	let authorization_endpoint = ProviderEndpoint::try_from(oidc.authorization_endpoint.as_str())
+		.map_err(|e| ProtoError::Generic(format!("invalid oidc authorization_endpoint: {e}")))?;
+	let token_endpoint = ProviderEndpoint::try_from(oidc.token_endpoint.as_str())
+		.map_err(|e| ProtoError::Generic(format!("invalid oidc token_endpoint: {e}")))?;
+	let redirect_uri = RedirectUri::parse(oidc.redirect_uri.clone())
+		.map_err(|e| ProtoError::Generic(format!("invalid oidc redirect_uri: {e}")))?;
+	let token_endpoint_auth = match ProtoAuth::try_from(oidc.token_endpoint_auth).map_err(|_| {
+		ProtoError::EnumParse(format!(
+			"invalid oidc token_endpoint_auth value {}",
+			oidc.token_endpoint_auth
+		))
+	})? {
+		ProtoAuth::ClientSecretBasic => http::oauth::TokenEndpointAuth::ClientSecretBasic,
+		ProtoAuth::ClientSecretPost => http::oauth::TokenEndpointAuth::ClientSecretPost,
+	};
+	if oidc.issuer.is_empty() {
+		return Err(ProtoError::Generic("oidc issuer must not be empty".into()));
+	}
+	if oidc.client_id.is_empty() {
+		return Err(ProtoError::Generic(
+			"oidc client_id must not be empty".into(),
+		));
+	}
+	if oidc.jwks_inline.is_empty() {
+		return Err(ProtoError::Generic(
+			"oidc jwks_inline must not be empty".into(),
+		));
+	}
+	Ok(ResolvedOidcConfig {
+		policy_id,
+		issuer: oidc.issuer.clone(),
+		authorization_endpoint,
+		token_endpoint,
+		token_endpoint_auth,
+		jwks_inline: oidc.jwks_inline.clone(),
+		client_id: oidc.client_id.clone(),
+		client_secret: secrecy::SecretString::new(oidc.client_secret.clone().into()),
+		redirect_uri,
+		scopes: oidc.scopes.clone(),
+	})
 }
 
 fn authorization_location(
@@ -2721,5 +2775,82 @@ mod tests {
 		};
 		McpTarget::try_from(&proto_target)
 			.expect_err("MCP target name containing '+' should be rejected");
+	}
+
+	fn sample_oidc_proto() -> proto::agent::traffic_policy_spec::Oidc {
+		use proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth;
+		proto::agent::traffic_policy_spec::Oidc {
+			policy_id: "policy/default/my-policy".to_string(),
+			issuer: "https://issuer.example.com".to_string(),
+			authorization_endpoint: "https://issuer.example.com/authorize".to_string(),
+			token_endpoint: "https://issuer.example.com/token".to_string(),
+			token_endpoint_auth: TokenEndpointAuth::ClientSecretBasic as i32,
+			jwks_inline: serde_json::json!({
+				"keys": [{
+					"use": "sig",
+					"kty": "EC",
+					"kid": "kid-1",
+					"crv": "P-256",
+					"alg": "ES256",
+					"x": "WM7udBHga09KxC5kxq6GhrZ9M3Y8S9ZThq_XxsOcDhk",
+					"y": "xc7T4afkXmwjEbJMzQXCdQcU3PZKiLFlHl23GE1z4ug"
+				}]
+			})
+			.to_string(),
+			client_id: "client-id".to_string(),
+			client_secret: "client-secret".to_string(),
+			redirect_uri: "https://app.example.com/oauth/callback".to_string(),
+			scopes: vec!["openid".to_string(), "profile".to_string()],
+		}
+	}
+
+	#[test]
+	fn test_oidc_spec_to_pending_oidc() -> Result<(), ProtoError> {
+		let spec = proto::agent::TrafficPolicySpec {
+			phase: proto::agent::traffic_policy_spec::PolicyPhase::Route as i32,
+			kind: Some(proto::agent::traffic_policy_spec::Kind::Oidc(
+				sample_oidc_proto(),
+			)),
+		};
+
+		let policy = TrafficPolicy::try_from(&spec)?;
+
+		let TrafficPolicy::PendingOidc(cfg) = policy else {
+			panic!("Expected PendingOidc, got: {policy:?}");
+		};
+		assert_eq!(cfg.policy_id.as_str(), "policy/default/my-policy");
+		assert_eq!(cfg.issuer, "https://issuer.example.com");
+		assert_eq!(cfg.client_id, "client-id");
+		Ok(())
+	}
+
+	#[test]
+	fn test_oidc_spec_rejects_invalid_policy_id() {
+		let mut oidc = sample_oidc_proto();
+		oidc.policy_id = "not-a-valid-prefix".into();
+		let spec = proto::agent::TrafficPolicySpec {
+			phase: proto::agent::traffic_policy_spec::PolicyPhase::Route as i32,
+			kind: Some(proto::agent::traffic_policy_spec::Kind::Oidc(oidc)),
+		};
+
+		let err = TrafficPolicy::try_from(&spec).expect_err("invalid policy_id");
+		let msg = err.to_string();
+		assert!(
+			msg.contains("invalid oidc policy_id"),
+			"unexpected error: {msg}",
+		);
+	}
+
+	#[test]
+	fn test_oidc_spec_rejects_empty_issuer() {
+		let mut oidc = sample_oidc_proto();
+		oidc.issuer = String::new();
+		let spec = proto::agent::TrafficPolicySpec {
+			phase: proto::agent::traffic_policy_spec::PolicyPhase::Route as i32,
+			kind: Some(proto::agent::traffic_policy_spec::Kind::Oidc(oidc)),
+		};
+
+		let err = TrafficPolicy::try_from(&spec).expect_err("empty issuer");
+		assert!(err.to_string().contains("issuer"), "unexpected: {err}");
 	}
 }
