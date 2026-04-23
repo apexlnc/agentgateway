@@ -59,7 +59,7 @@ type AgentgatewayPolicyList struct {
 // +kubebuilder:validation:XValidation:rule="has(self.traffic) && has(self.targetSelectors) ? self.targetSelectors.all(t, t.kind in ['Gateway', 'HTTPRoute', 'GRPCRoute', 'ListenerSet']) : true",message="the 'traffic' field can only target a Gateway, ListenerSet, GRPCRoute, or HTTPRoute"
 // +kubebuilder:validation:XValidation:rule="has(self.targetRefs) && has(self.traffic) && has(self.traffic.phase) && self.traffic.phase == 'PreRouting' ? self.targetRefs.all(t, t.kind in ['Gateway', 'ListenerSet']) : true",message="the 'traffic.phase=PreRouting' field can only target a Gateway or ListenerSet"
 // +kubebuilder:validation:XValidation:rule="has(self.targetSelectors) && has(self.traffic) && has(self.traffic.phase) && self.traffic.phase == 'PreRouting' ? self.targetSelectors.all(t, t.kind in ['Gateway', 'ListenerSet']) : true",message="the 'traffic.phase=PreRouting' field can only target a Gateway or ListenerSet"
-// +kubebuilder:validation:XValidation:rule="!(has(self.traffic) && has(self.traffic.oidc) && has(self.traffic.jwtAuthentication))",message="traffic.oidc and traffic.jwtAuthentication are mutually exclusive"
+// +kubebuilder:validation:XValidation:rule="has(self.traffic) && has(self.traffic.oidc) ? !has(self.traffic.jwtAuthentication) : true",message="traffic.oidc and traffic.jwtAuthentication are mutually exclusive"
 // +kubebuilder:validation:XValidation:rule="has(self.traffic) && has(self.traffic.oidc) && has(self.targetRefs) ? self.targetRefs.all(t, t.kind in ['Gateway', 'ListenerSet', 'HTTPRoute', 'GRPCRoute']) : true",message="traffic.oidc may only target a Gateway, ListenerSet, or Route"
 // +kubebuilder:validation:XValidation:rule="has(self.traffic) && has(self.traffic.oidc) && has(self.targetSelectors) ? self.targetSelectors.all(t, t.kind in ['Gateway', 'ListenerSet', 'HTTPRoute', 'GRPCRoute']) : true",message="traffic.oidc may only target a Gateway, ListenerSet, or Route"
 type AgentgatewayPolicySpec struct {
@@ -702,6 +702,7 @@ type OIDC struct {
 
 	// RefreshInterval controls how often the controller re-fetches the discovery document and JWKS.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5m')",message="refreshInterval must be at least 5m."
 	// +kubebuilder:default="1h"
 	RefreshInterval *metav1.Duration `json:"refreshInterval,omitempty"`
 

@@ -6746,6 +6746,9 @@ spec:
                         description: RefreshInterval controls how often the controller
                           re-fetches the discovery document and JWKS.
                         type: string
+                        x-kubernetes-validations:
+                        - message: refreshInterval must be at least 5m.
+                          rule: duration(self) >= duration('5m')
                       scopes:
                         default:
                         - openid
@@ -7400,7 +7403,8 @@ spec:
                 && self.traffic.phase == ''PreRouting'' ? self.targetSelectors.all(t,
                 t.kind in [''Gateway'', ''ListenerSet'']) : true'
             - message: traffic.oidc and traffic.jwtAuthentication are mutually exclusive
-              rule: '!(has(self.traffic) && has(self.traffic.oidc) && has(self.traffic.jwtAuthentication))'
+              rule: 'has(self.traffic) && has(self.traffic.oidc) ? !has(self.traffic.jwtAuthentication)
+                : true'
             - message: traffic.oidc may only target a Gateway, ListenerSet, or Route
               rule: 'has(self.traffic) && has(self.traffic.oidc) && has(self.targetRefs)
                 ? self.targetRefs.all(t, t.kind in [''Gateway'', ''ListenerSet'',
