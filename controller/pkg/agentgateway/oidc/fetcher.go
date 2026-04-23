@@ -279,6 +279,7 @@ func (f *Fetcher) Run(ctx context.Context) {
 }
 
 func (f *Fetcher) maybeFetchOidc(ctx context.Context) {
+	log := log.FromContext(ctx)
 	now := time.Now()
 	due := f.popDue(now)
 	if len(due) == 0 {
@@ -292,13 +293,12 @@ func (f *Fetcher) maybeFetchOidc(ctx context.Context) {
 			continue
 		}
 
-		oidcLogger := log.FromContext(ctx)
-		oidcLogger.Info("fetching oidc discovery", "request_key", fetch.RequestKey, "target", state.source.Target.URL)
+		log.Info("fetching oidc discovery", "request_key", fetch.RequestKey, "target", state.source.Target.URL)
 
 		provider, err := f.fetchOidc(ctx, state.source)
 		if err != nil {
 			next := nextRetryDelay(fetch.RetryAttempt)
-			oidcLogger.Error(err, "error fetching oidc discovery", "request_key", fetch.RequestKey, "target", state.source.Target.URL, "retryAttempt", fetch.RetryAttempt, "next", next.String())
+			log.Error(err, "error fetching oidc discovery", "request_key", fetch.RequestKey, "target", state.source.Target.URL, "retryAttempt", fetch.RetryAttempt, "next", next.String())
 			f.scheduleAt(fetch.RequestKey, state.generation, now.Add(next), fetch.RetryAttempt+1)
 			continue
 		}
