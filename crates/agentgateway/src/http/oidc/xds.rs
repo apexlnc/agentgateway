@@ -11,7 +11,8 @@ use crate::http::sessionpersistence::Encoder;
 ///
 /// Unlike [`super::LocalOidcConfig`], this carries only fully-resolved data:
 /// no `.well-known` fetch and no `jwks_uri` request happens at compile time.
-/// Callers must still supply the ambient cookie encoder, which is delivered
+/// The controller sources `client_secret` from the referenced Kubernetes
+/// Secret and delivers it over xDS; only the ambient cookie encoder remains
 /// out-of-band and never traverses the xDS channel.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
