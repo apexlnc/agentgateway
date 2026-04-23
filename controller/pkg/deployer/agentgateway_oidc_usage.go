@@ -2,11 +2,14 @@ package deployer
 
 import (
 	"encoding/json"
+	"sync"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 )
+
+var unmarshalLocalConfigOIDCDetector = json.Unmarshal
 
 // oidcRequiredGatewaysCollection is the interface for checking whether a given set of
 // resolved AgentgatewayParameters require an OIDC cookie secret. It is used by
@@ -25,16 +28,53 @@ type oidcRequiredGatewaysCollection interface {
 // Currently only rawConfig-based detection is supported; Phase 5 will wire in
 // xDS-delivered TrafficOIDC policies via the Inputs struct.
 func buildOIDCRequiredGatewaysCollection() oidcRequiredGatewaysCollection {
-	return &rawConfigOIDCCollection{}
+	return &rawConfigOIDCCollection{
+		detectRawConfigUsesLocalOIDC: rawConfigUsesLocalOIDC,
+	}
 }
 
 // rawConfigOIDCCollection detects OIDC usage by inspecting rawConfig in
-// AgentgatewayParameters. This is a synchronous, per-call check that runs inside
-// the existing reconciliation loop — no additional informers are needed.
-type rawConfigOIDCCollection struct{}
+// AgentgatewayParameters. This runs inside the existing reconciliation loop and
+// memoizes by exact raw JSON content so repeated checks in a reconcile avoid
+// re-unmarshalling the same payload.
+type rawConfigOIDCCollection struct {
+	rawConfigUsageCache          sync.Map
+	detectRawConfigUsesLocalOIDC func(raw *apiextensionsv1.JSON) bool
+}
 
 func (c *rawConfigOIDCCollection) resolvedParametersRequireOIDC(resolved *resolvedParameters) bool {
-	return resolvedParametersUseLocalOIDC(resolved)
+	if resolved == nil {
+		return false
+	}
+	return c.agentgatewayParametersUseLocalOIDC(resolved.gatewayClassAGWP) ||
+		c.agentgatewayParametersUseLocalOIDC(resolved.gatewayAGWP)
+}
+
+func (c *rawConfigOIDCCollection) agentgatewayParametersUseLocalOIDC(agwp *agentgateway.AgentgatewayParameters) bool {
+	if agwp == nil {
+		return false
+	}
+	return c.memoizedRawConfigUsesLocalOIDC(agwp.Spec.AgentgatewayParametersConfigs.RawConfig)
+}
+
+func (c *rawConfigOIDCCollection) memoizedRawConfigUsesLocalOIDC(raw *apiextensionsv1.JSON) bool {
+	if raw == nil || len(raw.Raw) == 0 {
+		return false
+	}
+
+	cacheKey := string(raw.Raw)
+	if cached, ok := c.rawConfigUsageCache.Load(cacheKey); ok {
+		return cached.(bool)
+	}
+
+	detect := c.detectRawConfigUsesLocalOIDC
+	if detect == nil {
+		detect = rawConfigUsesLocalOIDC
+	}
+
+	result := detect(raw)
+	cached, _ := c.rawConfigUsageCache.LoadOrStore(cacheKey, result)
+	return cached.(bool)
 }
 
 func resolvedParametersUseLocalOIDC(resolved *resolvedParameters) bool {
@@ -58,7 +98,7 @@ func rawConfigUsesLocalOIDC(raw *apiextensionsv1.JSON) bool {
 	}
 
 	var cfg localConfigOIDCDetector
-	if err := json.Unmarshal(raw.Raw, &cfg); err != nil {
+	if err := unmarshalLocalConfigOIDCDetector(raw.Raw, &cfg); err != nil {
 		return false
 	}
 	return cfg.usesOIDC()

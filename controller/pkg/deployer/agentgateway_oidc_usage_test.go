@@ -1,6 +1,8 @@
 package deployer
 
 import (
+	"encoding/json"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,6 +11,59 @@ import (
 
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 )
+
+func TestRawConfigOIDCCollection_ResolvedParametersRequireOIDCUnmarshalsOncePerReconcile(t *testing.T) {
+	originalUnmarshal := unmarshalLocalConfigOIDCDetector
+	t.Cleanup(func() {
+		unmarshalLocalConfigOIDCDetector = originalUnmarshal
+	})
+
+	var unmarshals atomic.Int32
+	unmarshalLocalConfigOIDCDetector = func(data []byte, v any) error {
+		unmarshals.Add(1)
+		return json.Unmarshal(data, v)
+	}
+
+	col := &rawConfigOIDCCollection{
+		detectRawConfigUsesLocalOIDC: rawConfigUsesLocalOIDC,
+	}
+
+	rawConfig := []byte(`{
+		"binds": [{
+			"port": 8080,
+			"listeners": [{
+				"policies": {
+					"oidc": {
+						"issuer": "https://issuer.example.com"
+					}
+				}
+			}]
+		}]
+	}`)
+
+	resolvedForValues := &resolvedParameters{
+		gatewayAGWP: &agentgateway.AgentgatewayParameters{
+			Spec: agentgateway.AgentgatewayParametersSpec{
+				AgentgatewayParametersConfigs: agentgateway.AgentgatewayParametersConfigs{
+					RawConfig: &apiextensionsv1.JSON{Raw: append([]byte(nil), rawConfig...)},
+				},
+			},
+		},
+	}
+	resolvedForPostProcess := &resolvedParameters{
+		gatewayAGWP: &agentgateway.AgentgatewayParameters{
+			Spec: agentgateway.AgentgatewayParametersSpec{
+				AgentgatewayParametersConfigs: agentgateway.AgentgatewayParametersConfigs{
+					RawConfig: &apiextensionsv1.JSON{Raw: append([]byte(nil), rawConfig...)},
+				},
+			},
+		},
+	}
+
+	assert.True(t, col.resolvedParametersRequireOIDC(resolvedForValues))
+	assert.True(t, col.resolvedParametersRequireOIDC(resolvedForPostProcess))
+	assert.Equal(t, int32(1), unmarshals.Load())
+}
 
 func TestRawConfigUsesLocalOIDC_BindListenerPolicy(t *testing.T) {
 	t.Parallel()
