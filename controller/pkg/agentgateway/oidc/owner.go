@@ -2,8 +2,12 @@ package oidc
 
 import (
 	"fmt"
-	"reflect"
+	"slices"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 )
@@ -38,7 +42,67 @@ func (o RemoteOidcOwner) Equals(other RemoteOidcOwner) bool {
 	return o.ID == other.ID &&
 		o.DefaultNamespace == other.DefaultNamespace &&
 		o.TTL == other.TTL &&
-		reflect.DeepEqual(o.Config, other.Config)
+		oidcConfigEqual(o.Config, other.Config)
+}
+
+func oidcConfigEqual(a, b agentgateway.OIDC) bool {
+	return a.IssuerURL == b.IssuerURL &&
+		a.ClientID == b.ClientID &&
+		localObjectReferenceEqual(a.ClientSecret, b.ClientSecret) &&
+		a.RedirectURI == b.RedirectURI &&
+		slices.Equal(a.Scopes, b.Scopes) &&
+		backendObjectReferenceEqual(a.Backend, b.Backend) &&
+		durationEqual(a.RefreshInterval, b.RefreshInterval) &&
+		stringPointerEqual(a.TokenEndpointAuthMethod, b.TokenEndpointAuthMethod)
+}
+
+func localObjectReferenceEqual(a, b *corev1.LocalObjectReference) bool {
+	switch {
+	case a == nil || b == nil:
+		return a == b
+	default:
+		return *a == *b
+	}
+}
+
+func backendObjectReferenceEqual(a, b *gwv1.BackendObjectReference) bool {
+	switch {
+	case a == nil || b == nil:
+		return a == b
+	default:
+		return stringPointerEqual(a.Group, b.Group) &&
+			stringPointerEqual(a.Kind, b.Kind) &&
+			a.Name == b.Name &&
+			stringPointerEqual(a.Namespace, b.Namespace) &&
+			portNumberPointerEqual(a.Port, b.Port)
+	}
+}
+
+func durationEqual(a, b *metav1.Duration) bool {
+	switch {
+	case a == nil || b == nil:
+		return a == b
+	default:
+		return a.Duration == b.Duration
+	}
+}
+
+func stringPointerEqual[T ~string](a, b *T) bool {
+	switch {
+	case a == nil || b == nil:
+		return a == b
+	default:
+		return *a == *b
+	}
+}
+
+func portNumberPointerEqual(a, b *gwv1.PortNumber) bool {
+	switch {
+	case a == nil || b == nil:
+		return a == b
+	default:
+		return *a == *b
+	}
 }
 
 // OwnersFromPolicy extracts RemoteOidcOwner values from an AgentgatewayPolicy

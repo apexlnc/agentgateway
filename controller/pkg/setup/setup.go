@@ -390,6 +390,7 @@ func buildOIDCStore(
 ) error {
 	oidcCollections := oidcpkg.NewCollections(oidcpkg.CollectionInputs{
 		AgentgatewayPolicies: agwCollections.AgentgatewayPolicies,
+		Backends:             agwCollections.Backends,
 		Resolver:             oidcpkg.NewResolver(resolver),
 		KrtOpts:              agwCollections.KrtOpts,
 	})

@@ -20,6 +20,7 @@ var FetchKeyIndexCollectionFunc = krt.WithIndexCollectionFromString(func(s strin
 // owners and shared requests.
 type CollectionInputs struct {
 	AgentgatewayPolicies krt.Collection[*agentgateway.AgentgatewayPolicy]
+	Backends             krt.Collection[*agentgateway.AgentgatewayBackend]
 	Resolver             Resolver
 	KrtOpts              krtutil.KrtOptions
 }
