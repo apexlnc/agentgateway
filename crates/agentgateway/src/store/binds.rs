@@ -537,23 +537,23 @@ impl Store {
 	/// JWKS/compilation fails; callers must surface this as an xDS NACK so the
 	/// policy never lands in `policies_by_key`.
 	fn materialize_pending_oidc(&self, policy: &mut TrafficPolicy) -> anyhow::Result<()> {
-		if !matches!(policy, TrafficPolicy::PendingOidc(_)) {
-			return Ok(());
-		}
+		// Swap in a cheap placeholder so we can take ownership of the boxed
+		// config without violating borrow rules on `*policy`.
+		let cfg = match std::mem::replace(
+			policy,
+			TrafficPolicy::Timeout(http::timeout::Policy::default()),
+		) {
+			TrafficPolicy::PendingOidc(cfg) => cfg,
+			other => {
+				*policy = other;
+				return Ok(());
+			},
+		};
 		let encoder = self.oidc_cookie_encoder.as_ref().ok_or_else(|| {
 			anyhow::anyhow!(
 				"received xDS OIDC policy but OIDC_COOKIE_SECRET is not configured on this gateway"
 			)
 		})?;
-		// Swap in a cheap placeholder so we can take ownership of the boxed
-		// config without violating borrow rules on `*policy`.
-		let taken = std::mem::replace(
-			policy,
-			TrafficPolicy::Timeout(http::timeout::Policy::default()),
-		);
-		let TrafficPolicy::PendingOidc(cfg) = taken else {
-			unreachable!("guarded by matches! above");
-		};
 		let compiled = cfg
 			.compile(encoder)
 			.map_err(|e| anyhow::anyhow!("failed to materialize xDS OIDC policy: {e}"))?;
