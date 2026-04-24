@@ -29,6 +29,7 @@ import (
 	"github.com/agentgateway/agentgateway/api"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
+	oidcpkg "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/utils"
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
@@ -90,7 +91,7 @@ func ConvertStatusCollection[T controllers.Object, S any](
 }
 
 // NewAgentPlugin creates a new AgentgatewayPolicy plugin
-func NewAgentPlugin(agw *AgwCollections, resolver remotehttp.Resolver, jwksLookup jwks.Lookup, credentialResolver kubeutils.CredentialResolver) AgwPlugin {
+func NewAgentPlugin(agw *AgwCollections, resolver remotehttp.Resolver, jwksLookup jwks.Lookup, oidcLookup oidcpkg.Lookup, credentialResolver kubeutils.CredentialResolver) AgwPlugin {
 	return AgwPlugin{
 		ContributesPolicies: map[schema.GroupKind]PolicyPlugin{
 			wellknown.AgentgatewayPolicyGVK.GroupKind(): {
@@ -99,7 +100,7 @@ func NewAgentPlugin(agw *AgwCollections, resolver remotehttp.Resolver, jwksLooku
 						*gwv1.PolicyStatus,
 						[]AgwPolicy,
 					) {
-						return TranslateAgentgatewayPolicy(krtctx, policyCR, agw, input.References, input.Grants, resolver, jwksLookup, credentialResolver)
+						return TranslateAgentgatewayPolicy(krtctx, policyCR, agw, input.References, input.Grants, resolver, jwksLookup, oidcLookup, credentialResolver)
 					}, agw.KrtOpts.ToOptions("policies/Agentgateway")...)
 					return ConvertStatusCollection(policyStatusCol, agw.KrtOpts.ToOptions, "policies/Agentgateway"), policyCol
 				},
@@ -121,6 +122,7 @@ type PolicyCtx struct {
 	SourceGVK   schema.GroupVersionKind
 	Resolver    remotehttp.Resolver
 	JWKSLookup  jwks.Lookup
+	OidcLookup  oidcpkg.Lookup
 
 	// CredentialResolver resolves credential refs: the built-in Secret resolver
 	// in OSS, or an injected resolver (which may itself be a chain). Access it
@@ -162,6 +164,7 @@ func TranslateAgentgatewayPolicy(
 	grants ReferenceGrantChecker,
 	resolver remotehttp.Resolver,
 	jwksLookup jwks.Lookup,
+	oidcLookup oidcpkg.Lookup,
 	credentialResolver kubeutils.CredentialResolver,
 ) (*gwv1.PolicyStatus, []AgwPolicy) {
 	var agwPolicies []AgwPolicy
@@ -175,6 +178,7 @@ func TranslateAgentgatewayPolicy(
 		SourceGVK:          wellknown.AgentgatewayPolicyGVK,
 		Resolver:           resolver,
 		JWKSLookup:         jwksLookup,
+		OidcLookup:         oidcLookup,
 		CredentialResolver: credentialResolver,
 	}
 	var ancestors []gwv1.PolicyAncestorStatus
@@ -405,13 +409,29 @@ func ClonePoliciesForTarget(base []*api.Policy, policyTarget *api.PolicyTarget) 
 		return nil
 	}
 	out := make([]*api.Policy, 0, len(base))
+	attachment := attachmentName(policyTarget)
 	for _, p := range base {
-		clone := protomarshal.ShallowClone(p)
-		clone.Key += attachmentName(policyTarget)
+		// OIDC carries a nested policy_id that must track the cloned effective
+		// key, so a shallow clone would alias it across attachments.
+		var clone *api.Policy
+		if p.GetTraffic().GetOidc() != nil {
+			clone = protomarshal.Clone(p)
+		} else {
+			clone = protomarshal.ShallowClone(p)
+		}
+		clone.Key += attachment
 		clone.Target = policyTarget
+		syncOIDCPolicyIDWithPolicyKey(clone)
 		out = append(out, clone)
 	}
 	return out
+}
+
+func syncOIDCPolicyIDWithPolicyKey(p *api.Policy) {
+	if p.GetTraffic().GetOidc() == nil {
+		return
+	}
+	p.GetTraffic().GetOidc().PolicyId = oidcPolicyIDForPolicyKey(p.Key)
 }
 
 func translateTrafficPolicyToAgw(
@@ -553,6 +573,10 @@ func translateTrafficPolicyToAgw(
 
 	if traffic.JWTAuthentication != nil {
 		appendPolicy("jwtAuthentication")(processJWTAuthenticationPolicy(ctx, traffic.JWTAuthentication, traffic.Phase, basePolicyName, policyName))
+	}
+
+	if traffic.OIDC != nil {
+		appendPolicy("oidc")(processOIDCPolicy(ctx, traffic.OIDC, policyName, policyName.String(), ctx.OidcLookup))
 	}
 
 	if traffic.APIKeyAuthentication != nil {

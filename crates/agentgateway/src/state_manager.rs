@@ -42,6 +42,16 @@ impl StateManager {
 			config.threading_mode,
 			config.dynamic_ca_cert_cache.clone(),
 		);
+		match crate::http::oidc::OidcCookieEncoder::from_session_encoder(&config.session_encoder) {
+			Some(encoder) => {
+				stores.binds.write().set_oidc_cookie_encoder(encoder);
+			},
+			None => {
+				tracing::warn!(
+					"OIDC cookie encoder not installed; OIDC policies will be rejected at xDS decode until SESSION_KEY is configured"
+				);
+			},
+		}
 		let xds_client = if let Some(addr) = &xds.address {
 			let connector = control::grpc_connector(
 				client.clone(),

@@ -2,24 +2,25 @@ package jwks
 
 import (
 	"context"
-	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
-	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/assert"
 	"istio.io/istio/pkg/kube/krt"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
+	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil/krttest"
 )
 
 func TestSharedJwksRequestsCollapseMinTTLAcrossOwners(t *testing.T) {
-	krtOpts := testKrtOptions(t)
-	policies := krt.NewStaticCollection(alwaysSynced{}, []*agentgateway.AgentgatewayPolicy{
+	krtOpts := krttest.KrtOptions(t)
+	policies := krt.NewStaticCollection(krttest.AlwaysSynced{}, []*agentgateway.AgentgatewayPolicy{
 		testRemotePolicy("one", "https://issuer.example/jwks", 10*time.Minute),
 	}, krtOpts.ToOptions("jwks/SharedOwnerPolicies")...)
 	backends := krt.NewStaticCollection(alwaysSynced{}, []*agentgateway.AgentgatewayBackend{
@@ -35,13 +36,13 @@ func TestSharedJwksRequestsCollapseMinTTLAcrossOwners(t *testing.T) {
 		KrtOpts: krtOpts,
 	})
 
-	requests := awaitSharedJwksRequests(t, collections.SharedRequests, 1)
+	requests := krttest.Await(t, collections.SharedRequests, 1)
 	assert.Equal(t, remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}.Key(), requests[0].RequestKey)
 	assert.Equal(t, 5*time.Minute, requests[0].TTL)
 }
 
 func TestSharedJwksRequestsRetargetOwnerAcrossRequestKeys(t *testing.T) {
-	krtOpts := testKrtOptions(t)
+	krtOpts := krttest.KrtOptions(t)
 	policies := dynamicRemotePolicies(t, []*agentgateway.AgentgatewayPolicy{
 		testRemotePolicy("moving", "https://issuer.example/a", 5*time.Minute),
 		testRemotePolicy("staying", "https://issuer.example/a", 10*time.Minute),
@@ -56,7 +57,7 @@ func TestSharedJwksRequestsRetargetOwnerAcrossRequestKeys(t *testing.T) {
 		KrtOpts: krtOpts,
 	})
 
-	requests := awaitSharedJwksRequests(t, collections.SharedRequests, 1)
+	requests := krttest.Await(t, collections.SharedRequests, 1)
 	assert.Equal(t, 5*time.Minute, requests[0].TTL)
 
 	updatedPolicies := []*agentgateway.AgentgatewayPolicy{
@@ -65,13 +66,13 @@ func TestSharedJwksRequestsRetargetOwnerAcrossRequestKeys(t *testing.T) {
 	}
 	policies.Reset(updatedPolicies)
 
-	requestsByKey := jwksRequestsByKey(awaitSharedJwksRequests(t, collections.SharedRequests, 2))
+	requestsByKey := jwksRequestsByKey(krttest.Await(t, collections.SharedRequests, 2))
 	assert.Equal(t, 10*time.Minute, requestsByKey[remotehttp.FetchTarget{URL: "https://issuer.example/a"}.Key()].TTL)
 	assert.Equal(t, 5*time.Minute, requestsByKey[remotehttp.FetchTarget{URL: "https://issuer.example/b"}.Key()].TTL)
 }
 
 func TestSharedJwksRequestsRemoveLastOwnerDeletesRequest(t *testing.T) {
-	krtOpts := testKrtOptions(t)
+	krtOpts := krttest.KrtOptions(t)
 	policies := dynamicRemotePolicies(t, []*agentgateway.AgentgatewayPolicy{
 		testRemotePolicy("one", "https://issuer.example/jwks", 5*time.Minute),
 	}, krtOpts)
@@ -85,17 +86,17 @@ func TestSharedJwksRequestsRemoveLastOwnerDeletesRequest(t *testing.T) {
 		KrtOpts: krtOpts,
 	})
 
-	awaitSharedJwksRequests(t, collections.SharedRequests, 1)
+	krttest.Await(t, collections.SharedRequests, 1)
 
 	policies.Reset(nil)
 
-	awaitSharedJwksRequests(t, collections.SharedRequests, 0)
+	krttest.Await(t, collections.SharedRequests, 0)
 }
 
 func TestStoreTracksSharedRequestCollectionLifecycle(t *testing.T) {
-	krtOpts := testKrtOptions(t)
+	krtOpts := krttest.KrtOptions(t)
 	requests := dynamicSharedJwksRequests(t, []SharedJwksRequest{
-		testSharedJwksRequest("https://issuer.example/a", 5*time.Minute),
+		testStoreSharedJwksRequest("https://issuer.example/a", 5*time.Minute),
 	}, krtOpts)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -106,32 +107,37 @@ func TestStoreTracksSharedRequestCollectionLifecycle(t *testing.T) {
 		DefaultJwksStorePrefix,
 		"agentgateway-system",
 	)
+
 	store := NewStore(requests, persisted, DefaultJwksStorePrefix)
-	store.jwksFetcher.defaultJwksClient = offlineStubJwksClient{}
+	store.Fetcher.Driver.(*JwksDriver).DefaultClient = &http.Client{Transport: krttest.OfflineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
 	}()
 
-	assert.Eventually(t, store.HasSynced, testEventuallyTimeout, testEventuallyPoll)
-	state := awaitJwksFetchState(t, store.jwksFetcher, remotehttp.FetchTarget{URL: "https://issuer.example/a"}.Key())
-	assert.Equal(t, 5*time.Minute, state.source.TTL)
+	assert.Eventually(t, store.HasSynced, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
+	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
 	updatedRequests := []SharedJwksRequest{
-		testSharedJwksRequest("https://issuer.example/b", 10*time.Minute),
+		testStoreSharedJwksRequest("https://issuer.example/b", 10*time.Minute),
 	}
 	requests.Reset(updatedRequests)
 
-	awaitNoJwksFetchState(t, store.jwksFetcher, remotehttp.FetchTarget{URL: "https://issuer.example/a"}.Key())
-	newState := awaitJwksFetchState(t, store.jwksFetcher, remotehttp.FetchTarget{URL: "https://issuer.example/b"}.Key())
-	assert.Equal(t, 10*time.Minute, newState.source.TTL)
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
+	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
 	requests.Reset(nil)
 
-	awaitNoJwksFetchState(t, store.jwksFetcher, remotehttp.FetchTarget{URL: "https://issuer.example/b"}.Key())
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, 0, store.Fetcher.RequestCountForTest())
+	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 }
 
 func TestStoreDropsOldFetchStateWhenPolicyRetargets(t *testing.T) {
-	krtOpts := testKrtOptions(t)
+	krtOpts := krttest.KrtOptions(t)
 	policies := dynamicRemotePolicies(t, []*agentgateway.AgentgatewayPolicy{
 		testRemotePolicy("one", "https://issuer.example/v1", 5*time.Minute),
 	}, krtOpts)
@@ -154,23 +160,24 @@ func TestStoreDropsOldFetchStateWhenPolicyRetargets(t *testing.T) {
 		"agentgateway-system",
 	)
 	store := NewStore(collections.SharedRequests, persisted, DefaultJwksStorePrefix)
-	store.jwksFetcher.defaultJwksClient = offlineStubJwksClient{}
+	store.Fetcher.Driver.(*JwksDriver).DefaultClient = &http.Client{Transport: krttest.OfflineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
 	}()
 
-	oldKey := remotehttp.FetchTarget{URL: "https://issuer.example/v1"}.Key()
-	newKey := remotehttp.FetchTarget{URL: "https://issuer.example/v2"}.Key()
+	assert.Eventually(t, store.HasSynced, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
-	assert.Eventually(t, store.HasSynced, testEventuallyTimeout, testEventuallyPoll)
-	awaitJwksFetchState(t, store.jwksFetcher, oldKey)
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
+	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
 	policies.Reset([]*agentgateway.AgentgatewayPolicy{
 		testRemotePolicy("one", "https://issuer.example/v2", 5*time.Minute),
 	})
 
-	awaitNoJwksFetchState(t, store.jwksFetcher, oldKey)
-	awaitJwksFetchState(t, store.jwksFetcher, newKey)
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
+	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 }
 
 func TestStoreLoadsPersistedKeysetsBeforeServing(t *testing.T) {
@@ -186,7 +193,7 @@ func TestStoreLoadsPersistedKeysetsBeforeServing(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "jwks-store-legacy-name",
 			Namespace: "agentgateway-system",
-			Labels:    JwksStoreConfigMapLabel(DefaultJwksStorePrefix),
+			Labels:    remotecache.ConfigMapLabels(DefaultJwksStorePrefix),
 		},
 	}
 	assert.NoError(t, SetJwksInConfigMap(cm, keyset))
@@ -203,23 +210,19 @@ func TestStoreLoadsPersistedKeysetsBeforeServing(t *testing.T) {
 		"agentgateway-system",
 	)
 	store := NewStore(requests, persisted, DefaultJwksStorePrefix)
-	store.jwksFetcher.defaultJwksClient = offlineStubJwksClient{}
+	store.Fetcher.Driver.(*JwksDriver).DefaultClient = &http.Client{Transport: krttest.OfflineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
 	}()
 
-	assert.Eventually(t, store.HasSynced, testEventuallyTimeout, testEventuallyPoll)
+	assert.Eventually(t, store.HasSynced, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 	actual, ok := store.JwksByRequestKey(keyset.RequestKey)
 	assert.True(t, ok)
 	assert.Equal(t, keyset, actual)
 }
 
-// Reproducer for https://github.com/agentgateway/agentgateway/issues/1616.
-// Stand up the full AgentPolicy -> ... -> SharedJwksRequest KRT derivation,
-// populate the fetcher cache (simulating a successful remote fetch), then
-// delete the AgentPolicy and assert the cache is cleared.
-func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
-	krtOpts := testKrtOptions(t)
+func TestStoreClearsResultWhenLastPolicyDeleted(t *testing.T) {
+	krtOpts := krttest.KrtOptions(t)
 	uri := "https://issuer.example/jwks"
 	requestKey := remotehttp.FetchTarget{URL: uri}.Key()
 
@@ -245,36 +248,32 @@ func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 		"agentgateway-system",
 	)
 	store := NewStore(collections.SharedRequests, persisted, DefaultJwksStorePrefix)
-	store.jwksFetcher.defaultJwksClient = offlineStubJwksClient{}
+	store.Fetcher.Driver.(*JwksDriver).DefaultClient = &http.Client{Transport: krttest.OfflineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
 	}()
 
-	assert.Eventually(t, store.HasSynced, testEventuallyTimeout, testEventuallyPoll)
-	awaitJwksFetchState(t, store.jwksFetcher, requestKey)
+	assert.Eventually(t, store.HasSynced, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
-	seedJwksCacheForTest(store.jwksCache, requestKey, uri)
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
+	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+
+	seedStoreJwksResultForTest(store.results, requestKey, uri)
 	_, ok := store.JwksByRequestKey(requestKey)
-	assert.True(t, ok, "cache should be populated before policy deletion")
+	assert.True(t, ok, "result should be populated before policy deletion")
 
 	// Delete the AgentPolicy.
 	policies.Reset(nil)
 
-	// f.requests should be cleared.
-	awaitNoJwksFetchState(t, store.jwksFetcher, requestKey)
-
-	// Cache should also be cleared -- otherwise the CM controller will
-	// re-create the ConfigMap on every reconcile.
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		_, ok := store.JwksByRequestKey(requestKey)
-		assert.False(c, ok, "cache should be cleared when last policy is deleted")
-	}, testEventuallyTimeout, testEventuallyPoll)
+		assert.False(c, ok, "result should be cleared when last policy is deleted")
+	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 }
 
-// Variant: the user's report said "I had some AgPolicies" (plural). Test the
-// case where two policies share a key and both are removed in one burst.
-func TestStoreClearsCacheWhenAllSharedPoliciesDeleted(t *testing.T) {
-	krtOpts := testKrtOptions(t)
+func TestStoreClearsResultWhenAllSharedPoliciesDeleted(t *testing.T) {
+	krtOpts := krttest.KrtOptions(t)
 	uri := "https://issuer.example/jwks"
 	requestKey := remotehttp.FetchTarget{URL: uri}.Key()
 
@@ -301,31 +300,29 @@ func TestStoreClearsCacheWhenAllSharedPoliciesDeleted(t *testing.T) {
 		"agentgateway-system",
 	)
 	store := NewStore(collections.SharedRequests, persisted, DefaultJwksStorePrefix)
-	store.jwksFetcher.defaultJwksClient = offlineStubJwksClient{}
+	store.Fetcher.Driver.(*JwksDriver).DefaultClient = &http.Client{Transport: krttest.OfflineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
 	}()
 
-	assert.Eventually(t, store.HasSynced, testEventuallyTimeout, testEventuallyPoll)
-	awaitJwksFetchState(t, store.jwksFetcher, requestKey)
+	assert.Eventually(t, store.HasSynced, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
-	seedJwksCacheForTest(store.jwksCache, requestKey, uri)
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
+	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+
+	seedStoreJwksResultForTest(store.results, requestKey, uri)
 
 	policies.Reset(nil)
 
-	awaitNoJwksFetchState(t, store.jwksFetcher, requestKey)
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		_, ok := store.JwksByRequestKey(requestKey)
 		assert.False(c, ok)
-	}, testEventuallyTimeout, testEventuallyPoll)
+	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 }
 
-// Variant: controller starts with ConfigMap already persisted (warm start),
-// an AgentPolicy exists that matches it, then the AgentPolicy is deleted.
-// This exercises the path where the cache is seeded by LoadPersistedKeysets
-// AND subsequently AddOrUpdateKeyset fires from the register replay.
-func TestStoreClearsCacheWhenPolicyDeletedAfterWarmStart(t *testing.T) {
-	krtOpts := testKrtOptions(t)
+func TestStoreClearsResultWhenPolicyDeletedAfterWarmStart(t *testing.T) {
+	krtOpts := krttest.KrtOptions(t)
 	uri := "https://issuer.example/jwks"
 	requestKey := remotehttp.FetchTarget{URL: uri}.Key()
 
@@ -336,9 +333,9 @@ func TestStoreClearsCacheWhenPolicyDeletedAfterWarmStart(t *testing.T) {
 	}
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      JwksConfigMapName(DefaultJwksStorePrefix, requestKey),
+			Name:      remotecache.ConfigMapName(DefaultJwksStorePrefix, requestKey),
 			Namespace: "agentgateway-system",
-			Labels:    JwksStoreConfigMapLabel(DefaultJwksStorePrefix),
+			Labels:    remotecache.ConfigMapLabels(DefaultJwksStorePrefix),
 		},
 	}
 	assert.NoError(t, SetJwksInConfigMap(cm, persistedKeyset))
@@ -365,30 +362,30 @@ func TestStoreClearsCacheWhenPolicyDeletedAfterWarmStart(t *testing.T) {
 		"agentgateway-system",
 	)
 	store := NewStore(collections.SharedRequests, persisted, DefaultJwksStorePrefix)
-	store.jwksFetcher.defaultJwksClient = offlineStubJwksClient{}
+	store.Fetcher.Driver.(*JwksDriver).DefaultClient = &http.Client{Transport: krttest.OfflineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
 	}()
 
-	assert.Eventually(t, store.HasSynced, testEventuallyTimeout, testEventuallyPoll)
-	awaitJwksFetchState(t, store.jwksFetcher, requestKey)
+	assert.Eventually(t, store.HasSynced, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
+	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+
 	_, ok := store.JwksByRequestKey(requestKey)
-	assert.True(t, ok, "cache should be seeded from persisted ConfigMap")
+	assert.True(t, ok, "result should be seeded from persisted ConfigMap")
 
 	policies.Reset(nil)
 
-	awaitNoJwksFetchState(t, store.jwksFetcher, requestKey)
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		_, ok := store.JwksByRequestKey(requestKey)
 		assert.False(c, ok)
-	}, testEventuallyTimeout, testEventuallyPoll)
+	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 }
 
-// Variant: orphan CM exists at startup with no matching AgentPolicy. The
-// cache gets seeded from persistence but f.requests never gets the key,
-// so there's no trigger to delete the CM at all.
-func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
-	krtOpts := testKrtOptions(t)
+func TestStoreClearsOrphanResultAtStartup(t *testing.T) {
+	krtOpts := krttest.KrtOptions(t)
 	uri := "https://issuer.example/jwks"
 	requestKey := remotehttp.FetchTarget{URL: uri}.Key()
 
@@ -399,9 +396,9 @@ func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
 	}
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      JwksConfigMapName(DefaultJwksStorePrefix, requestKey),
+			Name:      remotecache.ConfigMapName(DefaultJwksStorePrefix, requestKey),
 			Namespace: "agentgateway-system",
-			Labels:    JwksStoreConfigMapLabel(DefaultJwksStorePrefix),
+			Labels:    remotecache.ConfigMapLabels(DefaultJwksStorePrefix),
 		},
 	}
 	assert.NoError(t, SetJwksInConfigMap(cm, persistedKeyset))
@@ -426,51 +423,24 @@ func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
 		"agentgateway-system",
 	)
 	store := NewStore(collections.SharedRequests, persisted, DefaultJwksStorePrefix)
-	store.jwksFetcher.defaultJwksClient = offlineStubJwksClient{}
+	store.Fetcher.Driver.(*JwksDriver).DefaultClient = &http.Client{Transport: krttest.OfflineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
 	}()
 
-	assert.Eventually(t, store.HasSynced, testEventuallyTimeout, testEventuallyPoll)
+	assert.Eventually(t, store.HasSynced, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
-	// After sync, the orphan cache entry should be cleared.
+	// After sync, the orphan result should be cleared.
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		_, ok := store.JwksByRequestKey(requestKey)
-		assert.False(c, ok, "orphan cache entry should be cleared after sync")
-	}, testEventuallyTimeout, testEventuallyPoll)
+		assert.False(c, ok, "orphan result should be cleared after sync")
+	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 }
-
-func TestStoreHasSyncedReflectsReadyState(t *testing.T) {
-	store := &Store{
-		ready: make(chan struct{}),
-	}
-
-	assert.False(t, store.HasSynced())
-
-	close(store.ready)
-
-	assert.True(t, store.HasSynced())
-}
-
-// offlineStubJwksClient fails every fetch so Store tests don't depend on
-// DNS or network resolution of the fake issuer URLs used as test fixtures.
-type offlineStubJwksClient struct{}
-
-func (offlineStubJwksClient) FetchJwks(_ context.Context, _ remotehttp.FetchTarget) (jose.JSONWebKeySet, error) {
-	return jose.JSONWebKeySet{}, errOfflineStub
-}
-
-var errOfflineStub = fmt.Errorf("offline stub")
 
 type jwksResolverFunc func(owner RemoteJwksOwner) (*ResolvedJwksRequest, error)
 
 func (f jwksResolverFunc) ResolveOwner(_ krt.HandlerContext, owner RemoteJwksOwner) (*ResolvedJwksRequest, error) {
 	return f(owner)
-}
-
-func testKrtOptions(t *testing.T) krtutil.KrtOptions {
-	t.Helper()
-	return krtutil.NewKrtOptions(t.Context().Done(), new(krt.DebugHandler))
 }
 
 func testRemotePolicy(name, uri string, ttl time.Duration) *agentgateway.AgentgatewayPolicy {
@@ -567,7 +537,7 @@ func resolvedJwksRequest(owner RemoteJwksOwner, requestURL string) *ResolvedJwks
 	}
 }
 
-func testSharedJwksRequest(requestURL string, ttl time.Duration) SharedJwksRequest {
+func testStoreSharedJwksRequest(requestURL string, ttl time.Duration) SharedJwksRequest {
 	target := remotehttp.FetchTarget{URL: requestURL}
 	return SharedJwksRequest{
 		RequestKey: target.Key(),
@@ -576,44 +546,18 @@ func testSharedJwksRequest(requestURL string, ttl time.Duration) SharedJwksReque
 	}
 }
 
+func seedStoreJwksResultForTest(results *JwksResults, requestKey remotehttp.FetchKey, url string) {
+	results.Put(Keyset{
+		RequestKey: requestKey,
+		URL:        url,
+		JwksJSON:   `{"keys":[]}`,
+	})
+}
+
 func jwksRequestsByKey(requests []SharedJwksRequest) map[remotehttp.FetchKey]SharedJwksRequest {
 	out := make(map[remotehttp.FetchKey]SharedJwksRequest, len(requests))
 	for _, request := range requests {
 		out[request.RequestKey] = request
 	}
 	return out
-}
-
-func awaitJwksFetchState(t *testing.T, f *Fetcher, requestKey remotehttp.FetchKey) fetchState {
-	t.Helper()
-
-	var state fetchState
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		var ok bool
-		state, ok = f.lookup(requestKey)
-		assert.True(c, ok)
-	}, testEventuallyTimeout, testEventuallyPoll)
-
-	return state
-}
-
-func awaitNoJwksFetchState(t *testing.T, f *Fetcher, requestKey remotehttp.FetchKey) {
-	t.Helper()
-
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		_, ok := f.lookup(requestKey)
-		assert.False(c, ok)
-	}, testEventuallyTimeout, testEventuallyPoll)
-}
-
-func awaitSharedJwksRequests(t *testing.T, requests krt.Collection[SharedJwksRequest], expectedLen int) []SharedJwksRequest {
-	t.Helper()
-
-	var shared []SharedJwksRequest
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		shared = requests.List()
-		assert.Len(c, shared, expectedLen)
-	}, testEventuallyTimeout, testEventuallyPoll)
-
-	return shared
 }

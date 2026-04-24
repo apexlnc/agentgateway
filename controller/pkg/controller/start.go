@@ -21,6 +21,7 @@ import (
 	apisettings "github.com/agentgateway/agentgateway/controller/api/settings"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
+	oidcpkg "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	agwplugins "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/plugins"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
@@ -77,8 +78,10 @@ type StartConfig struct {
 	AgwCollections *agwplugins.AgwCollections
 	Resolver       remotehttp.Resolver
 	JWKSLookup     jwks.Lookup
+	OidcLookup     oidcpkg.Lookup
+
 	// CredentialResolverFactory builds the complete credential resolver chain.
-	// If unset, the built-in Secret resolver is used.
+	// If nil, the default Secret-backed resolver is used.
 	CredentialResolverFactory agwplugins.CredentialResolverFactory
 
 	KrtOptions                     krtutil.KrtOptions
@@ -179,9 +182,9 @@ func NewControllerBuilder(ctx context.Context, cfg StartConfig) (*ControllerBuil
 }
 
 // Plugins registers built-in policy plugins with a shared credential resolver.
-func Plugins(agw *agwplugins.AgwCollections, resolver remotehttp.Resolver, jwksLookup jwks.Lookup, credentialResolver kubeutils.CredentialResolver) []agwplugins.AgwPlugin {
+func Plugins(agw *agwplugins.AgwCollections, resolver remotehttp.Resolver, jwksLookup jwks.Lookup, oidcLookup oidcpkg.Lookup, credentialResolver kubeutils.CredentialResolver) []agwplugins.AgwPlugin {
 	return []agwplugins.AgwPlugin{
-		agwplugins.NewAgentPlugin(agw, resolver, jwksLookup, credentialResolver),
+		agwplugins.NewAgentPlugin(agw, resolver, jwksLookup, oidcLookup, credentialResolver),
 		agwplugins.NewInferencePlugin(agw),
 		agwplugins.NewA2APlugin(agw),
 		agwplugins.NewBackendTLSPlugin(agw),
@@ -195,7 +198,7 @@ func agwPluginFactory(cfg StartConfig) func(ctx context.Context, agw *agwplugins
 		if credentialResolverFactory == nil {
 			credentialResolverFactory = agwplugins.DefaultCredentialResolverFactory
 		}
-		plugins := Plugins(agw, cfg.Resolver, cfg.JWKSLookup, credentialResolverFactory(agw))
+		plugins := Plugins(agw, cfg.Resolver, cfg.JWKSLookup, cfg.OidcLookup, credentialResolverFactory(agw))
 		if cfg.ExtraAgwPlugins != nil {
 			plugins = append(plugins, cfg.ExtraAgwPlugins(ctx, agw)...)
 		}

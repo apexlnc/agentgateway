@@ -756,6 +756,7 @@ const (
 )
 
 // +kubebuilder:validation:IfThenOnlyFields:if="has(self.phase) && self.phase == 'PreRouting'",fields=phase;authorization;transformation;extProc;extAuth;jwtAuthentication;basicAuthentication;apiKeyAuthentication;cors,message="phase PreRouting only supports extAuth, authorization, transformation, extProc, jwtAuthentication, basicAuthentication, apiKeyAuthentication and cors"
+// +kubebuilder:validation:XValidation:rule="!(has(self.oidc) && has(self.jwtAuthentication))",message="oidc and jwtAuthentication are mutually exclusive"
 type Traffic struct {
 	// The phase to apply the traffic policy to. If the phase is `PreRouting`,
 	// the `targetRef` must be a `Gateway` or a `Listener`. `PreRouting` is
@@ -854,6 +855,16 @@ type Traffic struct {
 	// +optional
 	APIKeyAuthentication *APIKeyAuthentication `json:"apiKeyAuthentication,omitempty"`
 
+	// Enables browser-based user login at the gateway using the OpenID
+	// Connect Authorization Code Flow with PKCE. The gateway terminates the
+	// redirect flow, validates the ID token, and issues an encrypted session
+	// cookie, so upstream services receive authenticated requests. For
+	// bearer-token validation on machine-to-machine APIs, use
+	// `jwtAuthentication` instead. Requires `SESSION_KEY` on the gateway pod
+	// (auto-mounted by the deployer).
+	// +optional
+	OIDC *OIDC `json:"oidc,omitempty"`
+
 	// Sends a direct response to the
 	// client.
 	// +optional
@@ -940,6 +951,56 @@ func (d *DirectResponseOrConditional) ConditionalPolicy() (*DirectResponse, iter
 		return nil, seq
 	}
 	return &d.DirectResponse, seq
+}
+
+// +kubebuilder:validation:XValidation:rule="has(self.tokenEndpointAuthMethod) && self.tokenEndpointAuthMethod == 'None' ? !has(self.clientSecret) : true",message="tokenEndpointAuthMethod None must not be paired with a clientSecret"
+// +kubebuilder:validation:XValidation:rule="has(self.tokenEndpointAuthMethod) && self.tokenEndpointAuthMethod in ['ClientSecretBasic', 'ClientSecretPost'] ? has(self.clientSecret) : true",message="tokenEndpointAuthMethod ClientSecretBasic or ClientSecretPost requires a clientSecret"
+type OIDC struct {
+	// The OIDC issuer URL. Must be an absolute HTTPS URL with no query or
+	// fragment. The configured value is preserved exactly for
+	// discovery-document issuer matching, including any trailing slash.
+	// +kubebuilder:validation:Pattern=`^https://[^/?#]+(/[^?#]*)?$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +required
+	IssuerURL string `json:"issuerURL"`
+
+	// The OIDC client identifier.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +required
+	ClientID string `json:"clientID"`
+
+	// References a Secret containing the OIDC client secret under the
+	// `clientSecret` data key. Omit for a public client; PKCE alone then
+	// protects the authorization code exchange and the IdP must accept the
+	// `none` token-endpoint auth method (see `tokenEndpointAuthMethod`).
+	// +optional
+	ClientSecret *corev1.LocalObjectReference `json:"clientSecret,omitempty"`
+
+	// The callback URL registered with the IdP. Must be an absolute http(s)
+	// URL with no query or fragment. The `http` scheme is permitted only for
+	// `localhost` development; production deployments must use `https`.
+	// +kubebuilder:validation:Pattern=`^https?://[^?#\s]+$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	// +required
+	RedirectURI string `json:"redirectURI"`
+
+	// Scopes to request from the IdP. The `openid` scope is always included.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=256
+	Scopes []string `json:"scopes,omitempty"`
+
+	// Overrides the auth method the IdP advertises in its discovery document.
+	// `None` selects public-client mode (no client authentication at the
+	// token endpoint; PKCE still protects the code exchange) and must not be
+	// paired with a `clientSecret`.
+	// +optional
+	// +kubebuilder:validation:Enum=ClientSecretBasic;ClientSecretPost;None
+	TokenEndpointAuthMethod *string `json:"tokenEndpointAuthMethod,omitempty"`
 }
 
 // +k8s:enum
