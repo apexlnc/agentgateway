@@ -28,7 +28,7 @@ use crate::types::agent::{
 	McpAuthentication, PolicyKey, PolicyTarget, Route, RouteGroupKey, RouteKey, RouteName, RouteSet,
 	TCPRoute, TCPRouteSet, TargetedPolicy, TrafficPolicy,
 };
-use crate::types::agent_xds::Diagnostics;
+use crate::types::agent_xds::{Diagnostics, targeted_policy_from_proto};
 use crate::types::discovery::NamespacedHostname;
 use crate::types::proto::agent::resource::Kind as XdsKind;
 use crate::types::proto::agent::{
@@ -102,6 +102,10 @@ pub struct Store {
 	tcp_routes: HbHashMap<RouteTarget, Arc<TCPRouteSet>>,
 	listener_change_tx: watch::Sender<u64>,
 	listener_change_rx: watch::Receiver<u64>,
+
+	/// Cookie-crypto encoder applied to xDS-delivered OIDC policies at Store ingestion.
+	/// It is present only when the gateway session encoder is backed by AES key material.
+	oidc_cookie_encoder: Option<crate::http::oidc::OidcCookieEncoder>,
 
 	tx: tokio::sync::mpsc::UnboundedSender<BindEvent>,
 	rx: Option<tokio::sync::mpsc::UnboundedReceiver<BindEvent>>,
@@ -524,9 +528,29 @@ impl Store {
 			tcp_routes: Default::default(),
 			listener_change_tx,
 			listener_change_rx,
+			oidc_cookie_encoder: None,
 			tx,
 			rx: Some(rx),
 		}
+	}
+
+	/// Install the ambient cookie-crypto encoder used to compile xDS OIDC
+	/// policies into runtime [`crate::http::oidc::OidcPolicy`] values.
+	///
+	/// Must be called exactly once, during gateway construction, before xDS
+	/// ingestion begins. Calling it after the first OIDC policy has been
+	/// ingested would silently rotate the encoder for subsequently-translated
+	/// policies while leaving already-cached `OidcPolicy` values bound to the
+	/// previous encoder — a footgun the `debug_assert!` traps in tests.
+	///
+	/// Until this is called, the xDS proto-decode rejects OIDC policies with
+	/// `SESSION_KEY is not configured on this gateway`.
+	pub(crate) fn set_oidc_cookie_encoder(&mut self, encoder: crate::http::oidc::OidcCookieEncoder) {
+		debug_assert!(
+			self.oidc_cookie_encoder.is_none(),
+			"OIDC cookie encoder already installed; set_oidc_cookie_encoder must be called once",
+		);
+		self.oidc_cookie_encoder = Some(encoder);
 	}
 
 	fn listener_target_ref(listener: &ListenerKey) -> RouteTargetRef<'_> {
@@ -1440,7 +1464,8 @@ impl Store {
 		raw: XdsRoute,
 		diagnostics: &mut Diagnostics,
 	) -> anyhow::Result<()> {
-		let (route, listener_name, rgk) = Route::from_xds(&raw, diagnostics)?;
+		let (route, listener_name, rgk) =
+			Route::from_xds(&raw, diagnostics, self.oidc_cookie_encoder.as_ref())?;
 		if let Some(rgk) = rgk {
 			// use group over service key here, the leaf route has a service key for policy
 			self.insert_route_into_group(route, rgk);
@@ -1480,7 +1505,7 @@ impl Store {
 		raw: XdsPolicy,
 		diagnostics: &mut Diagnostics,
 	) -> anyhow::Result<()> {
-		let policy = crate::types::agent_xds::targeted_policy_from_proto(&raw, diagnostics)?;
+		let policy = targeted_policy_from_proto(&raw, diagnostics, self.oidc_cookie_encoder.as_ref())?;
 		self.insert_policy(policy);
 		Ok(())
 	}
@@ -2620,6 +2645,97 @@ mod tests {
 		assert!(
 			pols_b.access_log.is_none(),
 			"section-targeted policy should NOT apply to a different listener in the same set"
+		);
+	}
+
+	fn oidc_xds_policy(jwks_inline: &str) -> XdsPolicy {
+		use crate::types::proto::agent;
+
+		XdsPolicy {
+			key: "test-oidc".to_string(),
+			name: Some(agent::TypedResourceName {
+				name: "test-oidc".to_string(),
+				namespace: "default".to_string(),
+				kind: "Policy".to_string(),
+			}),
+			target: Some(agent::PolicyTarget {
+				kind: Some(agent::policy_target::Kind::Route(
+					agent::policy_target::RouteTarget {
+						name: "test-route".to_string(),
+						namespace: "default".to_string(),
+						..Default::default()
+					},
+				)),
+			}),
+			kind: Some(agent::policy::Kind::Traffic(agent::TrafficPolicySpec {
+				kind: Some(agent::traffic_policy_spec::Kind::Oidc(
+					agent::traffic_policy_spec::Oidc {
+						policy_id: "route/test-route".to_string(),
+						issuer: "https://example.com".to_string(),
+						authorization_endpoint: "https://example.com/auth".to_string(),
+						token_endpoint: "https://example.com/token".to_string(),
+						token_endpoint_auth: agent::traffic_policy_spec::oidc::TokenEndpointAuth::None.into(),
+						client_id: "client".to_string(),
+						client_secret: String::new(),
+						redirect_uri: "https://example.com/callback".to_string(),
+						jwks_inline: jwks_inline.to_string(),
+						scopes: vec![],
+					},
+				)),
+				phase: agent::traffic_policy_spec::PolicyPhase::Route.into(),
+			})),
+		}
+	}
+
+	#[test]
+	fn test_oidc_policy_rejected_without_session_key() {
+		let mut store = Store::default();
+		let mut diagnostics = Diagnostics::default();
+
+		let res = store.insert_xds_policy(oidc_xds_policy("{\"keys\":[]}"), &mut diagnostics);
+		let err = res.expect_err("OIDC policy should be rejected without session key");
+		let msg = err.to_string();
+		assert!(
+			msg.contains("xDS OIDC") && msg.contains("SESSION_KEY"),
+			"Error message should mention both 'xDS OIDC' and 'SESSION_KEY', got: {msg}"
+		);
+	}
+
+	#[test]
+	fn test_oidc_policy_accepted_with_session_key() {
+		const TEST_JWKS: &str = r#"{"keys":[{"use":"sig","kty":"EC","kid":"kid-1","crv":"P-256","alg":"ES256","x":"WM7udBHga09KxC5kxq6GhrZ9M3Y8S9ZThq_XxsOcDhk","y":"xc7T4afkXmwjEbJMzQXCdQcU3PZKiLFlHl23GE1z4ug"}]}"#;
+
+		let session_encoder = crate::http::sessionpersistence::Encoder::aes(
+			"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		)
+		.expect("aes session encoder");
+		let oidc_encoder =
+			crate::http::oidc::OidcCookieEncoder::from_session_encoder(&session_encoder)
+				.expect("oidc cookie encoder");
+
+		let mut store = Store::new(
+			false,
+			crate::ThreadingMode::Multithreaded,
+			Some(oidc_encoder),
+		);
+		let mut diagnostics = Diagnostics::default();
+
+		store
+			.insert_xds_policy(oidc_xds_policy(TEST_JWKS), &mut diagnostics)
+			.expect("OIDC policy should be accepted when session key is configured");
+
+		let key: PolicyKey = strng::new("test-oidc");
+		let policy = store
+			.policies_by_key
+			.get(&key)
+			.expect("inserted OIDC policy must be retrievable by key");
+		let traffic = policy
+			.policy
+			.as_traffic_route_phase()
+			.expect("inserted policy must be a route-phase traffic policy");
+		assert!(
+			matches!(traffic, TrafficPolicy::Oidc(_)),
+			"inserted policy must be TrafficPolicy::Oidc"
 		);
 	}
 }

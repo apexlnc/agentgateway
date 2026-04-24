@@ -29,6 +29,7 @@ import (
 	apisettings "github.com/agentgateway/agentgateway/controller/api/settings"
 	"github.com/agentgateway/agentgateway/controller/pkg/admin"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	agwplugins "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/plugins"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/policyselection"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
@@ -238,6 +239,9 @@ func (s *setup) Start(ctx context.Context) error {
 	}
 	jwksLookup := jwks.NewLookup(persistedJWKS, jwks.NewResolver(resolver))
 
+	persistedOIDC := oidc.NewPersistedEntries(s.APIClient, krtOpts, oidc.DefaultStorePrefix, namespaces.GetPodNamespace())
+	oidcLookup := oidc.NewLookup(persistedOIDC)
+
 	for _, mgrCfgFunc := range s.ExtraManagerConfig {
 		err := mgrCfgFunc(mgr)
 		if err != nil {
@@ -266,18 +270,25 @@ func (s *setup) Start(ctx context.Context) error {
 		}
 	}
 
-	agw, err := s.buildSyncer(ctx, mgr, setupOpts, agwCollections, resolver, jwksLookup)
+	// build oidc store
+	if !runnablesRegistry.Contains(oidc.DefaultStorePrefix) {
+		if err := buildOidcStore(ctx, mgr, s.APIClient, agwCollections, persistedOIDC); err != nil {
+			return fmt.Errorf("error creating oidc store %w", err)
+		}
+	}
+
+	syncer, err := s.buildSyncer(ctx, mgr, setupOpts, agwCollections, resolver, jwksLookup, oidcLookup)
 	if err != nil {
 		return err
 	}
 
-	if s.XDSListener != nil && agw != nil {
+	if s.XDSListener != nil && syncer != nil {
 		if s.GlobalSettings.XdsMode == apisettings.XdsModeEither {
 			xdsMux := cmux.New(s.XDSListener)
 			tlsListener := xdsMux.Match(cmux.TLS())
 			plaintextListener := xdsMux.Match(cmux.Any())
-			runXDSServer(ctx, tlsListener, authenticators, s.GlobalSettings.XdsAuth, certWatcher, agw.NackPublisher, agw.Registrations...)
-			runXDSServer(ctx, plaintextListener, authenticators, s.GlobalSettings.XdsAuth, nil, agw.NackPublisher, agw.Registrations...)
+			runXDSServer(ctx, tlsListener, authenticators, s.GlobalSettings.XdsAuth, certWatcher, syncer.NackPublisher, syncer.Registrations...)
+			runXDSServer(ctx, plaintextListener, authenticators, s.GlobalSettings.XdsAuth, nil, syncer.NackPublisher, syncer.Registrations...)
 			context.AfterFunc(ctx, xdsMux.Close)
 			go func() {
 				if err := xdsMux.Serve(); err != nil && err != cmux.ErrListenerClosed && err != cmux.ErrServerClosed {
@@ -285,9 +296,9 @@ func (s *setup) Start(ctx context.Context) error {
 				}
 			}()
 		} else if s.GlobalSettings.IsXdsTLSEnabled() {
-			runXDSServer(ctx, s.XDSListener, authenticators, s.GlobalSettings.XdsAuth, certWatcher, agw.NackPublisher, agw.Registrations...)
+			runXDSServer(ctx, s.XDSListener, authenticators, s.GlobalSettings.XdsAuth, certWatcher, syncer.NackPublisher, syncer.Registrations...)
 		} else if s.GlobalSettings.IsXdsPlaintextEnabled() {
-			runXDSServer(ctx, s.XDSListener, authenticators, s.GlobalSettings.XdsAuth, nil, agw.NackPublisher, agw.Registrations...)
+			runXDSServer(ctx, s.XDSListener, authenticators, s.GlobalSettings.XdsAuth, nil, syncer.NackPublisher, syncer.Registrations...)
 		}
 	}
 
@@ -332,6 +343,7 @@ func (s *setup) buildSyncer(
 	agwCollections *agwplugins.AgwCollections,
 	resolver remotehttp.Resolver,
 	jwksLookup jwks.Lookup,
+	oidcLookup oidc.Lookup,
 ) (*syncer.Syncer, error) {
 	slog.Info("creating krt collections")
 	krtOpts := krtutil.NewKrtOptions(ctx.Done(), setupOpts.KrtDebugger)
@@ -360,6 +372,7 @@ func (s *setup) buildSyncer(
 		AgwCollections:                 agwCollections,
 		Resolver:                       resolver,
 		JWKSLookup:                     jwksLookup,
+		OidcLookup:                     oidcLookup,
 		ExtraAgwResourceStatusHandlers: s.ExtraStatusHandlers,
 		GatewayControllerExtension:     s.GatewayControllerExtension,
 		AgentgatewaySyncerOptions:      s.AgentGatewaySyncerOptions,
@@ -443,6 +456,38 @@ func buildJwksStore(
 	jwksStoreCMCtrl := jwks.NewConfigMapController(apiClient, jwks.DefaultJwksStorePrefix, namespaces.GetPodNamespace(), jwksStore, persistedJWKS)
 	jwksStoreCMCtrl.Init(ctx)
 	if err := mgr.Add(jwksStoreCMCtrl); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func buildOidcStore(
+	ctx context.Context,
+	mgr manager.Manager,
+	apiClient apiclient.Client,
+	agwCollections *agwplugins.AgwCollections,
+	persistedOIDC *oidc.PersistedEntries,
+) error {
+	oidcCollections := oidc.NewCollections(oidc.CollectionInputs{
+		AgentgatewayPolicies: agwCollections.AgentgatewayPolicies,
+		KrtOpts:              agwCollections.KrtOpts,
+	})
+
+	oidcStore := oidc.NewStore(oidcCollections.SharedRequests, persistedOIDC, oidc.DefaultStorePrefix)
+	if err := mgr.Add(oidcStore); err != nil {
+		return err
+	}
+
+	oidcStoreCMCtrl := oidc.NewConfigMapController(oidc.ConfigMapControllerOptions{
+		APIClient:           apiClient,
+		StorePrefix:         oidc.DefaultStorePrefix,
+		DeploymentNamespace: namespaces.GetPodNamespace(),
+		Store:               oidcStore,
+		PersistedEntries:    persistedOIDC,
+	})
+	oidcStoreCMCtrl.Init(ctx)
+	if err := mgr.Add(oidcStoreCMCtrl); err != nil {
 		return err
 	}
 
