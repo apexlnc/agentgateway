@@ -55,6 +55,7 @@ type gatewayReconciler struct {
 	gwClient         kclient.Client[*gwv1.Gateway]
 	gwClassClient    kclient.Client[*gwv1.GatewayClass]
 	agwParamClient   kclient.Client[*agentgateway.AgentgatewayParameters]
+	agwPolicyClient  kclient.Client[*agentgateway.AgentgatewayPolicy]
 	nsClient         kclient.Client[*corev1.Namespace]
 	svcClient        kclient.Client[*corev1.Service]
 	deploymentClient kclient.Client[*appsv1.Deployment]
@@ -83,6 +84,7 @@ func NewGatewayReconciler(
 
 		gwClient:         kclient.NewFilteredDelayed[*gwv1.Gateway](cfg.Client, gvr.KubernetesGateway, filter),
 		gwClassClient:    kclient.NewFilteredDelayed[*gwv1.GatewayClass](cfg.Client, gvr.GatewayClass, filter),
+		agwPolicyClient:  kclient.NewFilteredDelayed[*agentgateway.AgentgatewayPolicy](cfg.Client, wellknown.AgentgatewayPolicyGVR, filter),
 		nsClient:         kclient.NewFiltered[*corev1.Namespace](cfg.Client, filter),
 		svcClient:        kclient.NewFiltered[*corev1.Service](cfg.Client, filter),
 		deploymentClient: kclient.NewFiltered[*appsv1.Deployment](cfg.Client, filter),
@@ -199,6 +201,15 @@ func NewGatewayReconciler(
 		r.agwParamClient.AddEventHandler(agwParamEventHandler)
 	}
 
+	r.agwPolicyClient.AddEventHandler(controllers.FromEventHandler(func(o controllers.Event) {
+		oldPolicy, _ := o.Old.(*agentgateway.AgentgatewayPolicy)
+		newPolicy, _ := o.New.(*agentgateway.AgentgatewayPolicy)
+		if !policyUsesOIDC(oldPolicy) && !policyUsesOIDC(newPolicy) {
+			return
+		}
+		r.enqueueGatewaysForOIDCPolicyChange(oldPolicy, newPolicy)
+	}))
+
 	// Add a handler to reconcile the parent Gateway when child objects (Deployment, Service, etc.)
 	parentHandler := controllers.ObjectHandler(controllers.EnqueueForParentHandler(r.queue, gvk.KubernetesGateway))
 	r.deploymentClient.AddEventHandler(parentHandler)
@@ -239,6 +250,7 @@ func (r *gatewayReconciler) Start(ctx context.Context) error {
 	hasSynced := []cache.InformerSynced{
 		r.gwClient.HasSynced,
 		r.gwClassClient.HasSynced,
+		r.agwPolicyClient.HasSynced,
 		r.nsClient.HasSynced,
 		r.deploymentClient.HasSynced,
 		r.svcAccountClient.HasSynced,
@@ -260,6 +272,7 @@ func (r *gatewayReconciler) Start(ctx context.Context) error {
 	clients := []controllers.Shutdowner{
 		r.gwClient,
 		r.gwClassClient,
+		r.agwPolicyClient,
 		r.nsClient,
 		r.deploymentClient,
 		r.svcAccountClient,
@@ -275,6 +288,72 @@ func (r *gatewayReconciler) Start(ctx context.Context) error {
 		r.controllerExtension.Stop()
 	}
 	return nil
+}
+
+func policyUsesOIDC(policy *agentgateway.AgentgatewayPolicy) bool {
+	return policy != nil && policy.Spec.Traffic != nil && policy.Spec.Traffic.OIDC != nil
+}
+
+func (r *gatewayReconciler) enqueueGatewayIfManaged(gw *gwv1.Gateway, reason string) {
+	if gw == nil {
+		return
+	}
+	gwc := r.gwClassClient.Get(string(gw.Spec.GatewayClassName), metav1.NamespaceNone)
+	if gwc == nil || gwc.Spec.ControllerName != gwv1.GatewayController(r.agwControllerName) {
+		return
+	}
+	logger.Debug("reconciling Gateway due to OIDC attachment input change", "ref", kubeutils.NamespacedNameFrom(gw), "reason", reason)
+	r.queue.AddObject(gw)
+}
+
+func (r *gatewayReconciler) enqueueGatewayByRef(ref types.NamespacedName, reason string) {
+	if ref.Name == "" {
+		return
+	}
+	gw := r.gwClient.Get(ref.Name, ref.Namespace)
+	r.enqueueGatewayIfManaged(gw, reason)
+}
+
+func (r *gatewayReconciler) enqueueGatewaysForOIDCPolicyChange(oldPolicy, newPolicy *agentgateway.AgentgatewayPolicy) {
+	reason := "OIDC policy change"
+	gateways := sets.New[types.NamespacedName]()
+	gateways = gateways.Union(gatewayRefsFromPolicyStatus(oldPolicy, r.agwControllerName))
+	gateways = gateways.Union(gatewayRefsFromPolicyStatus(newPolicy, r.agwControllerName))
+
+	if len(gateways) == 0 {
+		for _, gw := range r.gwClient.List(metav1.NamespaceAll, labels.Everything()) {
+			r.enqueueGatewayIfManaged(gw, reason)
+		}
+		return
+	}
+
+	for gateway := range gateways {
+		r.enqueueGatewayByRef(gateway, reason)
+	}
+}
+
+func gatewayRefsFromPolicyStatus(policy *agentgateway.AgentgatewayPolicy, controllerName string) sets.Set[types.NamespacedName] {
+	gateways := sets.New[types.NamespacedName]()
+	if policy == nil {
+		return gateways
+	}
+	for _, ancestor := range policy.Status.Ancestors {
+		if string(ancestor.ControllerName) != controllerName {
+			continue
+		}
+		ref := ancestor.AncestorRef
+		group := ptr.OrDefault(ref.Group, gwv1.Group(""))
+		kind := ptr.OrDefault(ref.Kind, gwv1.Kind(""))
+		if string(group) != wellknown.GatewayGVK.Group || string(kind) != wellknown.GatewayGVK.Kind {
+			continue
+		}
+		namespace := ptr.OrDefault(ref.Namespace, gwv1.Namespace(policy.Namespace))
+		gateways.Insert(types.NamespacedName{
+			Namespace: string(namespace),
+			Name:      string(ref.Name),
+		})
+	}
+	return gateways
 }
 
 func (r *gatewayReconciler) Reconcile(req types.NamespacedName) (rErr error) {

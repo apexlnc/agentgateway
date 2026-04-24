@@ -2149,6 +2149,15 @@ pub enum TrafficPolicy {
 	ExtProc(ext_proc::ExtProc),
 	JwtAuth(JwtAuthentication),
 	Oidc(crate::http::oidc::OidcPolicy),
+	/// xDS-delivered OIDC configuration that has not yet been materialized into
+	/// a runtime [`crate::http::oidc::OidcPolicy`].
+	///
+	/// Materialization happens at Store ingestion (see
+	/// `store::BindStore::materialize_pending_oidc`), where the ambient cookie
+	/// encoder is applied. Values of this variant must never reach runtime
+	/// policy dispatch; the runtime treats them as an internal error.
+	#[serde(skip)]
+	PendingOidc(Box<crate::http::oidc::ResolvedOidcConfig>),
 	BasicAuth(crate::http::basicauth::BasicAuthentication),
 	APIKey(crate::http::apikey::APIKeyAuthentication),
 	Transformation(crate::http::transformation_cel::Transformation),
