@@ -15,12 +15,12 @@ import (
 var fetcherLogger = logging.New("jwks_fetcher")
 
 // Fetcher fetches and periodically refreshes remote JWKS keysets.
-// Fetched keysets are stored in JwksCache and updates are sent to subscribers.
+// Fetched keysets are published as KRT-visible Results.
 type Fetcher = remotecache.Fetcher[SharedJwksRequest, Keyset]
 
-func NewFetcher(cache *JwksCache) *Fetcher {
+func NewFetcher(results *JwksResults) *Fetcher {
 	driver := &JwksDriver{DefaultClient: remotehttp.NewDefaultFetchClient()}
-	return remotecache.NewFetcher[SharedJwksRequest, Keyset](cache, driver, fetcherLogger)
+	return remotecache.NewFetcher[SharedJwksRequest, Keyset](results, driver, fetcherLogger)
 }
 
 type JwksDriver struct {
