@@ -11,11 +11,11 @@ import (
 )
 
 // JwksResults stores fetched JWKS keysets as a KRT-visible collection.
-type JwksResults = remotecache.Results[Keyset]
+type JwksResults = remotecache.FetchedResults[Keyset]
 
-// NewResults constructs an empty JWKS result collection.
-func NewResults() *JwksResults {
-	return remotecache.NewResults[Keyset]()
+// NewFetchedResults constructs an empty JWKS fetched-result collection.
+func NewFetchedResults() *JwksResults {
+	return remotecache.NewFetchedResults[Keyset]()
 }
 
 func buildKeyset(requestKey remotehttp.FetchKey, requestURL string, jwks jose.JSONWebKeySet) (Keyset, error) {
