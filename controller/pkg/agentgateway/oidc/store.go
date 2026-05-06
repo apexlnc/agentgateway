@@ -17,13 +17,13 @@ var storeLogger = logging.New("oidc_store")
 // persists, and serves discovered providers to translation.
 type Store struct {
 	*remotecache.Store[SharedOidcRequest, DiscoveredProvider]
-	cache *OidcCache
+	results *OidcResults
 }
 
 func NewStore(requests krt.Collection[SharedOidcRequest], persistedEntries *PersistedEntries, storePrefix string) *Store {
-	cache := NewCache()
+	results := NewResults()
 	innerStore := remotecache.NewStore(remotecache.StoreOptions[SharedOidcRequest, DiscoveredProvider]{
-		Fetcher:                  NewFetcher(cache),
+		Fetcher:                  NewFetcher(results),
 		Requests:                 requests,
 		Logger:                   storeLogger,
 		Hydrator:                 persistedEntries,
@@ -31,16 +31,20 @@ func NewStore(requests krt.Collection[SharedOidcRequest], persistedEntries *Pers
 	})
 
 	return &Store{
-		Store: innerStore,
-		cache: cache,
+		Store:   innerStore,
+		results: results,
 	}
 }
 
-// ProviderByRequestKey is the cache view used by the ConfigMap reconciler.
-// Translation reads via Lookup.ResolveForOwner (KRT-backed) so it re-runs
-// when ConfigMaps change.
+// ProviderByRequestKey is the fetched-result view used by persistence.
+// Translation reads via Lookup.ResolveForOwner (KRT-backed persisted entries)
+// so xDS recomputes from Kubernetes-observed state.
 func (s *Store) ProviderByRequestKey(requestKey remotehttp.FetchKey) (DiscoveredProvider, bool) {
-	return s.cache.Get(requestKey)
+	return s.results.Get(requestKey)
+}
+
+func (s *Store) Results() *OidcResults {
+	return s.results
 }
 
 func (s *Store) RunnableName() string {
