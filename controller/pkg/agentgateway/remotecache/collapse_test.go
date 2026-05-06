@@ -18,6 +18,10 @@ type collapseTestSource struct {
 	TTL   time.Duration
 }
 
+func (c collapseTestSource) ResourceName() string {
+	return c.Owner + "/" + string(c.Key)
+}
+
 type collapseTestRequest struct {
 	RequestKey remotehttp.FetchKey
 	Owner      string
