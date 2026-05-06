@@ -49,14 +49,15 @@ func NewCollections(inputs CollectionInputs) Collections {
 		return sources
 	}, inputs.KrtOpts.ToOptions("oidc/sources")...)
 
-	sourcesByRequestKey := krt.NewIndex(sources, "oidc-request-key", func(source OidcSource) []remotehttp.FetchKey {
-		return []remotehttp.FetchKey{source.RequestKey}
-	})
-	requestGroups := sourcesByRequestKey.AsCollection(append(inputs.KrtOpts.ToOptions("oidc/requestGroups"), remotecache.FetchKeyIndexCollectionOption)...)
-
-	sharedRequests := krt.NewCollection(requestGroups, func(ctx krt.HandlerContext, grouped krt.IndexObject[remotehttp.FetchKey, OidcSource]) *SharedOidcRequest {
-		return collapseOidcSources(grouped)
-	}, inputs.KrtOpts.ToOptions("oidc/sharedRequests")...)
+	sharedRequests := remotecache.SharedRequests(
+		sources,
+		"oidc-request-key",
+		"oidc/requestGroups",
+		"oidc/sharedRequests",
+		inputs.KrtOpts,
+		func(source OidcSource) remotehttp.FetchKey { return source.RequestKey },
+		collapseOidcSources,
+	)
 
 	return Collections{
 		SharedRequests: sharedRequests,
