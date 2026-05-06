@@ -35,7 +35,7 @@ type FetchedResults[R Result] struct {
 // NewFetchedResults constructs an empty, already-synced fetched-result collection.
 func NewFetchedResults[R Result](opts ...krt.CollectionOption) *FetchedResults[R] {
 	return &FetchedResults[R]{
-		collection: krt.NewStaticCollection(alwaysSynced{}, nil, opts...),
+		collection: krt.NewStaticCollection[FetchedRecord[R]](alwaysSynced{}, nil, opts...),
 	}
 }
 
