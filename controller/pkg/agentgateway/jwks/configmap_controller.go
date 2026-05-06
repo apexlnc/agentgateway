@@ -6,7 +6,7 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 )
 
-// ConfigMapController synchronizes persisted JWKS keysets to ConfigMaps.
+// ConfigMapController synchronizes fetched JWKS keysets to persisted ConfigMaps.
 type ConfigMapController struct {
 	*remotecache.ConfigMapController[Keyset, PersistedEntry]
 }
@@ -19,10 +19,9 @@ func NewConfigMapController(apiClient apiclient.Client, storePrefix, deploymentN
 		ApiClient:            apiClient,
 		DeploymentNamespace:  deploymentNamespace,
 		ControllerName:       "JwksStoreConfigMapController",
-		Updates:              store.SubscribeToUpdates(),
+		Results:              store.Results().Collection(),
 		Entries:              persistedEntries.Collection(),
 		EntriesForRequestKey: persistedEntries.EntriesForRequestKey,
-		Lookup:               store.JwksByRequestKey,
 		Serialize:            SetJwksInConfigMap,
 		NameFunc:             persistedEntries.ConfigMapName,
 		LabelFunc:            persistedEntries.ConfigMapLabels,
