@@ -418,7 +418,7 @@ func buildJwksStore(
 		return err
 	}
 
-	jwksStoreCMCtrl := jwks.NewConfigMapController(apiClient, jwks.DefaultJwksStorePrefix, namespaces.GetPodNamespace(), jwksStore, persistedJWKS)
+	jwksStoreCMCtrl := jwks.NewPersistenceController(apiClient, jwks.DefaultJwksStorePrefix, namespaces.GetPodNamespace(), jwksStore, persistedJWKS)
 	jwksStoreCMCtrl.Init(ctx)
 	if err := mgr.Add(jwksStoreCMCtrl); err != nil {
 		return err
@@ -444,7 +444,7 @@ func buildOidcStore(
 		return err
 	}
 
-	oidcStoreCMCtrl := oidc.NewConfigMapController(oidc.ConfigMapControllerOptions{
+	oidcStoreCMCtrl := oidc.NewPersistenceController(oidc.PersistenceControllerOptions{
 		APIClient:           apiClient,
 		StorePrefix:         oidc.DefaultStorePrefix,
 		DeploymentNamespace: namespaces.GetPodNamespace(),
