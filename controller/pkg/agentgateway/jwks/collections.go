@@ -51,13 +51,15 @@ func NewCollections(inputs CollectionInputs) Collections {
 		}
 	}, inputs.KrtOpts.ToOptions("JwksSources/primary")...)
 
-	sourcesByRequestKey := krt.NewIndex(primarySources, "jwks-request-key", func(source JwksSource) []remotehttp.FetchKey {
-		return []remotehttp.FetchKey{source.RequestKey}
-	})
-	requestGroups := sourcesByRequestKey.AsCollection(append(inputs.KrtOpts.ToOptions("JwksRequestGroups"), remotecache.FetchKeyIndexCollectionOption)...)
-	sharedRequests := krt.NewCollection(requestGroups, func(kctx krt.HandlerContext, grouped krt.IndexObject[remotehttp.FetchKey, JwksSource]) *SharedJwksRequest {
-		return collapseJwksSources(grouped)
-	}, inputs.KrtOpts.ToOptions("JwksRequests")...)
+	sharedRequests := remotecache.SharedRequests(
+		primarySources,
+		"jwks-request-key",
+		"JwksRequestGroups",
+		"JwksRequests",
+		inputs.KrtOpts,
+		func(source JwksSource) remotehttp.FetchKey { return source.RequestKey },
+		collapseJwksSources,
+	)
 
 	return Collections{
 		SharedRequests: sharedRequests,
