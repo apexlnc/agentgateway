@@ -18,13 +18,13 @@ var storeLogger = logging.New("jwks_store")
 // persists, and serves keysets to translation.
 type Store struct {
 	*remotecache.Store[SharedJwksRequest, Keyset]
-	cache *JwksCache
+	results *JwksResults
 }
 
 func NewStore(requests krt.Collection[SharedJwksRequest], persistedEntries *PersistedEntries, storePrefix string) *Store {
-	cache := NewCache()
+	results := NewResults()
 	innerStore := remotecache.NewStore(remotecache.StoreOptions[SharedJwksRequest, Keyset]{
-		Fetcher:                  NewFetcher(cache),
+		Fetcher:                  NewFetcher(results),
 		Requests:                 requests,
 		Logger:                   storeLogger,
 		Hydrator:                 persistedEntries,
@@ -32,13 +32,17 @@ func NewStore(requests krt.Collection[SharedJwksRequest], persistedEntries *Pers
 	})
 
 	return &Store{
-		Store: innerStore,
-		cache: cache,
+		Store:   innerStore,
+		results: results,
 	}
 }
 
 func (s *Store) JwksByRequestKey(requestKey remotehttp.FetchKey) (Keyset, bool) {
-	return s.cache.Get(requestKey)
+	return s.results.Get(requestKey)
+}
+
+func (s *Store) Results() *JwksResults {
+	return s.results
 }
 
 func (s *Store) RunnableName() string {
