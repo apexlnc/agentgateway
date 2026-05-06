@@ -10,7 +10,6 @@ import (
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/kclient"
 	"istio.io/istio/pkg/kube/krt"
-	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -30,22 +29,24 @@ func newCMRateLimiter() workqueue.TypedRateLimiter[any] {
 	)
 }
 
-// PersistedRecord provides the metadata needed to reconcile a memory-backed
-// record to its ConfigMap persistence.
+// PersistedRecord provides the metadata needed to reconcile persisted
+// ConfigMaps for a fetched remote artifact.
 type PersistedRecord interface {
 	RequestKey() (remotehttp.FetchKey, bool)
 	GetName() string
 }
 
-// ConfigMapController reconciles in-memory records to ConfigMaps.
-type ConfigMapController[T any, E PersistedRecord] struct {
+// ConfigMapController reconciles fetched KRT result records to ConfigMaps.
+// Both inputs are KRT collections: Results is produced by the remote fetch edge,
+// while Entries is the Kubernetes-observed persisted ConfigMap view. The only
+// imperative part left here is the Kubernetes write/delete side effect.
+type ConfigMapController[T Result, E PersistedRecord] struct {
 	apiClient            apiclient.Client
 	cmClient             kclient.Client[*corev1.ConfigMap]
 	eventQueue           controllers.Queue
-	updates              <-chan sets.Set[remotehttp.FetchKey]
+	results              krt.Collection[ResultRecord[T]]
 	entries              krt.Collection[E]
 	entriesForRequestKey func(remotehttp.FetchKey) []E
-	lookup               func(remotehttp.FetchKey) (T, bool)
 	serialize            func(*corev1.ConfigMap, T) error
 	nameFunc             func(remotehttp.FetchKey) string
 	labelFunc            func() map[string]string
@@ -58,14 +59,13 @@ type ConfigMapController[T any, E PersistedRecord] struct {
 	logger               *slog.Logger
 }
 
-type ConfigMapControllerOptions[T any, E PersistedRecord] struct {
+type ConfigMapControllerOptions[T Result, E PersistedRecord] struct {
 	ApiClient            apiclient.Client
 	DeploymentNamespace  string
 	ControllerName       string
-	Updates              <-chan sets.Set[remotehttp.FetchKey]
+	Results              krt.Collection[ResultRecord[T]]
 	Entries              krt.Collection[E]
 	EntriesForRequestKey func(remotehttp.FetchKey) []E
-	Lookup               func(remotehttp.FetchKey) (T, bool)
 	Serialize            func(*corev1.ConfigMap, T) error
 	NameFunc             func(remotehttp.FetchKey) string
 	LabelFunc            func() map[string]string
@@ -74,21 +74,20 @@ type ConfigMapControllerOptions[T any, E PersistedRecord] struct {
 	Logger               *slog.Logger
 }
 
-func NewConfigMapController[T any, E PersistedRecord](opts ConfigMapControllerOptions[T, E]) *ConfigMapController[T, E] {
+func NewConfigMapController[T Result, E PersistedRecord](opts ConfigMapControllerOptions[T, E]) *ConfigMapController[T, E] {
 	return &ConfigMapController[T, E]{
 		apiClient:            opts.ApiClient,
 		deploymentNamespace:  opts.DeploymentNamespace,
 		controllerName:       opts.ControllerName,
-		updates:              opts.Updates,
+		results:              opts.Results,
 		entries:              opts.Entries,
 		entriesForRequestKey: opts.EntriesForRequestKey,
-		lookup:               opts.Lookup,
 		serialize:            opts.Serialize,
 		nameFunc:             opts.NameFunc,
 		labelFunc:            opts.LabelFunc,
 		labelSelector:        opts.LabelSelector,
 		rateLimiter:          newCMRateLimiter(),
-		waitForSync:          []cache.InformerSynced{opts.Entries.HasSynced, opts.StoreHasSynced},
+		waitForSync:          []cache.InformerSynced{opts.Results.HasSynced, opts.Entries.HasSynced, opts.StoreHasSynced},
 		logger:               opts.Logger,
 	}
 }
@@ -122,26 +121,27 @@ func (c *ConfigMapController[T, E]) Start(ctx context.Context) error {
 	)
 
 	c.logger.Info("starting ConfigMap controller")
-	persistedRegistration := c.entries.Register(func(event krt.Event[E]) {
-		c.enqueuePersistedRecord(event.Old)
-		c.enqueuePersistedRecord(event.New)
-	})
+	resultRegistration := c.results.RegisterBatch(func(events []krt.Event[ResultRecord[T]]) {
+		for _, event := range events {
+			c.enqueueResultRecord(event.Old)
+			c.enqueueResultRecord(event.New)
+		}
+	}, true)
+	defer resultRegistration.UnregisterHandler()
+
+	persistedRegistration := c.entries.RegisterBatch(func(events []krt.Event[E]) {
+		for _, event := range events {
+			c.enqueuePersistedRecord(event.Old)
+			c.enqueuePersistedRecord(event.New)
+		}
+	}, true)
 	defer persistedRegistration.UnregisterHandler()
 
-	go func() {
-		for {
-			select {
-			case u := <-c.updates:
-				for requestKey := range u {
-					c.eventQueue.Add(RequestQueueKey(c.deploymentNamespace, requestKey))
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
 	go c.eventQueue.Run(ctx.Done())
 
+	if !resultRegistration.WaitUntilSynced(ctx.Done()) {
+		return nil
+	}
 	if !persistedRegistration.WaitUntilSynced(ctx.Done()) {
 		return nil
 	}
@@ -151,7 +151,7 @@ func (c *ConfigMapController[T, E]) Start(ctx context.Context) error {
 }
 
 func (c *ConfigMapController[T, E]) Reconcile(req types.NamespacedName) error {
-	c.logger.Debug("syncing memory to ConfigMap(s)")
+	c.logger.Debug("syncing fetched result to ConfigMap(s)")
 	ctx := c.reconcileCtx
 	requestKey := remotehttp.FetchKey(req.Name)
 
@@ -161,9 +161,12 @@ func (c *ConfigMapController[T, E]) Reconcile(req types.NamespacedName) error {
 		existingNames = append(existingNames, entry.GetName())
 	}
 
-	record, exists := c.lookup(requestKey)
+	result := c.results.GetKey(string(requestKey))
+	var record T
+	exists := result != nil
 	var canonicalName string
 	if exists {
+		record = result.Payload
 		canonicalName = c.nameFunc(requestKey)
 	}
 
@@ -197,6 +200,13 @@ func (c *ConfigMapController[T, E]) newStoreConfigMap(name string) *corev1.Confi
 		},
 		Data: make(map[string]string),
 	}
+}
+
+func (c *ConfigMapController[T, E]) enqueueResultRecord(record *ResultRecord[T]) {
+	if record == nil {
+		return
+	}
+	c.eventQueue.Add(RequestQueueKey(c.deploymentNamespace, record.Payload.RemoteRequestKey()))
 }
 
 func (c *ConfigMapController[T, E]) enqueuePersistedRecord(entry *E) {
@@ -239,7 +249,7 @@ func (c *ConfigMapController[T, E]) upsertConfigMap(ctx context.Context, namespa
 	return nil
 }
 
-// SyncPlan represents a mechanical plan for reconciling in-memory records to ConfigMaps.
+// SyncPlan represents a mechanical plan for reconciling fetched records to ConfigMaps.
 type SyncPlan struct {
 	UpsertName  string
 	DeleteNames []string
