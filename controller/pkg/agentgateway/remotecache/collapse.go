@@ -32,15 +32,15 @@ func CollapseSources[S any](sources []S, ownerKey func(S) string, ttl func(S) ti
 	return primary, minTTL
 }
 
-// SharedRequests groups per-owner sources by FetchKey and collapses each group
-// into the single request the remote fetch runtime should manage. This captures
-// the standard KRT graph used by JWKS and OIDC:
+// NewSharedRequestCollection groups per-owner sources by FetchKey and collapses
+// each group into the single request the remote fetch runtime should manage.
+// This captures the standard KRT graph used by JWKS and OIDC:
 //
 //     source collection -> request-key index -> grouped index collection -> request collection
 //
 // Subsystems keep only the domain-specific source production and collapse
 // semantics, while the KRT grouping pipeline stays shared and idiomatic.
-func SharedRequests[S any, R any](
+func NewSharedRequestCollection[S any, R any](
 	sources krt.Collection[S],
 	indexName string,
 	groupsName string,
