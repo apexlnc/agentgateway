@@ -26,11 +26,12 @@ type discoveryDocument struct {
 }
 
 // Fetcher fetches and periodically refreshes OIDC discovery documents.
+// Fetched providers are published as KRT-visible Results.
 type Fetcher = remotecache.Fetcher[SharedOidcRequest, DiscoveredProvider]
 
-func NewFetcher(cache *OidcCache) *Fetcher {
+func NewFetcher(results *OidcResults) *Fetcher {
 	driver := &OidcDriver{DefaultClient: remotehttp.NewDefaultFetchClient()}
-	return remotecache.NewFetcher[SharedOidcRequest, DiscoveredProvider](cache, driver, fetcherLogger)
+	return remotecache.NewFetcher[SharedOidcRequest, DiscoveredProvider](results, driver, fetcherLogger)
 }
 
 type OidcDriver struct {
