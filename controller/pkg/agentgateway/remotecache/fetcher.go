@@ -34,12 +34,12 @@ type InternalFetchState[S Request] struct {
 
 // Fetcher manages the lifecycle of remote resource discovery and periodic refresh.
 // Fetching remains imperative because it owns timers, retries, and HTTP side
-// effects. Successful results are published into Results, which is a KRT
-// StaticCollection, so downstream persistence and translation invalidation can
-// use normal KRT event propagation rather than a parallel fanout channel.
+// effects. Successful results are published into FetchedResults, which is a
+// KRT StaticCollection, so downstream persistence and translation invalidation
+// can use normal KRT event propagation rather than a parallel fanout channel.
 type Fetcher[S Request, R Result] struct {
 	mu       sync.Mutex
-	Results  *Results[R]
+	Results  *FetchedResults[R]
 	Driver   Driver[S, R]
 	requests map[remotehttp.FetchKey]InternalFetchState[S]
 	schedule *Schedule
@@ -47,7 +47,7 @@ type Fetcher[S Request, R Result] struct {
 	logger   *slog.Logger
 }
 
-func NewFetcher[S Request, R Result](results *Results[R], driver Driver[S, R], logger *slog.Logger) *Fetcher[S, R] {
+func NewFetcher[S Request, R Result](results *FetchedResults[R], driver Driver[S, R], logger *slog.Logger) *Fetcher[S, R] {
 	return &Fetcher[S, R]{
 		Results:  results,
 		Driver:   driver,
@@ -214,7 +214,7 @@ func (f *Fetcher[S, R]) sweepRetiredResults() {
 	}
 	f.mu.Unlock()
 
-	f.Results.DeleteObjects(func(record ResultRecord[R]) bool {
+	f.Results.DeleteObjects(func(record FetchedRecord[R]) bool {
 		_, ok := live[record.Payload.RemoteRequestKey()]
 		return !ok
 	})
