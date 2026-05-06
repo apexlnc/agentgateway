@@ -21,7 +21,7 @@ type Store struct {
 }
 
 func NewStore(requests krt.Collection[SharedOidcRequest], persistedEntries *PersistedEntries, storePrefix string) *Store {
-	results := NewResults()
+	results := NewFetchedResults()
 	innerStore := remotecache.NewStore(remotecache.StoreOptions[SharedOidcRequest, DiscoveredProvider]{
 		Fetcher:                  NewFetcher(results),
 		Requests:                 requests,
@@ -43,7 +43,7 @@ func (s *Store) ProviderByRequestKey(requestKey remotehttp.FetchKey) (Discovered
 	return s.results.Get(requestKey)
 }
 
-func (s *Store) Results() *OidcResults {
+func (s *Store) FetchedResults() *OidcResults {
 	return s.results
 }
 
