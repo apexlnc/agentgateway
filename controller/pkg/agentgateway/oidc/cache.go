@@ -4,10 +4,10 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 )
 
-// OidcCache stores discovered OIDC providers by request key.
-type OidcCache = remotecache.MapCache[DiscoveredProvider]
+// OidcResults stores discovered OIDC providers as a KRT-visible collection.
+type OidcResults = remotecache.FetchedResults[DiscoveredProvider]
 
-// NewCache constructs an empty OidcCache.
-func NewCache() *OidcCache {
-	return remotecache.NewMapCache[DiscoveredProvider]()
+// NewFetchedResults constructs an empty OIDC fetched-result collection.
+func NewFetchedResults() *OidcResults {
+	return remotecache.NewFetchedResults[DiscoveredProvider]()
 }

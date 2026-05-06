@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/go-jose/go-jose/v4"
 )
 
 const ClientTimeout = 10 * time.Second
@@ -120,4 +122,32 @@ func FetchBody(ctx context.Context, client *http.Client, requestURL, description
 		return nil, fmt.Errorf("could not read %s response: %w", description, err)
 	}
 	return body, nil
+}
+
+// FetchJWKSBody fetches a JWKS document, validates that it is syntactically a
+// JWKS and contains at least one key, and returns both the original bytes and
+// parsed keyset. The original bytes are important for OIDC, which ships the
+// IdP's JWKS material downstream verbatim; the parsed value is used by direct
+// JWKS consumers.
+func FetchJWKSBody(ctx context.Context, client *http.Client, requestURL, description string) ([]byte, jose.JSONWebKeySet, error) {
+	body, err := FetchBody(ctx, client, requestURL, description)
+	if err != nil {
+		return nil, jose.JSONWebKeySet{}, err
+	}
+	keyset, err := ValidateJWKSBody(body, requestURL, description)
+	if err != nil {
+		return nil, jose.JSONWebKeySet{}, err
+	}
+	return body, keyset, nil
+}
+
+func ValidateJWKSBody(body []byte, requestURL, description string) (jose.JSONWebKeySet, error) {
+	var keyset jose.JSONWebKeySet
+	if err := json.Unmarshal(body, &keyset); err != nil {
+		return jose.JSONWebKeySet{}, fmt.Errorf("%s response from %s is not a valid JWKS document: %w", description, requestURL, err)
+	}
+	if len(keyset.Keys) == 0 {
+		return jose.JSONWebKeySet{}, fmt.Errorf("%s response from %s contains no keys", description, requestURL)
+	}
+	return keyset, nil
 }

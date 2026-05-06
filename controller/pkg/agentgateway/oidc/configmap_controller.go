@@ -6,13 +6,13 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 )
 
-// ConfigMapController synchronizes persisted OIDC providers to ConfigMaps.
-type ConfigMapController struct {
-	*remotecache.ConfigMapController[DiscoveredProvider, PersistedEntry]
+// PersistenceController synchronizes fetched OIDC providers to persisted ConfigMaps.
+type PersistenceController struct {
+	*remotecache.PersistenceController[DiscoveredProvider, PersistedEntry]
 }
 
-// ConfigMapControllerOptions configures NewConfigMapController.
-type ConfigMapControllerOptions struct {
+// PersistenceControllerOptions configures NewPersistenceController.
+type PersistenceControllerOptions struct {
 	APIClient           apiclient.Client
 	StorePrefix         string
 	DeploymentNamespace string
@@ -20,18 +20,17 @@ type ConfigMapControllerOptions struct {
 	PersistedEntries    *PersistedEntries
 }
 
-func NewConfigMapController(opts ConfigMapControllerOptions) *ConfigMapController {
-	logger := logging.New("oidc_store_config_map_controller")
-	logger.Info("creating oidc store ConfigMap controller")
+func NewPersistenceController(opts PersistenceControllerOptions) *PersistenceController {
+	logger := logging.New("oidc_store_persistence_controller")
+	logger.Info("creating oidc store persistence controller")
 
-	cacheOpts := remotecache.ConfigMapControllerOptions[DiscoveredProvider, PersistedEntry]{
+	controllerOpts := remotecache.PersistenceControllerOptions[DiscoveredProvider, PersistedEntry]{
 		ApiClient:            opts.APIClient,
 		DeploymentNamespace:  opts.DeploymentNamespace,
-		ControllerName:       "OidcStoreConfigMapController",
-		Updates:              opts.Store.SubscribeToUpdates(),
+		ControllerName:       "OidcStorePersistenceController",
+		Results:              opts.Store.FetchedResults().Collection(),
 		Entries:              opts.PersistedEntries.Collection(),
 		EntriesForRequestKey: opts.PersistedEntries.EntriesForRequestKey,
-		Lookup:               opts.Store.ProviderByRequestKey,
 		Serialize:            SetProviderInConfigMap,
 		NameFunc:             opts.PersistedEntries.ConfigMapName,
 		LabelFunc:            opts.PersistedEntries.ConfigMapLabels,
@@ -40,7 +39,7 @@ func NewConfigMapController(opts ConfigMapControllerOptions) *ConfigMapControlle
 		Logger:               logger,
 	}
 
-	return &ConfigMapController{
-		ConfigMapController: remotecache.NewConfigMapController(cacheOpts),
+	return &PersistenceController{
+		PersistenceController: remotecache.NewPersistenceController(controllerOpts),
 	}
 }

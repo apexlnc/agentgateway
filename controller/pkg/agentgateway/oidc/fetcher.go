@@ -2,13 +2,10 @@ package oidc
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"time"
-
-	"github.com/go-jose/go-jose/v4"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
@@ -26,11 +23,12 @@ type discoveryDocument struct {
 }
 
 // Fetcher fetches and periodically refreshes OIDC discovery documents.
+// Fetched providers are published as KRT-visible Results.
 type Fetcher = remotecache.Fetcher[SharedOidcRequest, DiscoveredProvider]
 
-func NewFetcher(cache *OidcCache) *Fetcher {
+func NewFetcher(results *OidcResults) *Fetcher {
 	driver := &OidcDriver{DefaultClient: remotehttp.NewDefaultFetchClient()}
-	return remotecache.NewFetcher[SharedOidcRequest, DiscoveredProvider](cache, driver, fetcherLogger)
+	return remotecache.NewFetcher[SharedOidcRequest, DiscoveredProvider](results, driver, fetcherLogger)
 }
 
 type OidcDriver struct {
@@ -49,21 +47,9 @@ func (d *OidcDriver) Fetch(ctx context.Context, source SharedOidcRequest) (Disco
 	}
 
 	fetcherLogger.InfoContext(ctx, "fetching oidc jwks", "url", doc.JwksURI)
-	jwksBody, err := remotehttp.FetchBody(ctx, d.DefaultClient, doc.JwksURI, "OIDC JWKS")
+	jwksBody, _, err := remotehttp.FetchJWKSBody(ctx, d.DefaultClient, doc.JwksURI, "OIDC JWKS")
 	if err != nil {
 		return DiscoveredProvider{}, fmt.Errorf("failed to fetch OIDC JWKS from %s: %w", doc.JwksURI, err)
-	}
-	// Validate the JWKS shape, not just JSON well-formedness — an IdP that
-	// returns an unrelated 200 OK body (error envelope, HTML, etc.) would
-	// otherwise be persisted to ConfigMap and fail opaquely in the dataplane.
-	// The original bytes are still stored verbatim so downstream consumers
-	// see exactly what the IdP returned.
-	var keyset jose.JSONWebKeySet
-	if err := json.Unmarshal(jwksBody, &keyset); err != nil {
-		return DiscoveredProvider{}, fmt.Errorf("OIDC JWKS response from %s is not a valid JWKS document: %w", doc.JwksURI, err)
-	}
-	if len(keyset.Keys) == 0 {
-		return DiscoveredProvider{}, fmt.Errorf("OIDC JWKS response from %s contains no keys", doc.JwksURI)
 	}
 
 	return DiscoveredProvider{

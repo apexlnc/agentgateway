@@ -1,12 +1,10 @@
 package remotecache
 
 import (
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"istio.io/istio/pkg/util/sets"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
@@ -112,75 +110,6 @@ func TestNextRetryDelayMonotonicUntilCap(t *testing.T) {
 		prev = d
 	}
 	require.True(t, hitCap, "should reach cap within 10 attempts")
-}
-
-func TestUpdateFanoutNotifyDeliversToEachSubscriber(t *testing.T) {
-	f := NewUpdateFanout()
-	a := f.Subscribe()
-	b := f.Subscribe()
-
-	f.Notify(sets.New(keyA))
-
-	require.True(t, (<-a).Contains(keyA))
-	require.True(t, (<-b).Contains(keyA))
-}
-
-func TestUpdateFanoutMergesPendingUpdates(t *testing.T) {
-	f := NewUpdateFanout()
-	updates := f.Subscribe()
-
-	f.Notify(sets.New(keyA))
-	f.Notify(sets.New(keyB))
-
-	merged := <-updates
-	require.True(t, merged.Contains(keyA))
-	require.True(t, merged.Contains(keyB))
-}
-
-func TestUpdateFanoutNotifyConcurrentSafe(t *testing.T) {
-	f := NewUpdateFanout()
-	updates := f.Subscribe()
-
-	const goroutines = 50
-	var wg sync.WaitGroup
-	wg.Add(goroutines)
-	for i := range goroutines {
-		go func(i int) {
-			defer wg.Done()
-			f.Notify(sets.New(remotehttp.FetchKey(string(rune('A' + i%26)))))
-		}(i)
-	}
-	wg.Wait()
-
-	drained := false
-	for !drained {
-		select {
-		case <-updates:
-		case <-time.After(50 * time.Millisecond):
-			drained = true
-		}
-	}
-}
-
-func TestUpdateFanoutSubscribeDuringNotifyDoesNotPanic(t *testing.T) {
-	f := NewUpdateFanout()
-	f.Subscribe()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		for range 100 {
-			f.Notify(sets.New(keyA))
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		for range 100 {
-			f.Subscribe()
-		}
-	}()
-	wg.Wait()
 }
 
 func TestSignalWakeNonBlocking(t *testing.T) {
