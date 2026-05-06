@@ -6,7 +6,7 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 )
 
-// ConfigMapController synchronizes persisted OIDC providers to ConfigMaps.
+// ConfigMapController synchronizes fetched OIDC providers to persisted ConfigMaps.
 type ConfigMapController struct {
 	*remotecache.ConfigMapController[DiscoveredProvider, PersistedEntry]
 }
@@ -28,10 +28,9 @@ func NewConfigMapController(opts ConfigMapControllerOptions) *ConfigMapControlle
 		ApiClient:            opts.APIClient,
 		DeploymentNamespace:  opts.DeploymentNamespace,
 		ControllerName:       "OidcStoreConfigMapController",
-		Updates:              opts.Store.SubscribeToUpdates(),
+		Results:              opts.Store.Results().Collection(),
 		Entries:              opts.PersistedEntries.Collection(),
 		EntriesForRequestKey: opts.PersistedEntries.EntriesForRequestKey,
-		Lookup:               opts.Store.ProviderByRequestKey,
 		Serialize:            SetProviderInConfigMap,
 		NameFunc:             opts.PersistedEntries.ConfigMapName,
 		LabelFunc:            opts.PersistedEntries.ConfigMapLabels,
