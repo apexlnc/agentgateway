@@ -64,13 +64,8 @@ func (r *Results[R]) Delete(key remotehttp.FetchKey) bool {
 	return existed
 }
 
-func (r *Results[R]) Keys() []remotehttp.FetchKey {
-	objects := r.collection.List()
-	keys := make([]remotehttp.FetchKey, 0, len(objects))
-	for _, obj := range objects {
-		keys = append(keys, obj.Payload.RemoteRequestKey())
-	}
-	return keys
+func (r *Results[R]) DeleteObjects(filter func(ResultRecord[R]) bool) {
+	r.collection.DeleteObjects(filter)
 }
 
 func (r *Results[R]) Reset(results []R) {
