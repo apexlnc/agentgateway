@@ -36,15 +36,16 @@ type PersistedRecord interface {
 	GetName() string
 }
 
-// ConfigMapController reconciles fetched KRT result records to ConfigMaps.
-// Both inputs are KRT collections: Results is produced by the remote fetch edge,
-// while Entries is the Kubernetes-observed persisted ConfigMap view. The only
-// imperative part left here is the Kubernetes write/delete side effect.
-type ConfigMapController[T Result, E PersistedRecord] struct {
+// PersistenceController reconciles fetched KRT records to persisted
+// ConfigMaps. Both inputs are KRT collections: fetched results are produced by
+// the remote fetch edge, while entries are the Kubernetes-observed persisted
+// ConfigMap view. The only imperative part left here is the Kubernetes
+// write/delete side effect.
+type PersistenceController[T Result, E PersistedRecord] struct {
 	apiClient            apiclient.Client
 	cmClient             kclient.Client[*corev1.ConfigMap]
 	eventQueue           controllers.Queue
-	results              krt.Collection[ResultRecord[T]]
+	results              krt.Collection[FetchedRecord[T]]
 	entries              krt.Collection[E]
 	entriesForRequestKey func(remotehttp.FetchKey) []E
 	serialize            func(*corev1.ConfigMap, T) error
@@ -59,11 +60,11 @@ type ConfigMapController[T Result, E PersistedRecord] struct {
 	logger               *slog.Logger
 }
 
-type ConfigMapControllerOptions[T Result, E PersistedRecord] struct {
+type PersistenceControllerOptions[T Result, E PersistedRecord] struct {
 	ApiClient            apiclient.Client
 	DeploymentNamespace  string
 	ControllerName       string
-	Results              krt.Collection[ResultRecord[T]]
+	Results              krt.Collection[FetchedRecord[T]]
 	Entries              krt.Collection[E]
 	EntriesForRequestKey func(remotehttp.FetchKey) []E
 	Serialize            func(*corev1.ConfigMap, T) error
@@ -74,8 +75,8 @@ type ConfigMapControllerOptions[T Result, E PersistedRecord] struct {
 	Logger               *slog.Logger
 }
 
-func NewConfigMapController[T Result, E PersistedRecord](opts ConfigMapControllerOptions[T, E]) *ConfigMapController[T, E] {
-	return &ConfigMapController[T, E]{
+func NewPersistenceController[T Result, E PersistedRecord](opts PersistenceControllerOptions[T, E]) *PersistenceController[T, E] {
+	return &PersistenceController[T, E]{
 		apiClient:            opts.ApiClient,
 		deploymentNamespace:  opts.DeploymentNamespace,
 		controllerName:       opts.ControllerName,
@@ -92,7 +93,7 @@ func NewConfigMapController[T Result, E PersistedRecord](opts ConfigMapControlle
 	}
 }
 
-func (c *ConfigMapController[T, E]) Init(ctx context.Context) {
+func (c *PersistenceController[T, E]) Init(ctx context.Context) {
 	c.cmClient = kclient.NewFiltered[*corev1.ConfigMap](c.apiClient,
 		kclient.Filter{
 			ObjectFilter:  c.apiClient.ObjectFilter(),
@@ -110,7 +111,7 @@ func (c *ConfigMapController[T, E]) Init(ctx context.Context) {
 	)
 }
 
-func (c *ConfigMapController[T, E]) Start(ctx context.Context) error {
+func (c *PersistenceController[T, E]) Start(ctx context.Context) error {
 	c.reconcileCtx = ctx
 
 	c.logger.Info("waiting for cache to sync")
@@ -120,11 +121,11 @@ func (c *ConfigMapController[T, E]) Start(ctx context.Context) error {
 		c.waitForSync...,
 	)
 
-	c.logger.Info("starting ConfigMap controller")
-	resultRegistration := c.results.RegisterBatch(func(events []krt.Event[ResultRecord[T]]) {
+	c.logger.Info("starting persistence controller")
+	resultRegistration := c.results.RegisterBatch(func(events []krt.Event[FetchedRecord[T]]) {
 		for _, event := range events {
-			c.enqueueResultRecord(event.Old)
-			c.enqueueResultRecord(event.New)
+			c.enqueueFetchedRecord(event.Old)
+			c.enqueueFetchedRecord(event.New)
 		}
 	}, true)
 	defer resultRegistration.UnregisterHandler()
@@ -150,7 +151,7 @@ func (c *ConfigMapController[T, E]) Start(ctx context.Context) error {
 	return nil
 }
 
-func (c *ConfigMapController[T, E]) Reconcile(req types.NamespacedName) error {
+func (c *PersistenceController[T, E]) Reconcile(req types.NamespacedName) error {
 	c.logger.Debug("syncing fetched result to ConfigMap(s)")
 	ctx := c.reconcileCtx
 	requestKey := remotehttp.FetchKey(req.Name)
@@ -187,11 +188,11 @@ func (c *ConfigMapController[T, E]) Reconcile(req types.NamespacedName) error {
 	return nil
 }
 
-func (c *ConfigMapController[T, E]) NeedLeaderElection() bool {
+func (c *PersistenceController[T, E]) NeedLeaderElection() bool {
 	return true
 }
 
-func (c *ConfigMapController[T, E]) newStoreConfigMap(name string) *corev1.ConfigMap {
+func (c *PersistenceController[T, E]) newStoreConfigMap(name string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -202,14 +203,14 @@ func (c *ConfigMapController[T, E]) newStoreConfigMap(name string) *corev1.Confi
 	}
 }
 
-func (c *ConfigMapController[T, E]) enqueueResultRecord(record *ResultRecord[T]) {
+func (c *PersistenceController[T, E]) enqueueFetchedRecord(record *FetchedRecord[T]) {
 	if record == nil {
 		return
 	}
 	c.eventQueue.Add(RequestQueueKey(c.deploymentNamespace, record.Payload.RemoteRequestKey()))
 }
 
-func (c *ConfigMapController[T, E]) enqueuePersistedRecord(entry *E) {
+func (c *PersistenceController[T, E]) enqueuePersistedRecord(entry *E) {
 	if entry == nil {
 		return
 	}
@@ -220,7 +221,7 @@ func (c *ConfigMapController[T, E]) enqueuePersistedRecord(entry *E) {
 	c.eventQueue.Add(RequestQueueKey(c.deploymentNamespace, requestKey))
 }
 
-func (c *ConfigMapController[T, E]) upsertConfigMap(ctx context.Context, namespace, name string, record T) error {
+func (c *PersistenceController[T, E]) upsertConfigMap(ctx context.Context, namespace, name string, record T) error {
 	existingCm := c.cmClient.Get(name, namespace)
 	if existingCm == nil {
 		c.logger.Debug("creating ConfigMap", "name", name)
