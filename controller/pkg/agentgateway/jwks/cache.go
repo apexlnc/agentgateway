@@ -10,12 +10,12 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
-// JwksCache stores fetched JWKS keysets by request key.
-type JwksCache = remotecache.MapCache[Keyset]
+// JwksResults stores fetched JWKS keysets as a KRT-visible collection.
+type JwksResults = remotecache.Results[Keyset]
 
-// NewCache constructs an empty JwksCache.
-func NewCache() *JwksCache {
-	return remotecache.NewMapCache[Keyset]()
+// NewResults constructs an empty JWKS result collection.
+func NewResults() *JwksResults {
+	return remotecache.NewResults[Keyset]()
 }
 
 func buildKeyset(requestKey remotehttp.FetchKey, requestURL string, jwks jose.JSONWebKeySet) (Keyset, error) {
