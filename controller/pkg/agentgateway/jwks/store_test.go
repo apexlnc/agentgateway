@@ -221,7 +221,7 @@ func TestStoreLoadsPersistedKeysetsBeforeServing(t *testing.T) {
 	assert.Equal(t, keyset, actual)
 }
 
-func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
+func TestStoreClearsResultWhenLastPolicyDeleted(t *testing.T) {
 	krtOpts := krttest.KrtOptions(t)
 	uri := "https://issuer.example/jwks"
 	requestKey := remotehttp.FetchTarget{URL: uri}.Key()
@@ -259,20 +259,20 @@ func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
 	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
-	seedStoreJwksCacheForTest(store.cache, requestKey, uri)
+	seedStoreJwksResultForTest(store.results, requestKey, uri)
 	_, ok := store.JwksByRequestKey(requestKey)
-	assert.True(t, ok, "cache should be populated before policy deletion")
+	assert.True(t, ok, "result should be populated before policy deletion")
 
 	// Delete the AgentPolicy.
 	policies.Reset(nil)
 
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		_, ok := store.JwksByRequestKey(requestKey)
-		assert.False(c, ok, "cache should be cleared when last policy is deleted")
+		assert.False(c, ok, "result should be cleared when last policy is deleted")
 	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 }
 
-func TestStoreClearsCacheWhenAllSharedPoliciesDeleted(t *testing.T) {
+func TestStoreClearsResultWhenAllSharedPoliciesDeleted(t *testing.T) {
 	krtOpts := krttest.KrtOptions(t)
 	uri := "https://issuer.example/jwks"
 	requestKey := remotehttp.FetchTarget{URL: uri}.Key()
@@ -311,7 +311,7 @@ func TestStoreClearsCacheWhenAllSharedPoliciesDeleted(t *testing.T) {
 		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
 	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
-	seedStoreJwksCacheForTest(store.cache, requestKey, uri)
+	seedStoreJwksResultForTest(store.results, requestKey, uri)
 
 	policies.Reset(nil)
 
@@ -321,7 +321,7 @@ func TestStoreClearsCacheWhenAllSharedPoliciesDeleted(t *testing.T) {
 	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 }
 
-func TestStoreClearsCacheWhenPolicyDeletedAfterWarmStart(t *testing.T) {
+func TestStoreClearsResultWhenPolicyDeletedAfterWarmStart(t *testing.T) {
 	krtOpts := krttest.KrtOptions(t)
 	uri := "https://issuer.example/jwks"
 	requestKey := remotehttp.FetchTarget{URL: uri}.Key()
@@ -374,7 +374,7 @@ func TestStoreClearsCacheWhenPolicyDeletedAfterWarmStart(t *testing.T) {
 	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
 	_, ok := store.JwksByRequestKey(requestKey)
-	assert.True(t, ok, "cache should be seeded from persisted ConfigMap")
+	assert.True(t, ok, "result should be seeded from persisted ConfigMap")
 
 	policies.Reset(nil)
 
@@ -384,7 +384,7 @@ func TestStoreClearsCacheWhenPolicyDeletedAfterWarmStart(t *testing.T) {
 	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 }
 
-func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
+func TestStoreClearsOrphanResultAtStartup(t *testing.T) {
 	krtOpts := krttest.KrtOptions(t)
 	uri := "https://issuer.example/jwks"
 	requestKey := remotehttp.FetchTarget{URL: uri}.Key()
@@ -430,10 +430,10 @@ func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
 
 	assert.Eventually(t, store.HasSynced, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
-	// After sync, the orphan cache entry should be cleared.
+	// After sync, the orphan result should be cleared.
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		_, ok := store.JwksByRequestKey(requestKey)
-		assert.False(c, ok, "orphan cache entry should be cleared after sync")
+		assert.False(c, ok, "orphan result should be cleared after sync")
 	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 }
 
@@ -526,8 +526,8 @@ func testStoreSharedJwksRequest(requestURL string, ttl time.Duration) SharedJwks
 	}
 }
 
-func seedStoreJwksCacheForTest(cache *JwksCache, requestKey remotehttp.FetchKey, url string) {
-	cache.Put(Keyset{
+func seedStoreJwksResultForTest(results *JwksResults, requestKey remotehttp.FetchKey, url string) {
+	results.Put(Keyset{
 		RequestKey: requestKey,
 		URL:        url,
 		JwksJSON:   `{"keys":[]}`,
