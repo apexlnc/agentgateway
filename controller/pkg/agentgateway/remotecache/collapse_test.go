@@ -9,7 +9,6 @@ import (
 	"istio.io/istio/pkg/kube/krt"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil/krttest"
 )
 
