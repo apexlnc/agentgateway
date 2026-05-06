@@ -214,11 +214,10 @@ func (f *Fetcher[S, R]) sweepRetiredResults() {
 	}
 	f.mu.Unlock()
 
-	for _, key := range f.Results.Keys() {
-		if _, ok := live[key]; !ok {
-			f.Results.Delete(key)
-		}
-	}
+	f.Results.DeleteObjects(func(record ResultRecord[R]) bool {
+		_, ok := live[record.Payload.RemoteRequestKey()]
+		return !ok
+	})
 }
 
 func (f *Fetcher[S, R]) scheduleAt(requestKey remotehttp.FetchKey, generation uint64, at time.Time, retryAttempt int) {
