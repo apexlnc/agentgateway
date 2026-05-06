@@ -788,13 +788,6 @@ type OIDC struct {
 	// +kubebuilder:validation:items:MaxLength=256
 	Scopes []string `json:"scopes,omitempty"`
 
-	// RefreshInterval governs both the discovery-document refresh and the
-	// JWKS refresh derived from it.
-	// +optional
-	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5m')",message="refreshInterval must be at least 5m."
-	// +kubebuilder:default="1h"
-	RefreshInterval *metav1.Duration `json:"refreshInterval,omitempty"`
-
 	// TokenEndpointAuthMethod overrides the auth method the IdP advertises
 	// in its discovery document. `None` selects public-client mode (no client
 	// authentication at the token endpoint; PKCE still protects the code

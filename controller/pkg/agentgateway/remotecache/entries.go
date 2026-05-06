@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"time"
 
@@ -14,10 +15,10 @@ import (
 	"istio.io/istio/pkg/kube/krt"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
+	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
 
@@ -155,6 +156,7 @@ type Entries[T Result] struct {
 	deploymentNamespace string
 	entries             krt.Collection[Entry[T]]
 	byRequestKey        krt.Index[remotehttp.FetchKey, Entry[T]]
+	logger              *slog.Logger
 }
 
 // New constructs an Entries by spinning up a filtered ConfigMap informer in
@@ -225,6 +227,7 @@ func NewFromCollection[T Result](
 		deploymentNamespace: deploymentNamespace,
 		entries:             entries,
 		byRequestKey:        byRequestKey,
+		logger:              logging.New("remotecache/" + codec.ObservabilityName),
 	}
 }
 
@@ -259,7 +262,6 @@ func (e *Entries[T]) LoadAll(ctx context.Context) ([]T, error) {
 		return nil, nil
 	}
 
-	logger := log.FromContext(ctx)
 	kube.WaitForCacheSync(e.codec.ObservabilityName, ctx.Done(), e.entries.HasSynced)
 
 	all := e.entries.List()
@@ -273,7 +275,7 @@ func (e *Entries[T]) LoadAll(ctx context.Context) ([]T, error) {
 		requestKey, ok := entry.RequestKey()
 		if !ok {
 			err := fmt.Errorf("error deserializing %s ConfigMap %s: %s", e.codec.ObservabilityName, entry.NamespacedName.String(), entry.ParseError)
-			logger.Error(err, "error deserializing ConfigMap", "ConfigMap", entry.NamespacedName.String())
+			e.logger.ErrorContext(ctx, "error deserializing ConfigMap", "error", err, "ConfigMap", entry.NamespacedName.String())
 			errs = append(errs, err)
 			continue
 		}

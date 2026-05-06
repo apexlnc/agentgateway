@@ -9,6 +9,14 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 )
 
+// OidcRefreshInterval is how often the controller re-fetches OIDC discovery
+// documents and JWKS from the IdP. Fixed (not user-tunable) to keep the
+// dataplane behavior uniform: every mainstream IdP rotates JWKS with overlap
+// windows of days or longer, so an hour is conservative across the board, and
+// exposing a per-policy knob would let operators silently degrade JWT
+// validation by lengthening the interval past their IdP's overlap window.
+const OidcRefreshInterval = time.Hour
+
 // RemoteOidcOwner identifies the Kubernetes owner (AgentgatewayPolicy) that
 // triggered the OIDC discovery fetch and carries the configuration needed to
 // resolve and perform the fetch.
@@ -65,15 +73,6 @@ func PolicyOIDCLookupOwner(namespace, name string, oidcCfg *agentgateway.OIDC) (
 		},
 		DefaultNamespace: namespace,
 		Config:           *oidcCfg,
-		TTL:              TTLForOIDC(*oidcCfg),
+		TTL:              OidcRefreshInterval,
 	}, true
-}
-
-// TTLForOIDC returns the configured refresh interval for an OIDC provider,
-// defaulting to 1 hour if not set.
-func TTLForOIDC(cfg agentgateway.OIDC) time.Duration {
-	if cfg.RefreshInterval == nil {
-		return time.Hour
-	}
-	return cfg.RefreshInterval.Duration
 }

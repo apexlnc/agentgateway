@@ -43,7 +43,7 @@ func TestStoreLoadsPersistedProvidersBeforeServing(t *testing.T) {
 
 	krtOpts := krttest.KrtOptions(t)
 	policies := krttest.NewStaticCollection(t, []*agentgateway.AgentgatewayPolicy{
-		testOidcPolicy("p1", 30*time.Minute),
+		testOidcPolicy("p1"),
 	}, krtOpts, "OidcPoliciesHydrate")
 
 	collections := NewCollections(CollectionInputs{
@@ -99,7 +99,7 @@ func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 
 	krtOpts := krttest.KrtOptions(t)
 	policies := krttest.NewStaticCollection(t, []*agentgateway.AgentgatewayPolicy{
-		testOidcPolicy("p1", 30*time.Minute),
+		testOidcPolicy("p1"),
 	}, krtOpts, "OidcPoliciesDelete")
 
 	collections := NewCollections(CollectionInputs{

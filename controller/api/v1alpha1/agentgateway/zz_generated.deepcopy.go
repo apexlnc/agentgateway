@@ -2545,11 +2545,6 @@ func (in *OIDC) DeepCopyInto(out *OIDC) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
-	if in.RefreshInterval != nil {
-		in, out := &in.RefreshInterval, &out.RefreshInterval
-		*out = new(v1.Duration)
-		**out = **in
-	}
 	if in.TokenEndpointAuthMethod != nil {
 		in, out := &in.TokenEndpointAuthMethod, &out.TokenEndpointAuthMethod
 		*out = new(string)

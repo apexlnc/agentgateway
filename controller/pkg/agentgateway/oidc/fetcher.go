@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
@@ -39,7 +38,7 @@ type OidcDriver struct {
 }
 
 func (d *OidcDriver) Fetch(ctx context.Context, source SharedOidcRequest) (DiscoveredProvider, error) {
-	log.FromContext(ctx).Info("fetching oidc discovery document", "url", source.Target.URL)
+	fetcherLogger.InfoContext(ctx, "fetching oidc discovery document", "url", source.Target.URL)
 
 	doc, err := remotehttp.FetchJSON[discoveryDocument](ctx, d.DefaultClient, source.Target, "OIDC discovery")
 	if err != nil {
@@ -49,7 +48,7 @@ func (d *OidcDriver) Fetch(ctx context.Context, source SharedOidcRequest) (Disco
 		return DiscoveredProvider{}, err
 	}
 
-	log.FromContext(ctx).Info("fetching oidc jwks", "url", doc.JwksURI)
+	fetcherLogger.InfoContext(ctx, "fetching oidc jwks", "url", doc.JwksURI)
 	jwksBody, err := remotehttp.FetchBody(ctx, d.DefaultClient, doc.JwksURI, "OIDC JWKS")
 	if err != nil {
 		return DiscoveredProvider{}, fmt.Errorf("failed to fetch OIDC JWKS from %s: %w", doc.JwksURI, err)

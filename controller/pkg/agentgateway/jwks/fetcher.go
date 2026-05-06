@@ -6,7 +6,6 @@ import (
 	"net/http"
 
 	"github.com/go-jose/go-jose/v4"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
@@ -34,7 +33,7 @@ func (d *JwksDriver) Fetch(ctx context.Context, source SharedJwksRequest) (Keyse
 		return Keyset{}, err
 	}
 
-	log.FromContext(ctx).Info("fetching jwks", "url", source.Target.URL)
+	fetcherLogger.InfoContext(ctx, "fetching jwks", "url", source.Target.URL)
 
 	jwks, err := remotehttp.FetchJSON[jose.JSONWebKeySet](ctx, client, source.Target, "JWKS")
 	if err != nil {

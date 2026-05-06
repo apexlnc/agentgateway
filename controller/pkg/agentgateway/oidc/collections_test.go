@@ -16,7 +16,7 @@ import (
 )
 
 func TestOwnersFromPolicyExtractsOidcOwner(t *testing.T) {
-	policy := testOidcPolicy("p1", 30*time.Minute)
+	policy := testOidcPolicy("p1")
 
 	owners := OwnersFromPolicy(policy)
 
@@ -24,7 +24,7 @@ func TestOwnersFromPolicyExtractsOidcOwner(t *testing.T) {
 	require.Equal(t, "p1", owners[0].ID.Name)
 	require.Equal(t, "default", owners[0].ID.Namespace)
 	require.Equal(t, "spec.traffic.oidc", owners[0].ID.Path)
-	require.Equal(t, 30*time.Minute, owners[0].TTL)
+	require.Equal(t, OidcRefreshInterval, owners[0].TTL)
 }
 
 func TestOwnersFromPolicyReturnsNilWhenOidcAbsent(t *testing.T) {
@@ -67,21 +67,6 @@ func TestOwnersFromPolicyReturnsNilWhenOidcAbsent(t *testing.T) {
 			require.Nil(t, OwnersFromPolicy(tc.policy))
 		})
 	}
-}
-
-func TestTTLForOIDCDefaultsToOneHour(t *testing.T) {
-	cfg := agentgateway.OIDC{IssuerURL: "https://idp.example"}
-
-	require.Equal(t, time.Hour, TTLForOIDC(cfg))
-}
-
-func TestTTLForOIDCRespectsRefreshInterval(t *testing.T) {
-	cfg := agentgateway.OIDC{
-		IssuerURL:       "https://idp.example",
-		RefreshInterval: &metav1.Duration{Duration: 10 * time.Minute},
-	}
-
-	require.Equal(t, 10*time.Minute, TTLForOIDC(cfg))
 }
 
 func TestCollapseOidcSourcesPicksMinTTL(t *testing.T) {
@@ -150,8 +135,8 @@ func TestCollapseOidcSourcesEmptyReturnsNil(t *testing.T) {
 func TestNewCollectionsCollapsesSharedKeyAcrossPolicies(t *testing.T) {
 	krtOpts := krttest.KrtOptions(t)
 	policies := krttest.NewStaticCollection(t, []*agentgateway.AgentgatewayPolicy{
-		testOidcPolicy("a", 30*time.Minute),
-		testOidcPolicy("b", 10*time.Minute),
+		testOidcPolicy("a"),
+		testOidcPolicy("b"),
 	}, krtOpts, "OidcPolicies")
 
 	collections := NewCollections(CollectionInputs{
@@ -160,13 +145,12 @@ func TestNewCollectionsCollapsesSharedKeyAcrossPolicies(t *testing.T) {
 	})
 
 	requests := krttest.Await(t, collections.SharedRequests, 1)
-	require.Equal(t, 10*time.Minute, requests[0].TTL,
-		"shared request must inherit the smallest TTL across owners")
+	require.Equal(t, OidcRefreshInterval, requests[0].TTL)
 }
 
 const testOidcIssuer = "https://idp.example"
 
-func testOidcPolicy(name string, refresh time.Duration) *agentgateway.AgentgatewayPolicy {
+func testOidcPolicy(name string) *agentgateway.AgentgatewayPolicy {
 	return &agentgateway.AgentgatewayPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",
@@ -176,10 +160,9 @@ func testOidcPolicy(name string, refresh time.Duration) *agentgateway.Agentgatew
 			TargetRefs: make([]shared.LocalPolicyTargetReferenceWithSectionName, 1),
 			Traffic: &agentgateway.Traffic{
 				OIDC: &agentgateway.OIDC{
-					IssuerURL:       testOidcIssuer,
-					ClientID:        "agw",
-					RedirectURI:     "https://gateway.example/oauth2/callback",
-					RefreshInterval: &metav1.Duration{Duration: refresh},
+					IssuerURL:   testOidcIssuer,
+					ClientID:    "agw",
+					RedirectURI: "https://gateway.example/oauth2/callback",
 				},
 			},
 		},

@@ -7196,15 +7196,6 @@ spec:
                         minLength: 1
                         pattern: ^https?://[^?#\s]+$
                         type: string
-                      refreshInterval:
-                        default: 1h
-                        description: |-
-                          RefreshInterval governs both the discovery-document refresh and the
-                          JWKS refresh derived from it.
-                        type: string
-                        x-kubernetes-validations:
-                        - message: refreshInterval must be at least 5m.
-                          rule: duration(self) >= duration('5m')
                       scopes:
                         description: Scopes to request from the IdP. The `openid`
                           scope is always included.
