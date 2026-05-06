@@ -1,7 +1,7 @@
 package remotecache
 
 import (
-	"sync"
+	"reflect"
 
 	"istio.io/istio/pkg/kube/krt"
 
@@ -21,7 +21,7 @@ func (r ResultRecord[R]) ResourceName() string {
 }
 
 func (r ResultRecord[R]) Equals(other ResultRecord[R]) bool {
-	return krt.Equal(r.Payload, other.Payload)
+	return reflect.DeepEqual(r.Payload, other.Payload)
 }
 
 // Results is the KRT-visible store of successfully fetched remote artifacts.
@@ -29,7 +29,6 @@ func (r ResultRecord[R]) Equals(other ResultRecord[R]) bool {
 // output is published as a normal KRT collection instead of a private cache
 // plus custom fanout.
 type Results[R Result] struct {
-	mu         sync.Mutex
 	collection krt.StaticCollection[ResultRecord[R]]
 }
 
