@@ -263,7 +263,6 @@ func TestStoreClearsResultWhenLastPolicyDeleted(t *testing.T) {
 	_, ok := store.JwksByRequestKey(requestKey)
 	assert.True(t, ok, "result should be populated before policy deletion")
 
-	// Delete the AgentPolicy.
 	policies.Reset(nil)
 
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
@@ -430,7 +429,6 @@ func TestStoreClearsOrphanResultAtStartup(t *testing.T) {
 
 	assert.Eventually(t, store.HasSynced, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
-	// After sync, the orphan result should be cleared.
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		_, ok := store.JwksByRequestKey(requestKey)
 		assert.False(c, ok, "orphan result should be cleared after sync")
