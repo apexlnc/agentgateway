@@ -2,10 +2,7 @@ package remotecache
 
 import (
 	"container/heap"
-	"sync"
 	"time"
-
-	"istio.io/istio/pkg/util/sets"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
@@ -129,48 +126,6 @@ func NextRetryDelay(retryAttempt int) time.Duration {
 		return MaxRetryDelay
 	}
 	return next
-}
-
-// UpdateFanout manages notification to multiple subscribers. Subscribe and
-// Notify are safe to call concurrently from multiple goroutines.
-type UpdateFanout struct {
-	mu          sync.Mutex
-	subscribers []chan sets.Set[remotehttp.FetchKey]
-}
-
-func NewUpdateFanout() *UpdateFanout {
-	return &UpdateFanout{
-		subscribers: make([]chan sets.Set[remotehttp.FetchKey], 0),
-	}
-}
-
-func (f *UpdateFanout) Subscribe() <-chan sets.Set[remotehttp.FetchKey] {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	subscriber := make(chan sets.Set[remotehttp.FetchKey], 1)
-	f.subscribers = append(f.subscribers, subscriber)
-	return subscriber
-}
-
-func (f *UpdateFanout) Notify(updates sets.Set[remotehttp.FetchKey]) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, subscriber := range f.subscribers {
-		merged := cloneRequestKeySet(updates)
-		select {
-		case existing := <-subscriber:
-			merged.Merge(existing)
-		default:
-		}
-		subscriber <- merged
-	}
-}
-
-func cloneRequestKeySet(updates sets.Set[remotehttp.FetchKey]) sets.Set[remotehttp.FetchKey] {
-	if updates == nil {
-		return sets.New[remotehttp.FetchKey]()
-	}
-	return updates.Copy()
 }
 
 func SignalWake(wake chan<- struct{}) {
