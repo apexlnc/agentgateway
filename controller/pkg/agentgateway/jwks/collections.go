@@ -51,7 +51,7 @@ func NewCollections(inputs CollectionInputs) Collections {
 		}
 	}, inputs.KrtOpts.ToOptions("JwksSources/primary")...)
 
-	sharedRequests := remotecache.SharedRequests(
+	sharedRequests := remotecache.NewSharedRequestCollection(
 		primarySources,
 		"jwks-request-key",
 		"JwksRequestGroups",
