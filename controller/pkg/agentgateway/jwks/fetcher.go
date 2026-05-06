@@ -2,10 +2,7 @@ package jwks
 
 import (
 	"context"
-	"fmt"
 	"net/http"
-
-	"github.com/go-jose/go-jose/v4"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
@@ -34,17 +31,9 @@ func (d *JwksDriver) Fetch(ctx context.Context, source SharedJwksRequest) (Keyse
 	}
 
 	fetcherLogger.InfoContext(ctx, "fetching jwks", "url", source.Target.URL)
-
-	jwks, err := remotehttp.FetchJSON[jose.JSONWebKeySet](ctx, client, source.Target, "JWKS")
+	_, jwks, err := remotehttp.FetchJWKSBody(ctx, client, source.Target.URL, "JWKS")
 	if err != nil {
 		return Keyset{}, err
 	}
-	// Reject empty keysets at fetch time. An IdP returning a non-JWKS body
-	// (e.g. an error envelope as 200 OK) decodes into an empty Keys slice;
-	// persisting it would silently fail JWT validation in the dataplane.
-	if len(jwks.Keys) == 0 {
-		return Keyset{}, fmt.Errorf("JWKS response from %s contains no keys", source.Target.URL)
-	}
-
 	return buildKeyset(source.RequestKey, source.Target.URL, jwks)
 }
