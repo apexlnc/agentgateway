@@ -6,8 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"istio.io/istio/pkg/util/sets"
-
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
@@ -23,14 +21,6 @@ type Result interface {
 	RemoteFetchedAt() time.Time
 }
 
-// Cache provides storage for fetched results.
-type Cache[R Result] interface {
-	Get(key remotehttp.FetchKey) (R, bool)
-	Put(result R)
-	Delete(key remotehttp.FetchKey) bool
-	Keys() []remotehttp.FetchKey
-}
-
 // Driver performs the actual remote fetch.
 type Driver[S Request, R Result] interface {
 	Fetch(ctx context.Context, source S) (R, error)
@@ -43,24 +33,26 @@ type InternalFetchState[S Request] struct {
 }
 
 // Fetcher manages the lifecycle of remote resource discovery and periodic refresh.
+// Fetching remains imperative because it owns timers, retries, and HTTP side
+// effects. Successful results are published into Results, which is a KRT
+// StaticCollection, so downstream persistence and translation invalidation can
+// use normal KRT event propagation rather than a parallel fanout channel.
 type Fetcher[S Request, R Result] struct {
 	mu       sync.Mutex
-	Cache    Cache[R]
+	Results  *Results[R]
 	Driver   Driver[S, R]
 	requests map[remotehttp.FetchKey]InternalFetchState[S]
 	schedule *Schedule
-	fanout   *UpdateFanout
 	wake     chan struct{}
 	logger   *slog.Logger
 }
 
-func NewFetcher[S Request, R Result](cache Cache[R], driver Driver[S, R], logger *slog.Logger) *Fetcher[S, R] {
+func NewFetcher[S Request, R Result](results *Results[R], driver Driver[S, R], logger *slog.Logger) *Fetcher[S, R] {
 	return &Fetcher[S, R]{
-		Cache:    cache,
+		Results:  results,
 		Driver:   driver,
 		requests: make(map[remotehttp.FetchKey]InternalFetchState[S]),
 		schedule: NewSchedule(),
-		fanout:   NewUpdateFanout(),
 		wake:     make(chan struct{}, 1),
 		logger:   logger,
 	}
@@ -106,7 +98,6 @@ func (f *Fetcher[S, R]) MaybeFetch(ctx context.Context) {
 		return
 	}
 
-	updates := sets.New[remotehttp.FetchKey]()
 	for _, fetch := range due {
 		state, ok := f.lookup(fetch.RequestKey)
 		if !ok || state.Generation != fetch.Generation {
@@ -125,26 +116,15 @@ func (f *Fetcher[S, R]) MaybeFetch(ctx context.Context) {
 		if !f.commitFetchResult(fetch.RequestKey, fetch.Generation, result, now.Add(state.Source.RemoteTTL())) {
 			continue
 		}
-		updates.Insert(fetch.RequestKey)
 	}
 
-	if updates.IsEmpty() {
-		return
-	}
-
-	swept := f.sweepRetiredCache()
-	updates.Merge(swept)
-	f.fanout.Notify(updates)
-}
-
-func (f *Fetcher[S, R]) SubscribeToUpdates() <-chan sets.Set[remotehttp.FetchKey] {
-	return f.fanout.Subscribe()
+	f.sweepRetiredResults()
 }
 
 func (f *Fetcher[S, R]) AddOrUpdate(source S) {
 	requestKey := source.RemoteRequestKey()
 	nextFetchAt := time.Now()
-	if cached, ok := f.Cache.Get(requestKey); ok {
+	if cached, ok := f.Results.Get(requestKey); ok {
 		if fetchedAt := cached.RemoteFetchedAt(); !fetchedAt.IsZero() {
 			expiresAt := fetchedAt.Add(source.RemoteTTL())
 			if expiresAt.After(nextFetchAt) {
@@ -170,16 +150,14 @@ func (f *Fetcher[S, R]) Remove(requestKey remotehttp.FetchKey) {
 		delete(f.requests, requestKey)
 		f.schedule.Remove(requestKey)
 	}
-	hadCache := f.Cache.Delete(requestKey)
 	f.mu.Unlock()
 
-	if !hadRequest && !hadCache {
-		return
-	}
-
-	f.fanout.Notify(sets.New(requestKey))
+	hadResult := f.Results.Delete(requestKey)
 	if hadRequest {
 		SignalWake(f.wake)
+	}
+	if !hadRequest && !hadResult {
+		return
 	}
 }
 
@@ -198,19 +176,7 @@ func (f *Fetcher[S, R]) Retire(requestKey remotehttp.FetchKey) {
 }
 
 func (f *Fetcher[S, R]) SweepOrphans() {
-	f.mu.Lock()
-	orphans := sets.New[remotehttp.FetchKey]()
-	for _, key := range f.Cache.Keys() {
-		if _, ok := f.requests[key]; !ok {
-			orphans.Insert(key)
-			f.Cache.Delete(key)
-		}
-	}
-	f.mu.Unlock()
-
-	if !orphans.IsEmpty() {
-		f.fanout.Notify(orphans)
-	}
+	f.sweepRetiredResults()
 }
 
 func (f *Fetcher[S, R]) popDue(now time.Time) []FetchAt {
@@ -235,22 +201,24 @@ func (f *Fetcher[S, R]) commitFetchResult(requestKey remotehttp.FetchKey, genera
 		return false
 	}
 
-	f.Cache.Put(result)
+	f.Results.Put(result)
 	f.scheduleAtLocked(requestKey, generation, nextFetchAt, 0)
 	return true
 }
 
-func (f *Fetcher[S, R]) sweepRetiredCache() sets.Set[remotehttp.FetchKey] {
+func (f *Fetcher[S, R]) sweepRetiredResults() {
 	f.mu.Lock()
-	swept := sets.New[remotehttp.FetchKey]()
-	for _, key := range f.Cache.Keys() {
-		if _, ok := f.requests[key]; !ok {
-			swept.Insert(key)
-			f.Cache.Delete(key)
-		}
+	live := make(map[remotehttp.FetchKey]struct{}, len(f.requests))
+	for key := range f.requests {
+		live[key] = struct{}{}
 	}
 	f.mu.Unlock()
-	return swept
+
+	for _, key := range f.Results.Keys() {
+		if _, ok := live[key]; !ok {
+			f.Results.Delete(key)
+		}
+	}
 }
 
 func (f *Fetcher[S, R]) scheduleAt(requestKey remotehttp.FetchKey, generation uint64, at time.Time, retryAttempt int) {
