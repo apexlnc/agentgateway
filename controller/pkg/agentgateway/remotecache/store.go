@@ -18,8 +18,9 @@ var FetchKeyIndexCollectionOption = krt.WithIndexCollectionFromString(func(s str
 	return remotehttp.FetchKey(s)
 })
 
-// Hydrator loads previously persisted Results so the fetched-result collection
-// can serve last-known-good data before any remote fetches complete on startup.
+// Hydrator loads previously persisted fetched results so the fetched-result
+// collection can serve last-known-good data before any remote fetches complete
+// on startup.
 type Hydrator[R Result] interface {
 	LoadAll(ctx context.Context) ([]R, error)
 }
@@ -36,10 +37,10 @@ type StoreOptions[S Request, R Result] struct {
 	Hydrator Hydrator[R]
 
 	// RetireOnRequestKeyChange, if true, calls Fetcher.Retire when a request's
-	// key changes. This stops fetching the old key but preserves its result so
-	// existing traffic can continue using last-known-good data until a newer
-	// fetch for the same resource (under a different key) or an orphan sweep
-	// removes it.
+	// key changes. This stops fetching the old key but preserves its fetched
+	// result so existing traffic can continue using last-known-good data until a
+	// newer fetch for the same resource (under a different key) or an orphan
+	// sweep removes it.
 	RetireOnRequestKeyChange bool
 }
 
@@ -75,12 +76,11 @@ func (s *Store[S, R]) Start(ctx context.Context) error {
 			if event.New == nil {
 				return
 			}
-			// Special handling for request key changes (retire old)
 			if s.opts.RetireOnRequestKeyChange && event.Event == controllers.EventUpdate && event.Old != nil {
 				oldKey := (*event.Old).RemoteRequestKey()
 				newKey := (*event.New).RemoteRequestKey()
 				if oldKey != newKey {
-					s.opts.Logger.Debug("retiring stale record after request key change", "old_request_key", oldKey, "new_request_key", newKey)
+					s.opts.Logger.Debug("retiring stale fetched result after request key change", "old_request_key", oldKey, "new_request_key", newKey)
 					s.opts.Fetcher.Retire(oldKey)
 				}
 			}
