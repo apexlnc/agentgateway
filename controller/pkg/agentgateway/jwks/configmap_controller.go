@@ -6,20 +6,20 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 )
 
-// ConfigMapController synchronizes fetched JWKS keysets to persisted ConfigMaps.
-type ConfigMapController struct {
-	*remotecache.ConfigMapController[Keyset, PersistedEntry]
+// PersistenceController synchronizes fetched JWKS keysets to persisted ConfigMaps.
+type PersistenceController struct {
+	*remotecache.PersistenceController[Keyset, PersistedEntry]
 }
 
-func NewConfigMapController(apiClient apiclient.Client, storePrefix, deploymentNamespace string, store *Store, persistedEntries *PersistedEntries) *ConfigMapController {
-	logger := logging.New("jwks_store_config_map_controller")
-	logger.Info("creating jwks store ConfigMap controller")
+func NewPersistenceController(apiClient apiclient.Client, storePrefix, deploymentNamespace string, store *Store, persistedEntries *PersistedEntries) *PersistenceController {
+	logger := logging.New("jwks_store_persistence_controller")
+	logger.Info("creating jwks store persistence controller")
 
-	opts := remotecache.ConfigMapControllerOptions[Keyset, PersistedEntry]{
+	opts := remotecache.PersistenceControllerOptions[Keyset, PersistedEntry]{
 		ApiClient:            apiClient,
 		DeploymentNamespace:  deploymentNamespace,
-		ControllerName:       "JwksStoreConfigMapController",
-		Results:              store.Results().Collection(),
+		ControllerName:       "JwksStorePersistenceController",
+		Results:              store.FetchedResults().Collection(),
 		Entries:              persistedEntries.Collection(),
 		EntriesForRequestKey: persistedEntries.EntriesForRequestKey,
 		Serialize:            SetJwksInConfigMap,
@@ -30,7 +30,7 @@ func NewConfigMapController(apiClient apiclient.Client, storePrefix, deploymentN
 		Logger:               logger,
 	}
 
-	return &ConfigMapController{
-		ConfigMapController: remotecache.NewConfigMapController(opts),
+	return &PersistenceController{
+		PersistenceController: remotecache.NewPersistenceController(opts),
 	}
 }
