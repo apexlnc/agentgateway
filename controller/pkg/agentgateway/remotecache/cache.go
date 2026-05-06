@@ -8,42 +8,42 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
-// ResultRecord wraps a fetched remote artifact so it has a stable KRT key.
+// FetchedRecord wraps a fetched remote artifact so it has a stable KRT key.
 // The payload remains the domain result type; the wrapper is only the
 // KRT-visible publication envelope used by the fetch runtime and persistence
 // reconciler.
-type ResultRecord[R Result] struct {
+type FetchedRecord[R Result] struct {
 	Payload R
 }
 
-func (r ResultRecord[R]) ResourceName() string {
+func (r FetchedRecord[R]) ResourceName() string {
 	return string(r.Payload.RemoteRequestKey())
 }
 
-func (r ResultRecord[R]) Equals(other ResultRecord[R]) bool {
+func (r FetchedRecord[R]) Equals(other FetchedRecord[R]) bool {
 	return reflect.DeepEqual(r.Payload, other.Payload)
 }
 
-// Results is the KRT-visible store of successfully fetched remote artifacts.
-// The fetcher is still imperative for HTTP, retry and TTL scheduling, but its
-// output is published as a normal KRT collection instead of a private cache
-// plus custom fanout.
-type Results[R Result] struct {
-	collection krt.StaticCollection[ResultRecord[R]]
+// FetchedResults is the KRT-visible store of successfully fetched remote
+// artifacts. The fetcher is still imperative for HTTP, retry and TTL
+// scheduling, but its output is published as a normal KRT collection instead
+// of a private cache plus custom fanout.
+type FetchedResults[R Result] struct {
+	collection krt.StaticCollection[FetchedRecord[R]]
 }
 
-// NewResults constructs an empty, already-synced fetched-result collection.
-func NewResults[R Result](opts ...krt.CollectionOption) *Results[R] {
-	return &Results[R]{
+// NewFetchedResults constructs an empty, already-synced fetched-result collection.
+func NewFetchedResults[R Result](opts ...krt.CollectionOption) *FetchedResults[R] {
+	return &FetchedResults[R]{
 		collection: krt.NewStaticCollection(alwaysSynced{}, nil, opts...),
 	}
 }
 
-func (r *Results[R]) Collection() krt.Collection[ResultRecord[R]] {
+func (r *FetchedResults[R]) Collection() krt.Collection[FetchedRecord[R]] {
 	return r.collection
 }
 
-func (r *Results[R]) Get(key remotehttp.FetchKey) (R, bool) {
+func (r *FetchedResults[R]) Get(key remotehttp.FetchKey) (R, bool) {
 	var zero R
 	obj := r.collection.GetKey(string(key))
 	if obj == nil {
@@ -52,11 +52,11 @@ func (r *Results[R]) Get(key remotehttp.FetchKey) (R, bool) {
 	return obj.Payload, true
 }
 
-func (r *Results[R]) Put(result R) {
-	r.collection.UpdateObject(ResultRecord[R]{Payload: result})
+func (r *FetchedResults[R]) Put(result R) {
+	r.collection.UpdateObject(FetchedRecord[R]{Payload: result})
 }
 
-func (r *Results[R]) Delete(key remotehttp.FetchKey) bool {
+func (r *FetchedResults[R]) Delete(key remotehttp.FetchKey) bool {
 	_, existed := r.Get(key)
 	if existed {
 		r.collection.DeleteObject(string(key))
@@ -64,14 +64,14 @@ func (r *Results[R]) Delete(key remotehttp.FetchKey) bool {
 	return existed
 }
 
-func (r *Results[R]) DeleteObjects(filter func(ResultRecord[R]) bool) {
+func (r *FetchedResults[R]) DeleteObjects(filter func(FetchedRecord[R]) bool) {
 	r.collection.DeleteObjects(filter)
 }
 
-func (r *Results[R]) Reset(results []R) {
-	records := make([]ResultRecord[R], 0, len(results))
+func (r *FetchedResults[R]) Reset(results []R) {
+	records := make([]FetchedRecord[R], 0, len(results))
 	for _, result := range results {
-		records = append(records, ResultRecord[R]{Payload: result})
+		records = append(records, FetchedRecord[R]{Payload: result})
 	}
 	r.collection.Reset(records)
 }
