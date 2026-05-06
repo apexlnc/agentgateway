@@ -69,12 +69,12 @@ func TestStoreLoadsPersistedProvidersBeforeServing(t *testing.T) {
 	require.Eventually(t, store.HasSynced, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
 	got, ok := store.ProviderByRequestKey(requestKey)
-	require.True(t, ok, "persisted provider must be served from cache before any live fetch")
+	require.True(t, ok, "persisted provider must be served from fetched results before any live fetch")
 	require.Equal(t, persistedProvider.IssuerURL, got.IssuerURL)
 	require.Equal(t, persistedProvider.JwksURI, got.JwksURI)
 }
 
-func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
+func TestStoreClearsFetchedResultWhenLastPolicyDeleted(t *testing.T) {
 	const issuer = "https://idp.example"
 	target := remotehttp.FetchTarget{URL: "https://idp.example/.well-known/openid-configuration"}
 	requestKey := oidcRequestKey(target, issuer)
@@ -128,7 +128,7 @@ func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 
 	_, ok := store.ProviderByRequestKey(requestKey)
-	require.True(t, ok, "cache should be hydrated before policy deletion")
+	require.True(t, ok, "fetched results should be hydrated before policy deletion")
 
 	policies.Reset(nil)
 
@@ -138,7 +138,7 @@ func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 }
 
-func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
+func TestStoreClearsOrphanFetchedResultAtStartup(t *testing.T) {
 	const issuer = "https://idp.example"
 	target := remotehttp.FetchTarget{URL: "https://idp.example/.well-known/openid-configuration"}
 	requestKey := oidcRequestKey(target, issuer)
@@ -188,6 +188,6 @@ func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		_, ok := store.ProviderByRequestKey(requestKey)
-		assert.False(c, ok, "orphan cache entry should be cleared after sync")
+		assert.False(c, ok, "orphan fetched result should be cleared after sync")
 	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
 }
