@@ -7,7 +7,6 @@ import (
 
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/krt"
-	"istio.io/istio/pkg/util/sets"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
@@ -19,8 +18,8 @@ var FetchKeyIndexCollectionOption = krt.WithIndexCollectionFromString(func(s str
 	return remotehttp.FetchKey(s)
 })
 
-// Hydrator loads previously persisted Results so the in-memory cache can
-// serve last-known-good data before any remote fetches complete on startup.
+// Hydrator loads previously persisted Results so the fetched-result collection
+// can serve last-known-good data before any remote fetches complete on startup.
 type Hydrator[R Result] interface {
 	LoadAll(ctx context.Context) ([]R, error)
 }
@@ -31,16 +30,16 @@ type StoreOptions[S Request, R Result] struct {
 	Requests krt.Collection[S]
 	Logger   *slog.Logger
 
-	// Hydrator, if non-nil, populates Fetcher.Cache before request
+	// Hydrator, if non-nil, populates Fetcher.Results before request
 	// registration. LoadAll errors are logged but never block Start so a
 	// transient persistence failure cannot stall fresh fetches.
 	Hydrator Hydrator[R]
 
 	// RetireOnRequestKeyChange, if true, calls Fetcher.Retire when a request's
-	// key changes. This stops fetching the old key but preserves its cache
-	// entry so existing traffic can continue using last-known-good data
-	// until a newer fetch for the same resource (under a different key)
-	// or an orphan sweep removes it.
+	// key changes. This stops fetching the old key but preserves its result so
+	// existing traffic can continue using last-known-good data until a newer
+	// fetch for the same resource (under a different key) or an orphan sweep
+	// removes it.
 	RetireOnRequestKeyChange bool
 }
 
@@ -65,11 +64,9 @@ func (s *Store[S, R]) Start(ctx context.Context) error {
 	if s.opts.Hydrator != nil {
 		stored, err := s.opts.Hydrator.LoadAll(ctx)
 		if err != nil {
-			s.opts.Logger.Error("error hydrating remote cache from persistence", "error", err)
+			s.opts.Logger.Error("error hydrating remote results from persistence", "error", err)
 		}
-		for _, result := range stored {
-			s.opts.Fetcher.Cache.Put(result)
-		}
+		s.opts.Fetcher.Results.Reset(stored)
 	}
 
 	registration := s.opts.Requests.Register(func(event krt.Event[S]) {
@@ -126,10 +123,6 @@ func (s *Store[S, R]) HasSynced() bool {
 	default:
 		return false
 	}
-}
-
-func (s *Store[S, R]) SubscribeToUpdates() <-chan sets.Set[remotehttp.FetchKey] {
-	return s.opts.Fetcher.SubscribeToUpdates()
 }
 
 func (s *Store[S, R]) NeedLeaderElection() bool {
