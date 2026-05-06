@@ -49,7 +49,7 @@ func NewCollections(inputs CollectionInputs) Collections {
 		return sources
 	}, inputs.KrtOpts.ToOptions("oidc/sources")...)
 
-	sharedRequests := remotecache.SharedRequests(
+	sharedRequests := remotecache.NewSharedRequestCollection(
 		sources,
 		"oidc-request-key",
 		"oidc/requestGroups",
