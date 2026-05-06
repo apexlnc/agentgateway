@@ -22,7 +22,7 @@ type Store struct {
 }
 
 func NewStore(requests krt.Collection[SharedJwksRequest], persistedEntries *PersistedEntries, storePrefix string) *Store {
-	results := NewResults()
+	results := NewFetchedResults()
 	innerStore := remotecache.NewStore(remotecache.StoreOptions[SharedJwksRequest, Keyset]{
 		Fetcher:                  NewFetcher(results),
 		Requests:                 requests,
@@ -41,7 +41,7 @@ func (s *Store) JwksByRequestKey(requestKey remotehttp.FetchKey) (Keyset, bool) 
 	return s.results.Get(requestKey)
 }
 
-func (s *Store) Results() *JwksResults {
+func (s *Store) FetchedResults() *JwksResults {
 	return s.results
 }
 
