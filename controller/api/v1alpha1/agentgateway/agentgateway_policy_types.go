@@ -866,11 +866,11 @@ func (d *DirectResponseOrConditional) ConditionalPolicy() (*DirectResponse, iter
 // based user login (Authorization Code Flow with PKCE). The gateway terminates
 // the redirect flow, validates the ID token, and issues an encrypted session
 // cookie; upstream services see authenticated requests. For bearer-token
-// validation on machine-to-machine APIs, use jwtAuthentication instead.
+// validation on machine-to-machine APIs, use `jwtAuthentication` instead.
 // +kubebuilder:validation:XValidation:rule="has(self.tokenEndpointAuthMethod) && self.tokenEndpointAuthMethod == 'None' ? !has(self.clientSecret) : true",message="tokenEndpointAuthMethod None must not be paired with a clientSecret"
 // +kubebuilder:validation:XValidation:rule="has(self.tokenEndpointAuthMethod) && self.tokenEndpointAuthMethod in ['ClientSecretBasic', 'ClientSecretPost'] ? has(self.clientSecret) : true",message="tokenEndpointAuthMethod ClientSecretBasic or ClientSecretPost requires a clientSecret"
 type OIDC struct {
-	// IssuerURL is the OIDC issuer URL. It must be an absolute HTTPS URL with
+	// `issuerURL` is the OIDC issuer URL. It must be an absolute HTTPS URL with
 	// no query or fragment. The configured value is preserved exactly for
 	// discovery-document issuer matching, including any trailing slash.
 	// +kubebuilder:validation:Pattern=`^https://[^/?#]+(/[^?#]*)?$`
@@ -879,38 +879,39 @@ type OIDC struct {
 	// +required
 	IssuerURL string `json:"issuerURL"`
 
-	// ClientID is the OIDC client identifier.
+	// `clientID` is the OIDC client identifier.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	// +required
 	ClientID string `json:"clientID"`
 
-	// ClientSecret references a Secret containing the OIDC client secret under
-	// the `clientSecret` data key. Omit for a public client; in that case PKCE
-	// alone protects the authorization code exchange and the IdP must accept
-	// the `none` token-endpoint auth method (see TokenEndpointAuthMethod).
+	// `clientSecret` references a Secret containing the OIDC client secret
+	// under the `clientSecret` data key. Omit for a public client; in that
+	// case PKCE alone protects the authorization code exchange and the IdP
+	// must accept the `none` token-endpoint auth method (see
+	// `tokenEndpointAuthMethod`).
 	// +optional
 	ClientSecret *corev1.LocalObjectReference `json:"clientSecret,omitempty"`
 
-	// RedirectURI is the callback URL registered with the IdP. Absolute
-	// http(s) URL, no query or fragment. The `http` scheme is permitted only
-	// because some IdPs allow it for `localhost` development; production
-	// deployments must use `https` and most IdPs reject `http` redirect
-	// registrations outright.
-	// +kubebuilder:validation:Pattern=`^https?://[^?#\s]+$`
+	// `redirectURI` is the callback URL registered with the IdP. Absolute
+	// http(s) URL with an explicit non-root path, no query or fragment. The
+	// `http` scheme is permitted only because some IdPs allow it for
+	// `localhost` development; production deployments must use `https` and
+	// most IdPs reject `http` redirect registrations outright.
+	// +kubebuilder:validation:Pattern=`^https?://[^/?#\s]+/[^?#\s]+$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=2048
 	// +required
 	RedirectURI string `json:"redirectURI"`
 
-	// Scopes to request from the IdP. The `openid` scope is always included.
+	// `scopes` to request from the IdP. The `openid` scope is always included.
 	// +optional
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=256
 	Scopes []string `json:"scopes,omitempty"`
 
-	// TokenEndpointAuthMethod overrides the auth method the IdP advertises
+	// `tokenEndpointAuthMethod` overrides the auth method the IdP advertises
 	// in its discovery document. `None` selects public-client mode (no client
 	// authentication at the token endpoint; PKCE still protects the code
 	// exchange) and must not be paired with a `clientSecret`.
@@ -918,14 +919,14 @@ type OIDC struct {
 	// +kubebuilder:validation:Enum=ClientSecretBasic;ClientSecretPost;None
 	TokenEndpointAuthMethod *string `json:"tokenEndpointAuthMethod,omitempty"`
 
-	// `backendRef` optionally references the IdP backend used to fetch the
-	// OIDC discovery document and JWKS. Supported types are `Service` and
-	// static `Backend`. An `AgentgatewayPolicy` containing backend TLS config
-	// can then be attached to the `Service` or `Backend` to set TLS options
-	// for connections to the IdP — for example to trust a private CA, set an
-	// SNI override, or (in development) skip verification of a self-signed
-	// cert. When omitted, the controller fetches directly from the
-	// `issuerURL` using the system CA trust store.
+	// `backendRef` optionally configures the transport the controller uses
+	// for OIDC discovery and JWKS fetches; the issuer identity is unchanged
+	// (`issuerURL` is still matched against the discovery `issuer` claim).
+	// Applies only to controller-side fetches, not to the dataplane's token
+	// endpoint exchange. Supported referents: `Service`, static `Backend`.
+	// Attach an `AgentgatewayPolicy` with backend TLS config to set a private
+	// CA, SNI override, or `insecureSkipVerify`. Omit to fetch from
+	// `issuerURL` using system CA trust.
 	// +optional
 	BackendRef *gwv1.BackendObjectReference `json:"backendRef,omitempty"`
 }

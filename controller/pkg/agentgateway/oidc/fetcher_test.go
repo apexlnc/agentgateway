@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,7 +49,7 @@ func TestFetcherFetchesAndValidatesDiscovery(t *testing.T) {
 	}
 
 	f.AddOrUpdate(source)
-	go f.MaybeFetch(ctx)
+	go f.Run(ctx)
 
 	require.Eventually(t, func() bool {
 		_, ok := results.Get(source.RequestKey)
@@ -58,6 +59,62 @@ func TestFetcherFetchesAndValidatesDiscovery(t *testing.T) {
 	provider, _ := results.Get(source.RequestKey)
 	require.Equal(t, backendURL, provider.IssuerURL)
 	require.Equal(t, jwksJSON, provider.JwksInline)
+}
+
+func TestOidcDriverRoutesBackendRefJWKSViaResolvedTarget(t *testing.T) {
+	const (
+		expectedIssuer = "https://issuer.example"
+		jwksJSON       = `{"keys":[{"kty":"oct","k":"AAECAwQFBgc"}]}`
+	)
+
+	var (
+		mu       sync.Mutex
+		requests []string
+	)
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.URL.String())
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case discoveryPath:
+			_ = json.NewEncoder(w).Encode(discoveryDocument{
+				Issuer:                expectedIssuer,
+				AuthorizationEndpoint: expectedIssuer + "/auth",
+				TokenEndpoint:         expectedIssuer + "/token",
+				JwksURI:               expectedIssuer + "/tenant/jwks?kid=current",
+			})
+		case "/tenant/jwks":
+			if r.URL.RawQuery != "kid=current" {
+				http.Error(w, "wrong query", http.StatusBadRequest)
+				return
+			}
+			_, _ = fmt.Fprint(w, jwksJSON)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer backend.Close()
+
+	target := remotehttp.FetchTarget{URL: backend.URL + discoveryPath}
+	driver := &OidcDriver{DefaultClient: backend.Client()}
+	source := SharedOidcRequest{
+		RequestKey:            oidcRequestKey(target, expectedIssuer, &target),
+		ExpectedIssuer:        expectedIssuer,
+		Target:                target,
+		ProviderBackendTarget: &target,
+		TTL:                   time.Hour,
+	}
+
+	provider, err := driver.Fetch(t.Context(), source)
+	require.NoError(t, err)
+	require.Equal(t, expectedIssuer+"/tenant/jwks?kid=current", provider.JwksURI)
+	require.Equal(t, jwksJSON, provider.JwksInline)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{discoveryPath, "/tenant/jwks?kid=current"}, requests)
 }
 
 func TestOidcDriverRejectsInvalidJWKSBody(t *testing.T) {

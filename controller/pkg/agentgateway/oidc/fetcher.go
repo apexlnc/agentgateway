@@ -9,10 +9,7 @@ import (
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 )
-
-var fetcherLogger = logging.New("oidc_fetcher")
 
 type discoveryDocument struct {
 	Issuer                            string   `json:"issuer"`
@@ -30,7 +27,7 @@ type Fetcher = remotecache.Fetcher[SharedOidcRequest, DiscoveredProvider]
 // returned so tests can swap its DefaultClient.
 func NewFetcher(results *OidcResults) (*Fetcher, *OidcDriver) {
 	driver := &OidcDriver{DefaultClient: remotehttp.NewDefaultFetchClient()}
-	return remotecache.NewFetcher[SharedOidcRequest, DiscoveredProvider](results, driver.Fetch, fetcherLogger), driver
+	return remotecache.NewFetcher[SharedOidcRequest, DiscoveredProvider](results, driver.Fetch, logger), driver
 }
 
 type OidcDriver struct {
@@ -40,17 +37,14 @@ type OidcDriver struct {
 func (d *OidcDriver) Fetch(ctx context.Context, source SharedOidcRequest) (DiscoveredProvider, error) {
 	// PickClient honors per-source TLSConfig + ProxyTLSConfig populated by the
 	// resolver from an attached AgentgatewayPolicy. The same client is used for
-	// the JWKS-from-discovery fetch because IdPs typically host JWKS on the
-	// same backend as the discovery document, so the same trust material
-	// applies. (If a future IdP serves jwks_uri from a different host, the
-	// fallback at that point is system trust, which is what JwksSource without
-	// a backend-attached policy uses today as well.)
+	// JWKS so backendRef TLS/proxy settings apply consistently across discovery
+	// and key material fetches.
 	client, err := remotehttp.PickClient(d.DefaultClient, source.Target, source.TLSConfig, source.ProxyTLSConfig)
 	if err != nil {
 		return DiscoveredProvider{}, err
 	}
 
-	fetcherLogger.InfoContext(ctx, "fetching oidc discovery document", "url", source.Target.URL)
+	logger.InfoContext(ctx, "fetching oidc discovery document", "url", source.Target.URL)
 
 	doc, err := remotehttp.FetchJSON[discoveryDocument](ctx, client, source.Target, "OIDC discovery")
 	if err != nil {
@@ -60,8 +54,13 @@ func (d *OidcDriver) Fetch(ctx context.Context, source SharedOidcRequest) (Disco
 		return DiscoveredProvider{}, err
 	}
 
-	fetcherLogger.InfoContext(ctx, "fetching oidc jwks", "url", doc.JwksURI)
-	jwksBody, _, err := remotehttp.FetchJWKSBody(ctx, client, doc.JwksURI, "OIDC JWKS")
+	jwksURL, err := oidcJWKSFetchURL(source, doc.JwksURI)
+	if err != nil {
+		return DiscoveredProvider{}, err
+	}
+
+	logger.InfoContext(ctx, "fetching oidc jwks", "url", doc.JwksURI, "fetchURL", jwksURL)
+	jwksBody, _, err := remotehttp.FetchJWKSBody(ctx, client, jwksURL, "OIDC JWKS")
 	if err != nil {
 		return DiscoveredProvider{}, fmt.Errorf("failed to fetch OIDC JWKS from %s: %w", doc.JwksURI, err)
 	}
@@ -76,6 +75,32 @@ func (d *OidcDriver) Fetch(ctx context.Context, source SharedOidcRequest) (Disco
 		TokenEndpointAuthMethodsSupported: doc.TokenEndpointAuthMethodsSupported,
 		FetchedAt:                         time.Now(),
 	}, nil
+}
+
+func oidcJWKSFetchURL(source SharedOidcRequest, jwksURI string) (string, error) {
+	if source.ProviderBackendTarget == nil {
+		return jwksURI, nil
+	}
+
+	targetURL, err := url.Parse(source.ProviderBackendTarget.URL)
+	if err != nil {
+		return "", fmt.Errorf("invalid resolved OIDC provider backend URL %q: %w", source.ProviderBackendTarget.URL, err)
+	}
+	if !targetURL.IsAbs() || targetURL.Host == "" {
+		return "", fmt.Errorf("resolved OIDC provider backend URL %q must be absolute with a host", source.ProviderBackendTarget.URL)
+	}
+	jwksURL, err := url.Parse(jwksURI)
+	if err != nil {
+		return "", fmt.Errorf("invalid OIDC jwks_uri %q: %w", jwksURI, err)
+	}
+
+	rewritten := *targetURL
+	rewritten.Path = jwksURL.Path
+	rewritten.RawPath = jwksURL.RawPath
+	rewritten.RawQuery = jwksURL.RawQuery
+	rewritten.ForceQuery = jwksURL.ForceQuery
+	rewritten.Fragment = ""
+	return rewritten.String(), nil
 }
 
 func validateDiscoveryDocument(doc discoveryDocument, expectedIssuer string) error {

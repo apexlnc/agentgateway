@@ -1033,6 +1033,13 @@ message TrafficPolicySpec {
 
     // Requested scopes. When empty, the dataplane falls back to ["openid"].
     repeated string scopes = 10;
+
+    // Optional backend reference used for token-endpoint calls. When set, the
+    // dataplane routes the token exchange through the referenced backend and
+    // applies its attached backend TLS policy (private CA, insecureSkipVerify,
+    // SNI, etc.). When unset, the dataplane connects directly to
+    // `token_endpoint` using the system trust store.
+    BackendReference provider_backend = 11;
   }
 
   PolicyPhase phase = 1;

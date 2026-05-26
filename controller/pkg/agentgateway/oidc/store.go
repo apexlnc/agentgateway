@@ -11,7 +11,7 @@ import (
 
 const DefaultStorePrefix = "oidc-store"
 
-var storeLogger = logging.New("oidc_store")
+var logger = logging.New("agentgateway/oidc")
 
 // OidcResults stores discovered OIDC providers as a KRT-visible collection.
 type OidcResults = remotecache.FetchedResults[DiscoveredProvider]
@@ -37,7 +37,7 @@ func NewStore(requests krt.Collection[SharedOidcRequest], persistedEntries *Pers
 	innerStore := remotecache.NewStore(remotecache.StoreOptions[SharedOidcRequest, DiscoveredProvider]{
 		Fetcher:  fetcher,
 		Requests: requests,
-		Logger:   storeLogger,
+		Logger:   logger,
 		Hydrate:  persistedEntries.LoadAll,
 	})
 

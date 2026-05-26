@@ -7,11 +7,11 @@ import (
 )
 
 // FetchedResults is the KRT-visible store of successfully fetched remote artifacts.
-type FetchedResults[R Result] struct {
+type FetchedResults[R Result[R]] struct {
 	collection krt.StaticCollection[R]
 }
 
-func NewFetchedResults[R Result](opts ...krt.CollectionOption) *FetchedResults[R] {
+func NewFetchedResults[R Result[R]](opts ...krt.CollectionOption) *FetchedResults[R] {
 	return &FetchedResults[R]{
 		collection: krt.NewStaticCollection[R](nil, nil, opts...),
 	}

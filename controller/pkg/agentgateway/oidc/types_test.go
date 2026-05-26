@@ -73,7 +73,7 @@ func TestOidcRequestKeyIsDomainSeparated(t *testing.T) {
 	target := remotehttp.FetchTarget{URL: "https://issuer.example/.well-known/openid-configuration"}
 	expectedIssuer := "https://issuer.example"
 
-	key := oidcRequestKey(target, expectedIssuer)
+	key := oidcRequestKey(target, expectedIssuer, nil)
 
 	require.NotEqual(t, target.Key(), key)
 	require.NotEqual(t, oldOidcRequestKeyForTest(target, expectedIssuer), key)
@@ -96,8 +96,8 @@ func TestOidcRequestKeyStable(t *testing.T) {
 	target := remotehttp.FetchTarget{URL: "https://issuer.example/.well-known/openid-configuration"}
 	issuer := "https://issuer.example"
 
-	first := oidcRequestKey(target, issuer)
-	second := oidcRequestKey(target, issuer)
+	first := oidcRequestKey(target, issuer, nil)
+	second := oidcRequestKey(target, issuer, nil)
 
 	require.Equal(t, first, second, "same (target, issuer) must hash identically across calls")
 }
@@ -208,12 +208,13 @@ func TestDiscoveredProviderEqualsIgnoresMonotonicClock(t *testing.T) {
 func TestOidcRequestKeyDifferentiatesInputs(t *testing.T) {
 	baseTarget := remotehttp.FetchTarget{URL: "https://issuer.example/.well-known/openid-configuration"}
 	baseIssuer := "https://issuer.example"
-	baseKey := oidcRequestKey(baseTarget, baseIssuer)
+	baseKey := oidcRequestKey(baseTarget, baseIssuer, nil)
 
 	tests := []struct {
-		name   string
-		target remotehttp.FetchTarget
-		issuer string
+		name                  string
+		target                remotehttp.FetchTarget
+		issuer                string
+		providerBackendTarget *remotehttp.FetchTarget
 	}{
 		{
 			name:   "different target URL",
@@ -235,13 +236,19 @@ func TestOidcRequestKeyDifferentiatesInputs(t *testing.T) {
 			target: baseTarget,
 			issuer: "http://issuer.example",
 		},
+		{
+			name:                  "provider backend target",
+			target:                baseTarget,
+			issuer:                baseIssuer,
+			providerBackendTarget: &baseTarget,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			other := oidcRequestKey(tc.target, tc.issuer)
+			other := oidcRequestKey(tc.target, tc.issuer, tc.providerBackendTarget)
 			require.NotEqual(t, baseKey, other,
-				"request keys must differ when (target, issuer) differs")
+				"request keys must differ when sharing inputs differ")
 		})
 	}
 }

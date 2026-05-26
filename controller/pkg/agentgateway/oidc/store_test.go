@@ -21,7 +21,7 @@ import (
 func TestStoreLoadsPersistedProvidersBeforeServing(t *testing.T) {
 	const issuer = "https://idp.example"
 	target := remotehttp.FetchTarget{URL: "https://idp.example/.well-known/openid-configuration"}
-	requestKey := oidcRequestKey(target, issuer)
+	requestKey := oidcRequestKey(target, issuer, nil)
 
 	persistedProvider := DiscoveredProvider{
 		RequestKey:            requestKey,
@@ -78,7 +78,7 @@ func TestStoreLoadsPersistedProvidersBeforeServing(t *testing.T) {
 func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 	const issuer = "https://idp.example"
 	target := remotehttp.FetchTarget{URL: "https://idp.example/.well-known/openid-configuration"}
-	requestKey := oidcRequestKey(target, issuer)
+	requestKey := oidcRequestKey(target, issuer, nil)
 
 	persistedProvider := DiscoveredProvider{
 		RequestKey:            requestKey,
@@ -143,7 +143,7 @@ func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
 	const issuer = "https://idp.example"
 	target := remotehttp.FetchTarget{URL: "https://idp.example/.well-known/openid-configuration"}
-	requestKey := oidcRequestKey(target, issuer)
+	requestKey := oidcRequestKey(target, issuer, nil)
 
 	orphanProvider := DiscoveredProvider{
 		RequestKey:            requestKey,

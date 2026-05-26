@@ -11,12 +11,8 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
 
-// CollapseSources merges per-owner sources sharing a fetch key into a single
-// canonical record. It returns the source with the lowest ownerKey (so output
-// is stable across input order) and the minimum TTL across all sources (so
-// the shared fetch refreshes as often as the most aggressive owner requires).
-//
-// Callers must pre-filter empty input — CollapseSources panics on len 0.
+// CollapseSources collapses sources sharing a fetch key: lowest ownerKey
+// (stable across input order) and minimum TTL. Panics on len 0.
 func CollapseSources[S any](sources []S, ownerKey func(S) string, ttl func(S) time.Duration) (S, time.Duration) {
 	sorted := append([]S(nil), sources...)
 	slices.SortFunc(sorted, func(a, b S) int {
@@ -32,9 +28,7 @@ func CollapseSources[S any](sources []S, ownerKey func(S) string, ttl func(S) ti
 	return primary, minTTL
 }
 
-// NewSharedRequestCollection groups sources by FetchKey and collapses each group:
-//
-//	sources -> request-key index -> grouped index collection -> requests
+// NewSharedRequestCollection groups sources by FetchKey and collapses each group via `collapse`.
 func NewSharedRequestCollection[S any, R any](
 	sources krt.Collection[S],
 	indexName string,

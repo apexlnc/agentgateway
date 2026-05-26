@@ -6,6 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+	"k8s.io/client-go/util/workqueue"
+
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
@@ -14,193 +17,183 @@ type Request interface {
 	RemoteTTL() time.Duration
 }
 
-type Result interface {
+// Result is F-bounded over T so payloadEquals can dispatch through the typed
+// Equals method instead of reflect.DeepEqual on every KRT diff.
+type Result[T any] interface {
 	RemoteRequestKey() remotehttp.FetchKey
 	RemoteFetchedAt() time.Time
+	Equals(T) bool
 }
 
-type InternalFetchState[S Request] struct {
-	Source     S
-	Generation uint64
+// newFetchRateLimiter: per-key exponential backoff (100ms → 15s) under a
+// 10qps/100-burst global cap shared across all retries.
+func newFetchRateLimiter() workqueue.TypedRateLimiter[remotehttp.FetchKey] {
+	return workqueue.NewTypedMaxOfRateLimiter[remotehttp.FetchKey](
+		workqueue.NewTypedItemExponentialFailureRateLimiter[remotehttp.FetchKey](100*time.Millisecond, 15*time.Second),
+		&workqueue.TypedBucketRateLimiter[remotehttp.FetchKey]{Limiter: rate.NewLimiter(rate.Limit(10), 100)},
+	)
 }
 
-// Fetcher owns the imperative side (timers, retries, HTTP) and publishes results into
-// FetchedResults so downstream KRT graphs react via normal event propagation.
-type Fetcher[S Request, R Result] struct {
-	mu       sync.Mutex
-	Results  *FetchedResults[R]
-	Fetch    func(ctx context.Context, source S) (R, error)
-	requests map[remotehttp.FetchKey]InternalFetchState[S]
-	schedule *Schedule
-	wake     chan struct{}
-	logger   *slog.Logger
+// Fetcher publishes fetched results into FetchedResults; scheduling uses a
+// client-go workqueue (AddAfter for TTL refresh, AddRateLimited for backoff).
+//
+// workqueue.AddAfter is one-directional: a future-scheduled item can be pulled
+// earlier but never pushed later, so a pending retry runs even after a fresh
+// cached result lands. Net effect: one extra fetch on startup; equivalent
+// sources content-hash to the same key and fetch identical material.
+//
+// Lock order: f.mu may be held across FetchedResults calls; callers MUST NOT
+// acquire krt locks before f.mu.
+type Fetcher[S Request, R Result[R]] struct {
+	mu sync.Mutex
+	// retireDirty is set whenever Retire removes a request, signalling that
+	// SweepOrphans has work to do on the next opportunity. Avoids the O(N)
+	// sweep on every successful fetch when no retirements have happened.
+	retireDirty bool
+	Results     *FetchedResults[R]
+	Fetch       func(ctx context.Context, source S) (R, error)
+	requests    map[remotehttp.FetchKey]S
+	queue       workqueue.TypedRateLimitingInterface[remotehttp.FetchKey]
+	logger      *slog.Logger
 }
 
-func NewFetcher[S Request, R Result](results *FetchedResults[R], fetch func(ctx context.Context, source S) (R, error), logger *slog.Logger) *Fetcher[S, R] {
+func NewFetcher[S Request, R Result[R]](
+	results *FetchedResults[R],
+	fetch func(ctx context.Context, source S) (R, error),
+	logger *slog.Logger,
+) *Fetcher[S, R] {
 	return &Fetcher[S, R]{
 		Results:  results,
 		Fetch:    fetch,
-		requests: make(map[remotehttp.FetchKey]InternalFetchState[S]),
-		schedule: NewSchedule(),
-		wake:     make(chan struct{}, 1),
+		requests: make(map[remotehttp.FetchKey]S),
+		queue:    workqueue.NewTypedRateLimitingQueue(newFetchRateLimiter()),
 		logger:   logger,
 	}
 }
 
 func (f *Fetcher[S, R]) Run(ctx context.Context) {
-	timer := time.NewTimer(time.Hour)
-	DrainTimer(timer)
-	defer timer.Stop()
-
-	for {
-		f.MaybeFetch(ctx)
-
-		f.mu.Lock()
-		next, ok := f.schedule.Peek()
-		var delay time.Duration
-		if !ok {
-			delay = time.Hour
-		} else {
-			delay = time.Until(next.At)
-		}
-		f.mu.Unlock()
-
-		if delay < 0 {
-			delay = 0
-		}
-		timer.Reset(delay)
-
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
 		select {
 		case <-ctx.Done():
-			return
-		case <-timer.C:
-		case <-f.wake:
-			DrainTimer(timer)
+			f.queue.ShutDown()
+		case <-done:
 		}
+	}()
+	for f.processOne(ctx) {
 	}
 }
 
-func (f *Fetcher[S, R]) MaybeFetch(ctx context.Context) {
-	now := time.Now()
-	due := f.popDue(now)
-	if len(due) == 0 {
-		return
-	}
-
-	for _, fetch := range due {
-		state, ok := f.lookup(fetch.RequestKey)
-		if !ok || state.Generation != fetch.Generation {
-			continue
-		}
-
-		f.logger.Debug("fetching remote resource", "request_key", fetch.RequestKey)
-		result, err := f.Fetch(ctx, state.Source)
-		if err != nil {
-			next := NextRetryDelay(fetch.RetryAttempt)
-			f.logger.Error("error fetching remote resource", "request_key", fetch.RequestKey, "error", err, "retryAttempt", fetch.RetryAttempt, "next", next.String())
-			f.scheduleAt(fetch.RequestKey, state.Generation, now.Add(next), fetch.RetryAttempt+1)
-			continue
-		}
-
-		if !f.commitFetchResult(fetch.RequestKey, fetch.Generation, result, now.Add(state.Source.RemoteTTL())) {
-			continue
-		}
-	}
-
-	f.sweepRetiredResults()
-}
-
-func (f *Fetcher[S, R]) AddOrUpdate(source S) {
-	requestKey := source.RemoteRequestKey()
-	nextFetchAt := time.Now()
-	if cached, ok := f.Results.Get(requestKey); ok {
-		if fetchedAt := cached.RemoteFetchedAt(); !fetchedAt.IsZero() {
-			expiresAt := fetchedAt.Add(source.RemoteTTL())
-			if expiresAt.After(nextFetchAt) {
-				nextFetchAt = expiresAt
-			}
-		}
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	state := f.requests[requestKey]
-	state.Generation++
-	state.Source = source
-	f.requests[requestKey] = state
-	f.scheduleAtLocked(requestKey, state.Generation, nextFetchAt, 0)
-}
-
-func (f *Fetcher[S, R]) Remove(requestKey remotehttp.FetchKey) {
-	f.mu.Lock()
-	_, hadRequest := f.requests[requestKey]
-	if hadRequest {
-		delete(f.requests, requestKey)
-		f.schedule.Remove(requestKey)
-	}
-	f.mu.Unlock()
-
-	hadResult := f.Results.Delete(requestKey)
-	if hadRequest {
-		SignalWake(f.wake)
-	}
-	if !hadRequest && !hadResult {
-		return
-	}
-}
-
-func (f *Fetcher[S, R]) Retire(requestKey remotehttp.FetchKey) {
-	f.mu.Lock()
-	_, hadRequest := f.requests[requestKey]
-	if hadRequest {
-		delete(f.requests, requestKey)
-		f.schedule.Remove(requestKey)
-	}
-	f.mu.Unlock()
-
-	if hadRequest {
-		SignalWake(f.wake)
-	}
-}
-
-func (f *Fetcher[S, R]) SweepOrphans() {
-	f.sweepRetiredResults()
-}
-
-func (f *Fetcher[S, R]) popDue(now time.Time) []FetchAt {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.schedule.PopDue(now)
-}
-
-func (f *Fetcher[S, R]) lookup(requestKey remotehttp.FetchKey) (InternalFetchState[S], bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	state, ok := f.requests[requestKey]
-	return state, ok
-}
-
-func (f *Fetcher[S, R]) commitFetchResult(requestKey remotehttp.FetchKey, generation uint64, result R, nextFetchAt time.Time) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	state, ok := f.requests[requestKey]
-	if !ok || state.Generation != generation {
+func (f *Fetcher[S, R]) processOne(ctx context.Context) bool {
+	key, quit := f.queue.Get()
+	if quit {
 		return false
 	}
+	defer f.queue.Done(key)
 
-	f.Results.Put(result)
-	f.scheduleAtLocked(requestKey, generation, nextFetchAt, 0)
+	source, ok := f.lookup(key)
+	if !ok {
+		// Request retired between schedule and execute. Forget clears any
+		// rate-limiter failure count for this key so a future re-AddOrUpdate
+		// starts from a clean retry curve.
+		f.queue.Forget(key)
+		return true
+	}
+
+	f.logger.Debug("fetching remote resource", "request_key", key)
+	result, err := f.Fetch(ctx, source)
+	if err != nil {
+		f.logger.Error("error fetching remote resource",
+			"request_key", key,
+			"error", err,
+			"retryAttempt", f.queue.NumRequeues(key),
+		)
+		f.queue.AddRateLimited(key)
+		return true
+	}
+
+	f.commit(key, result)
+	f.maybeSweepOrphans()
 	return true
 }
 
-func (f *Fetcher[S, R]) sweepRetiredResults() {
+// commit publishes the result and schedules the next refresh at the CURRENT
+// source's TTL, re-read under the lock so a concurrent shorter-TTL update
+// isn't lost.
+func (f *Fetcher[S, R]) commit(key remotehttp.FetchKey, result R) {
+	f.mu.Lock()
+	source, ok := f.requests[key]
+	if !ok {
+		f.mu.Unlock()
+		return // retired during fetch
+	}
+	f.Results.Put(result)
+	ttl := source.RemoteTTL()
+	f.mu.Unlock()
+
+	f.queue.Forget(key)
+	f.queue.AddAfter(key, ttl)
+}
+
+func (f *Fetcher[S, R]) lookup(key remotehttp.FetchKey) (S, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	source, ok := f.requests[key]
+	return source, ok
+}
+
+func (f *Fetcher[S, R]) AddOrUpdate(source S) {
+	key := source.RemoteRequestKey()
+
+	f.mu.Lock()
+	f.requests[key] = source
+	f.mu.Unlock()
+
+	// Avoid duplicate fetch on hydration: defer to the TTL boundary if a fresh
+	// result is already cached.
+	delay := time.Duration(0)
+	if cached, ok := f.Results.Get(key); ok {
+		if fetchedAt := cached.RemoteFetchedAt(); !fetchedAt.IsZero() {
+			if remaining := time.Until(fetchedAt.Add(source.RemoteTTL())); remaining > 0 {
+				delay = remaining
+			}
+		}
+	}
+	f.queue.AddAfter(key, delay) // duration <= 0 ⇒ immediate Add
+}
+
+func (f *Fetcher[S, R]) Remove(key remotehttp.FetchKey) {
+	f.mu.Lock()
+	delete(f.requests, key)
+	f.mu.Unlock()
+
+	f.queue.Forget(key)
+	f.Results.Delete(key)
+}
+
+// Retire stops fetching for key but preserves the last-known-good result
+// until a fresh fetch under a different key — or SweepOrphans — removes it.
+func (f *Fetcher[S, R]) Retire(key remotehttp.FetchKey) {
+	f.mu.Lock()
+	if _, existed := f.requests[key]; existed {
+		delete(f.requests, key)
+		f.retireDirty = true
+	}
+	f.mu.Unlock()
+
+	f.queue.Forget(key)
+}
+
+// SweepOrphans drops Results whose key is no longer live; used post-hydration
+// to clear ConfigMaps whose owner has gone away.
+func (f *Fetcher[S, R]) SweepOrphans() {
 	f.mu.Lock()
 	live := make(map[remotehttp.FetchKey]struct{}, len(f.requests))
 	for key := range f.requests {
 		live[key] = struct{}{}
 	}
+	f.retireDirty = false
 	f.mu.Unlock()
 
 	f.Results.DeleteObjects(func(record R) bool {
@@ -209,49 +202,27 @@ func (f *Fetcher[S, R]) sweepRetiredResults() {
 	})
 }
 
-func (f *Fetcher[S, R]) scheduleAt(requestKey remotehttp.FetchKey, generation uint64, at time.Time, retryAttempt int) {
+func (f *Fetcher[S, R]) maybeSweepOrphans() {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.scheduleAtLocked(requestKey, generation, at, retryAttempt)
-}
-
-func (f *Fetcher[S, R]) scheduleAtLocked(requestKey remotehttp.FetchKey, generation uint64, at time.Time, retryAttempt int) {
-	if _, ok := f.requests[requestKey]; !ok {
-		return
+	dirty := f.retireDirty
+	f.mu.Unlock()
+	if dirty {
+		f.SweepOrphans()
 	}
-	f.schedule.Schedule(requestKey, generation, at, retryAttempt)
-	SignalWake(f.wake)
 }
 
-// The ForTest methods below expose internal Fetcher state for white-box
-// testing across the jwks/, oidc/, and remotecache/ test packages. They are
-// NOT part of the public API; production code MUST NOT depend on them.
-//
-// They are exported (rather than relocated to a _test.go file) because the
-// tests that need them live in sibling packages and Go's package-private
-// testing model does not span packages. The "ForTest" suffix is the explicit
-// signal that the contract may change without notice.
+// ForTest methods expose internal state for white-box tests in sibling
+// packages; not part of the public API.
 
-func (f *Fetcher[S, R]) ScheduledLenForTest() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.schedule.Len()
+// ReadyQueueLenForTest returns the active workqueue length. Items in the
+// delayed heap (future AddAfter) are not counted — workqueue does not expose
+// that length.
+func (f *Fetcher[S, R]) ReadyQueueLenForTest() int {
+	return f.queue.Len()
 }
 
 func (f *Fetcher[S, R]) RequestCountForTest() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.requests)
-}
-
-func (f *Fetcher[S, R]) NextFetchForTest() (FetchAt, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.schedule.Peek()
-}
-
-func (f *Fetcher[S, R]) GenerationForTest(key remotehttp.FetchKey) uint64 {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.requests[key].Generation
 }

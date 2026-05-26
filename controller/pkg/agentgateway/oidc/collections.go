@@ -8,11 +8,8 @@ import (
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
-
-var collectionsLogger = logging.New("oidc_collections")
 
 type CollectionInputs struct {
 	AgentgatewayPolicies krt.Collection[*agentgateway.AgentgatewayPolicy]
@@ -32,17 +29,18 @@ func NewCollections(inputs CollectionInputs) Collections {
 		}
 		resolved, err := inputs.Resolver.ResolveOwner(kctx, owner)
 		if err != nil {
-			collectionsLogger.Warn("skipping OIDC source: cannot resolve discovery endpoint", "owner", owner.ID.String(), "issuerURL", owner.Config.IssuerURL, "error", err)
+			logger.Warn("skipping OIDC source: cannot resolve discovery endpoint", "owner", owner.ID.String(), "issuerURL", owner.Config.IssuerURL, "error", err)
 			return nil
 		}
 		return &OidcSource{
-			OwnerKey:       resolved.OwnerID,
-			RequestKey:     oidcRequestKey(resolved.Target.Target, resolved.ExpectedIssuer),
-			ExpectedIssuer: resolved.ExpectedIssuer,
-			Target:         resolved.Target.Target,
-			TLSConfig:      resolved.Target.TLSConfig,
-			ProxyTLSConfig: resolved.Target.ProxyTLSConfig,
-			TTL:            resolved.TTL,
+			OwnerKey:              resolved.OwnerID,
+			RequestKey:            oidcRequestKey(resolved.Target.Target, resolved.ExpectedIssuer, resolved.ProviderBackendTarget),
+			ExpectedIssuer:        resolved.ExpectedIssuer,
+			Target:                resolved.Target.Target,
+			ProviderBackendTarget: resolved.ProviderBackendTarget,
+			TLSConfig:             resolved.Target.TLSConfig,
+			ProxyTLSConfig:        resolved.Target.ProxyTLSConfig,
+			TTL:                   resolved.TTL,
 		}
 	}, inputs.KrtOpts.ToOptions("oidc/sources")...)
 
@@ -69,11 +67,12 @@ func collapseOidcSources(grouped krt.IndexObject[remotehttp.FetchKey, OidcSource
 		func(s OidcSource) string { return s.OwnerKey.String() },
 		func(s OidcSource) time.Duration { return s.TTL })
 	return &SharedOidcRequest{
-		RequestKey:     grouped.Key,
-		ExpectedIssuer: primary.ExpectedIssuer,
-		Target:         primary.Target,
-		TLSConfig:      primary.TLSConfig,
-		ProxyTLSConfig: primary.ProxyTLSConfig,
-		TTL:            minTTL,
+		RequestKey:            grouped.Key,
+		ExpectedIssuer:        primary.ExpectedIssuer,
+		Target:                primary.Target,
+		ProviderBackendTarget: primary.ProviderBackendTarget,
+		TLSConfig:             primary.TLSConfig,
+		ProxyTLSConfig:        primary.ProxyTLSConfig,
+		TTL:                   minTTL,
 	}
 }

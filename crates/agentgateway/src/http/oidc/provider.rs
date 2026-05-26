@@ -9,6 +9,7 @@ use super::{ClientCredentials, Error, Provider};
 use crate::http::Body;
 use crate::http::filters::BackendRequestTimeout;
 use crate::proxy::httpproxy::PolicyClient;
+use crate::types::agent::SimpleBackendReference;
 
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct TokenResponse {
@@ -26,6 +27,7 @@ pub(crate) async fn exchange_code(
 	redirect_uri: &str,
 	code: &str,
 	pkce_verifier: &SecretString,
+	provider_backend: Option<&SimpleBackendReference>,
 ) -> Result<TokenResponse, Error> {
 	exchange_code_with_timeout(
 		client,
@@ -34,11 +36,13 @@ pub(crate) async fn exchange_code(
 		redirect_uri,
 		code,
 		pkce_verifier,
+		provider_backend,
 		DEFAULT_TOKEN_EXCHANGE_TIMEOUT,
 	)
 	.await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn exchange_code_with_timeout(
 	client: PolicyClient,
 	provider: &Provider,
@@ -46,6 +50,7 @@ pub(crate) async fn exchange_code_with_timeout(
 	redirect_uri: &str,
 	code: &str,
 	pkce_verifier: &SecretString,
+	provider_backend: Option<&SimpleBackendReference>,
 	timeout: Duration,
 ) -> Result<TokenResponse, Error> {
 	let mut form = vec![
@@ -87,9 +92,11 @@ pub(crate) async fn exchange_code_with_timeout(
 		.body(Body::from(body))
 		.map_err(|e| Error::Config(format!("failed to build token exchange request: {e}")))?;
 	req.extensions_mut().insert(BackendRequestTimeout(timeout));
-	let resp = client
-		.simple_call(req)
-		.await
+	let call = match provider_backend {
+		Some(backend_ref) => client.call_reference(req, backend_ref).await,
+		None => client.simple_call(req).await,
+	};
+	let resp = call
 		.map_err(anyhow::Error::from)
 		.map_err(Error::TokenExchangeFailed)?;
 	let status = resp.status();

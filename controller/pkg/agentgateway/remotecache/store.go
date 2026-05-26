@@ -16,7 +16,7 @@ var FetchKeyIndexCollectionOption = krt.WithIndexCollectionFromString(func(s str
 	return remotehttp.FetchKey(s)
 })
 
-type StoreOptions[S Request, R Result] struct {
+type StoreOptions[S Request, R Result[R]] struct {
 	Fetcher  *Fetcher[S, R]
 	Requests krt.Collection[S]
 	Logger   *slog.Logger
@@ -28,13 +28,13 @@ type StoreOptions[S Request, R Result] struct {
 }
 
 // Store bridges KRT-derived shared fetch requests to a runtime Fetcher.
-type Store[S Request, R Result] struct {
+type Store[S Request, R Result[R]] struct {
 	Fetcher *Fetcher[S, R]
 	opts    StoreOptions[S, R]
 	ready   chan struct{}
 }
 
-func NewStore[S Request, R Result](opts StoreOptions[S, R]) *Store[S, R] {
+func NewStore[S Request, R Result[R]](opts StoreOptions[S, R]) *Store[S, R] {
 	return &Store[S, R]{
 		Fetcher: opts.Fetcher,
 		opts:    opts,

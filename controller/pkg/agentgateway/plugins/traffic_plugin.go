@@ -1937,6 +1937,11 @@ func referencedBackendsFromPolicy(policy *agentgateway.AgentgatewayPolicy) []uti
 				}
 			}
 		}
+		if s.Traffic.OIDC != nil {
+			if s.Traffic.OIDC.BackendRef != nil {
+				app(*s.Traffic.OIDC.BackendRef)
+			}
+		}
 	}
 	if s.Frontend != nil {
 		if s.Frontend.Tracing != nil {

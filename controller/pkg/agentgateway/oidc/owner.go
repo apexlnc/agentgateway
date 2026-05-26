@@ -9,14 +9,12 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 )
 
-// OidcRefreshInterval is how often the controller re-fetches OIDC discovery
-// documents and JWKS. Fixed (not user-tunable); IdP JWKS rotation overlap
-// windows are days, so an hour is conservative across the board.
+// OidcRefreshInterval is fixed (not user-tunable); conservative vs day-scale
+// IdP key rotation overlap windows.
 const OidcRefreshInterval = time.Hour
 
-// RemoteOidcOwner identifies the Kubernetes owner (AgentgatewayPolicy) that
-// triggered the OIDC discovery fetch and carries the configuration needed to
-// resolve and perform the fetch.
+// RemoteOidcOwner is the AgentgatewayPolicy that triggered the OIDC discovery
+// fetch, plus the config needed to perform it.
 type RemoteOidcOwner struct {
 	ID               remotecache.OwnerID
 	DefaultNamespace string
@@ -35,9 +33,8 @@ func (o RemoteOidcOwner) Equals(other RemoteOidcOwner) bool {
 		equality.Semantic.DeepEqual(o.Config, other.Config)
 }
 
-// OwnerFromPolicy extracts the RemoteOidcOwner from an AgentgatewayPolicy that
-// has a .spec.traffic.oidc field set. The CRD permits at most one OIDC config
-// per policy, so the result is at most one owner.
+// OwnerFromPolicy returns the RemoteOidcOwner from a policy with
+// .spec.traffic.oidc set; the CRD permits at most one OIDC per policy.
 func OwnerFromPolicy(policy *agentgateway.AgentgatewayPolicy) (RemoteOidcOwner, bool) {
 	if len(policy.Spec.TargetRefs) == 0 && len(policy.Spec.TargetSelectors) == 0 {
 		return RemoteOidcOwner{}, false

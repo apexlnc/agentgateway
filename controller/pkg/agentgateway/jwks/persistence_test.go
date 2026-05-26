@@ -117,6 +117,51 @@ func TestLoadAllPrefersCanonicalAcrossDuplicates(t *testing.T) {
 	}
 }
 
+func TestLoadAllPrefersFreshestAcrossDuplicates(t *testing.T) {
+	requestKey := remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}.Key()
+	canonicalName := remotecache.ConfigMapName(DefaultJwksStorePrefix, requestKey)
+
+	canonical := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      canonicalName,
+			Namespace: "agentgateway-system",
+			Labels:    remotecache.ConfigMapLabels(DefaultJwksStorePrefix),
+		},
+	}
+	assert.NoError(t, SetJwksInConfigMap(canonical, Keyset{
+		RequestKey: requestKey,
+		URL:        "https://issuer.example/jwks",
+		FetchedAt:  time.Unix(100, 0).UTC(),
+		JwksJSON:   `{"keys":[{"kid":"stale-canonical"}]}`,
+	}))
+
+	legacy := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "jwks-store-legacy-name",
+			Namespace: "agentgateway-system",
+			Labels:    remotecache.ConfigMapLabels(DefaultJwksStorePrefix),
+		},
+	}
+	assert.NoError(t, SetJwksInConfigMap(legacy, Keyset{
+		RequestKey: requestKey,
+		URL:        "https://issuer.example/jwks",
+		FetchedAt:  time.Unix(200, 0).UTC(),
+		JwksJSON:   `{"keys":[{"kid":"fresh-legacy"}]}`,
+	}))
+
+	persisted := NewPersistedEntriesFromCollection(
+		krt.NewStaticCollection[*corev1.ConfigMap](alwaysSynced{}, []*corev1.ConfigMap{canonical, legacy}, krt.WithName("jwks/PersistedKeysetsFreshestConfigMaps")),
+		DefaultJwksStorePrefix,
+		"agentgateway-system",
+	)
+	keysets, err := persisted.LoadAll(context.Background())
+
+	assert.NoError(t, err)
+	if assert.Len(t, keysets, 1) {
+		assert.Equal(t, `{"keys":[{"kid":"fresh-legacy"}]}`, keysets[0].JwksJSON)
+	}
+}
+
 func TestJwksFromConfigMapReturnsErrorForMalformedPayload(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{

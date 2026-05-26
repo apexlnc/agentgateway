@@ -9,7 +9,6 @@ import (
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
-	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
 
@@ -31,7 +30,6 @@ type PersistedEntries = remotecache.Entries[DiscoveredProvider]
 // OidcCodec returns the persisted ConfigMap codec for OIDC discovered providers.
 func OidcCodec() remotecache.Codec[DiscoveredProvider] {
 	return remotecache.Codec[DiscoveredProvider]{
-		DataKey:           oidcConfigMapKey,
 		ObservabilityName: observabilityName,
 		Parse:             ProviderFromConfigMap,
 		Serialize:         SetProviderInConfigMap,
@@ -96,8 +94,8 @@ type ConfigMapControllerOptions struct {
 }
 
 func NewConfigMapController(opts ConfigMapControllerOptions) *ConfigMapController {
-	logger := logging.New("oidc_store_configmap_controller")
-	logger.Info("creating oidc store configmap controller")
+	cmLogger := logger.With("subcomponent", "configmap_controller")
+	cmLogger.Info("creating oidc store configmap controller")
 
 	controllerOpts := remotecache.ConfigMapControllerOptions[DiscoveredProvider]{
 		APIClient:           opts.APIClient,
@@ -106,7 +104,7 @@ func NewConfigMapController(opts ConfigMapControllerOptions) *ConfigMapControlle
 		Results:             opts.Store.FetchedResults().Collection(),
 		Entries:             opts.PersistedEntries,
 		StoreHasSynced:      opts.Store.HasSynced,
-		Logger:              logger,
+		Logger:              cmLogger,
 	}
 
 	return &ConfigMapController{

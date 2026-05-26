@@ -240,7 +240,7 @@ func (s *setup) Start(ctx context.Context) error {
 	jwksLookup := jwks.NewLookup(persistedJWKS, jwks.NewResolver(resolver))
 
 	persistedOIDC := oidc.NewPersistedEntries(s.APIClient, krtOpts, oidc.DefaultStorePrefix, namespaces.GetPodNamespace())
-	oidcLookup := oidc.NewLookup(persistedOIDC)
+	oidcLookup := oidc.NewLookup(persistedOIDC, oidc.NewResolver(resolver))
 
 	for _, mgrCfgFunc := range s.ExtraManagerConfig {
 		err := mgrCfgFunc(mgr)
@@ -265,14 +265,14 @@ func (s *setup) Start(ctx context.Context) error {
 
 	// build jwks store if it doesn't exist
 	if !runnablesRegistry.Contains(jwks.DefaultJwksStorePrefix) {
-		if err := buildJwksStore(ctx, mgr, s.APIClient, agwCollections, persistedJWKS, resolver); err != nil {
+		if err := buildJwksStore(mgr, s.APIClient, agwCollections, persistedJWKS, resolver); err != nil {
 			return fmt.Errorf("error creating jwks store %w", err)
 		}
 	}
 
 	// build oidc store
 	if !runnablesRegistry.Contains(oidc.DefaultStorePrefix) {
-		if err := buildOidcStore(ctx, mgr, s.APIClient, agwCollections, persistedOIDC, resolver); err != nil {
+		if err := buildOidcStore(mgr, s.APIClient, agwCollections, persistedOIDC, resolver); err != nil {
 			return fmt.Errorf("error creating oidc store %w", err)
 		}
 	}
@@ -434,7 +434,6 @@ func initDiscoveryNSFilter(
 }
 
 func buildJwksStore(
-	ctx context.Context,
 	mgr manager.Manager,
 	apiClient apiclient.Client,
 	agwCollections *agwplugins.AgwCollections,
@@ -459,7 +458,7 @@ func buildJwksStore(
 		Store:               jwksStore,
 		PersistedEntries:    persistedJWKS,
 	})
-	jwksStoreCMCtrl.Init(ctx)
+	jwksStoreCMCtrl.Init()
 	if err := mgr.Add(jwksStoreCMCtrl); err != nil {
 		return err
 	}
@@ -468,7 +467,6 @@ func buildJwksStore(
 }
 
 func buildOidcStore(
-	ctx context.Context,
 	mgr manager.Manager,
 	apiClient apiclient.Client,
 	agwCollections *agwplugins.AgwCollections,
@@ -492,7 +490,7 @@ func buildOidcStore(
 		Store:               oidcStore,
 		PersistedEntries:    persistedOIDC,
 	})
-	oidcStoreCMCtrl.Init(ctx)
+	oidcStoreCMCtrl.Init()
 	if err := mgr.Add(oidcStoreCMCtrl); err != nil {
 		return err
 	}

@@ -53,8 +53,6 @@ func TestNormalizedOIDCScopesAlwaysIncludesOpenidFirst(t *testing.T) {
 }
 
 func TestConfiguredOIDCTokenEndpointAuth(t *testing.T) {
-	stringPtr := func(s string) *string { return &s }
-
 	tests := []struct {
 		name            string
 		method          string
@@ -109,7 +107,7 @@ func TestConfiguredOIDCTokenEndpointAuth(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := configuredOIDCTokenEndpointAuth(
-				&agentgateway.OIDC{TokenEndpointAuthMethod: stringPtr(tc.method)},
+				&agentgateway.OIDC{TokenEndpointAuthMethod: new(tc.method)},
 				tc.hasClientSecret,
 			)
 

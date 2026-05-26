@@ -10,10 +10,7 @@ import (
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 )
-
-var fetcherLogger = logging.New("jwks_fetcher")
 
 // Fetcher fetches and periodically refreshes remote JWKS keysets.
 // Fetched keysets are published as KRT-visible Results.
@@ -23,7 +20,7 @@ type Fetcher = remotecache.Fetcher[SharedJwksRequest, Keyset]
 // returned so tests can swap its DefaultClient.
 func NewFetcher(results *JwksResults) (*Fetcher, *JwksDriver) {
 	driver := &JwksDriver{DefaultClient: remotehttp.NewDefaultFetchClient()}
-	return remotecache.NewFetcher[SharedJwksRequest, Keyset](results, driver.Fetch, fetcherLogger), driver
+	return remotecache.NewFetcher[SharedJwksRequest, Keyset](results, driver.Fetch, logger), driver
 }
 
 type JwksDriver struct {
@@ -36,7 +33,7 @@ func (d *JwksDriver) Fetch(ctx context.Context, source SharedJwksRequest) (Keyse
 		return Keyset{}, err
 	}
 
-	fetcherLogger.InfoContext(ctx, "fetching jwks", "url", source.Target.URL)
+	logger.InfoContext(ctx, "fetching jwks", "url", source.Target.URL)
 	_, jwks, err := remotehttp.FetchJWKSBody(ctx, client, source.Target.URL, "JWKS")
 	if err != nil {
 		return Keyset{}, err

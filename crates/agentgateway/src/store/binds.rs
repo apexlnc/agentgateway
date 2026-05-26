@@ -2664,6 +2664,7 @@ mod tests {
 						redirect_uri: "https://example.com/callback".to_string(),
 						jwks_inline: jwks_inline.to_string(),
 						scopes: vec![],
+						provider_backend: None,
 					},
 				)),
 				phase: agent::traffic_policy_spec::PolicyPhase::Route.into(),
@@ -2693,9 +2694,8 @@ mod tests {
 			"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		)
 		.expect("aes session encoder");
-		let oidc_encoder =
-			crate::http::oidc::OidcCookieEncoder::from_session_encoder(&session_encoder)
-				.expect("oidc cookie encoder");
+		let oidc_encoder = crate::http::oidc::OidcCookieEncoder::from_session_encoder(&session_encoder)
+			.expect("oidc cookie encoder");
 
 		let mut store = Store::new(
 			false,

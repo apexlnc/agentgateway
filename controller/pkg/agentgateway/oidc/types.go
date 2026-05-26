@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
-	"reflect"
 	"time"
 
 	"istio.io/istio/pkg/kube/krt"
@@ -42,13 +41,10 @@ func (p DiscoveredProvider) RemoteFetchedAt() time.Time {
 	return p.FetchedAt
 }
 
-// ResourceName implements krt.ResourceNamer so DiscoveredProvider can be used
-// directly as a KRT collection payload without a wrapper. The request key
-// uniquely identifies the upstream OIDC discovery document shared across owners.
 func (p DiscoveredProvider) ResourceName() string { return string(p.RequestKey) }
 
-// Equals implements krt.Equaler[DiscoveredProvider]. JwksInline is compared last
-// so the multi-KB string compare short-circuits on cheaper-field diffs.
+// Equals compares JwksInline last so the multi-KB string compare short-circuits
+// on cheaper-field diffs.
 func (p DiscoveredProvider) Equals(other DiscoveredProvider) bool {
 	return p.RequestKey == other.RequestKey &&
 		p.IssuerURL == other.IssuerURL &&
@@ -72,6 +68,9 @@ type OidcSource struct {
 	RequestKey     remotehttp.FetchKey
 	ExpectedIssuer string
 	Target         remotehttp.FetchTarget
+	// ProviderBackendTarget is set when provider calls should go through a
+	// resolved backend transport instead of connecting directly to provider URLs.
+	ProviderBackendTarget *remotehttp.FetchTarget
 	// +noKrtEquals
 	TLSConfig *tls.Config
 	// +noKrtEquals
@@ -95,17 +94,20 @@ func (s OidcSource) Equals(other OidcSource) bool {
 	return s.OwnerKey == other.OwnerKey &&
 		s.RequestKey == other.RequestKey &&
 		s.ExpectedIssuer == other.ExpectedIssuer &&
-		reflect.DeepEqual(s.Target, other.Target) &&
+		s.Target.Equals(other.Target) &&
+		fetchTargetPtrEqual(s.ProviderBackendTarget, other.ProviderBackendTarget) &&
 		s.TTL == other.TTL
 }
 
-// SharedOidcRequest is the canonical OIDC discovery request produced by KRT
-// for a shared fetch key. It is the unit the runtime Fetcher and persistence
-// layer watch.
+// SharedOidcRequest is the canonical OIDC discovery request KRT produces per
+// shared fetch key; the unit the Fetcher and persistence layer watch.
 type SharedOidcRequest struct {
 	RequestKey     remotehttp.FetchKey
 	ExpectedIssuer string
 	Target         remotehttp.FetchTarget
+	// ProviderBackendTarget is set when provider calls should go through a
+	// resolved backend transport instead of connecting directly to provider URLs.
+	ProviderBackendTarget *remotehttp.FetchTarget
 	// +noKrtEquals
 	TLSConfig *tls.Config
 	// +noKrtEquals
@@ -128,16 +130,27 @@ func (r SharedOidcRequest) RemoteTTL() time.Duration {
 func (r SharedOidcRequest) Equals(other SharedOidcRequest) bool {
 	return r.RequestKey == other.RequestKey &&
 		r.ExpectedIssuer == other.ExpectedIssuer &&
-		reflect.DeepEqual(r.Target, other.Target) &&
+		r.Target.Equals(other.Target) &&
+		fetchTargetPtrEqual(r.ProviderBackendTarget, other.ProviderBackendTarget) &&
 		r.TTL == other.TTL
 }
 
-// oidcRequestKey hashes both the fetch target and expected issuer. The issuer
-// is the OIDC trust identity validated against the discovery document, while
-// the target is only where that document is fetched from; including both avoids
-// sharing discovery results across policies that fetch the same URL but require
-// different issuer identities.
-func oidcRequestKey(target remotehttp.FetchTarget, expectedIssuer string) remotehttp.FetchKey {
+// fetchTargetPtrEqual compares two optional FetchTarget pointers without
+// reflect, using FetchTarget.Equals for non-nil pairs.
+func fetchTargetPtrEqual(a, b *remotehttp.FetchTarget) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return a.Equals(*b)
+	}
+}
+
+// oidcRequestKey domain-separates by (target, expectedIssuer,
+// providerBackendTarget) — all three are part of trust identity.
+func oidcRequestKey(target remotehttp.FetchTarget, expectedIssuer string, providerBackendTarget *remotehttp.FetchTarget) remotehttp.FetchKey {
 	hash := sha256.New()
 	writeHashPart := func(value string) {
 		_, _ = hash.Write([]byte(value))
@@ -147,6 +160,12 @@ func oidcRequestKey(target remotehttp.FetchTarget, expectedIssuer string) remote
 	writeHashPart(oidcRequestKeyDomain)
 	writeHashPart(target.Key().String())
 	writeHashPart(expectedIssuer)
+	if providerBackendTarget == nil {
+		writeHashPart("direct")
+	} else {
+		writeHashPart("provider-backend")
+		writeHashPart(providerBackendTarget.Key().String())
+	}
 
 	return remotehttp.FetchKey(hex.EncodeToString(hash.Sum(nil)))
 }

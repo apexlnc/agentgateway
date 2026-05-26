@@ -73,7 +73,7 @@ func TestOwnerFromPolicyReturnsNoneWhenOidcAbsent(t *testing.T) {
 
 func TestCollapseOidcSourcesPicksMinTTL(t *testing.T) {
 	target := remotehttp.FetchTarget{URL: "https://idp.example/.well-known/openid-configuration"}
-	requestKey := oidcRequestKey(target, "https://idp.example")
+	requestKey := oidcRequestKey(target, "https://idp.example", nil)
 	grouped := krt.IndexObject[remotehttp.FetchKey, OidcSource]{
 		Key: requestKey,
 		Objects: []OidcSource{
@@ -103,7 +103,7 @@ func TestCollapseOidcSourcesPicksMinTTL(t *testing.T) {
 
 func TestCollapseOidcSourcesIsDeterministicAcrossOwnerOrder(t *testing.T) {
 	target := remotehttp.FetchTarget{URL: "https://idp.example/.well-known/openid-configuration"}
-	requestKey := oidcRequestKey(target, "https://idp.example")
+	requestKey := oidcRequestKey(target, "https://idp.example", nil)
 	source := func(name string, ttl time.Duration) OidcSource {
 		return OidcSource{
 			OwnerKey:       remotecache.OwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "default", Name: name, Path: "spec.traffic.oidc"},

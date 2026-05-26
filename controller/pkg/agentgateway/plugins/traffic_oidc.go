@@ -69,6 +69,14 @@ func processOIDCPolicy(
 		return nil, err
 	}
 
+	var providerBackend *api.BackendReference
+	if oidcCfg.BackendRef != nil {
+		providerBackend, err = buildBackendRef(ctx, *oidcCfg.BackendRef, policyNSN.Namespace)
+		if err != nil {
+			return nil, fmt.Errorf("oidc backendRef: %w", err)
+		}
+	}
+
 	key := policyKey + ":oidc"
 	return &api.Policy{
 		Key: key,
@@ -87,6 +95,7 @@ func processOIDCPolicy(
 						RedirectUri:           oidcCfg.RedirectURI,
 						Scopes:                normalizedOIDCScopes(oidcCfg.Scopes),
 						TokenEndpointAuth:     tokenAuth,
+						ProviderBackend:       providerBackend,
 					},
 				},
 			},

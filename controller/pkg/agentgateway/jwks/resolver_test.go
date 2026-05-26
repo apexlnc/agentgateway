@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"istio.io/istio/pkg/ptr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -14,6 +13,7 @@ import (
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/shared"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/testutils"
 	"github.com/agentgateway/agentgateway/controller/pkg/wellknown"
@@ -23,11 +23,11 @@ func TestResolveEndpoint(t *testing.T) {
 	serviceRemote := remoteProvider(
 		"/org-one/keys",
 		gwv1.BackendObjectReference{
-			Group:     ptr.Of(gwv1.Group("")),
-			Kind:      ptr.Of(gwv1.Kind("Service")),
+			Group:     new(gwv1.Group("")),
+			Kind:      new(gwv1.Kind("Service")),
 			Name:      gwv1.ObjectName("dummy-idp"),
-			Namespace: ptr.Of(gwv1.Namespace("default")),
-			Port:      ptr.Of(gwv1.PortNumber(8443)),
+			Namespace: new(gwv1.Namespace("default")),
+			Port:      new(gwv1.PortNumber(8443)),
 		},
 	)
 	backendRemote := remoteProvider(
@@ -36,7 +36,7 @@ func TestResolveEndpoint(t *testing.T) {
 			Group: new(gwv1.Group(wellknown.AgentgatewayBackendGVK.Group)),
 			Kind:  new(gwv1.Kind(wellknown.AgentgatewayBackendGVK.Kind)),
 			Name:  gwv1.ObjectName("dummy-idp"),
-			Port:  ptr.Of(gwv1.PortNumber(8443)),
+			Port:  new(gwv1.PortNumber(8443)),
 		},
 	)
 
@@ -62,7 +62,7 @@ func TestResolveEndpoint(t *testing.T) {
 				testCAConfigMap(),
 				attachedBackendPolicy(gwv1.Group(""), gwv1.Kind("Service"), "dummy-idp", &agentgateway.BackendTLS{
 					CACertificateRefs: []corev1.LocalObjectReference{{Name: "ca"}},
-					Sni:               ptr.Of(agentgateway.SNI("test.testns")),
+					Sni:               new(agentgateway.SNI("test.testns")),
 					AlpnProtocols:     new([]agentgateway.TinyString{"test1", "test2"}),
 				}),
 			},
@@ -86,7 +86,7 @@ func TestResolveEndpoint(t *testing.T) {
 					"dummy-idp",
 					&agentgateway.BackendTLS{
 						CACertificateRefs: []corev1.LocalObjectReference{{Name: "ca"}},
-						Sni:               ptr.Of(agentgateway.SNI("test.testns")),
+						Sni:               new(agentgateway.SNI("test.testns")),
 						AlpnProtocols:     new([]agentgateway.TinyString{"test1", "test2"}),
 					},
 				),
@@ -128,27 +128,40 @@ func TestResolveEndpoint(t *testing.T) {
 				resolver = testutils.BuildRemoteHTTPResolver(ctx.Collections)
 			}
 
-			endpoint, err := jwks.ResolveEndpoint(ctx.Krt, resolver, "gw-policy", "default", tt.remoteProvider)
+			owner := jwks.RemoteJwksOwner{
+				ID: remotecache.OwnerID{
+					Kind:      remotecache.OwnerKindPolicy,
+					Namespace: "default",
+					Name:      "gw-policy",
+					Path:      "spec.traffic.jwtAuthentication.providers[0].jwks.remote",
+				},
+				DefaultNamespace: "default",
+				Remote:           tt.remoteProvider,
+				TTL:              jwks.TTLForRemote(tt.remoteProvider),
+			}
+
+			r := jwks.NewResolver(resolver)
+			resolved, err := r.ResolveOwner(ctx.Krt, owner)
 			if tt.expectedError != "" {
 				require.EqualError(t, err, tt.expectedError)
-				require.Nil(t, endpoint)
+				require.Nil(t, resolved)
 				return
 			}
 
 			require.NoError(t, err)
-			require.NotNil(t, endpoint)
-			require.Equal(t, tt.expectedURL, endpoint.Target.URL)
-			require.Equal(t, endpoint.Key, endpoint.Target.Key())
+			require.NotNil(t, resolved)
+			require.Equal(t, tt.expectedURL, resolved.Target.Target.URL)
+			require.Equal(t, resolved.Target.Key, resolved.Target.Target.Key())
 			if tt.expectedTLS == nil {
-				require.Nil(t, endpoint.TLSConfig)
+				require.Nil(t, resolved.Target.TLSConfig)
 				return
 			}
 
-			require.NotNil(t, endpoint.TLSConfig)
-			require.Equal(t, tt.expectedTLS.ServerName, endpoint.TLSConfig.ServerName)
-			require.Equal(t, tt.expectedTLS.NextProtos, endpoint.TLSConfig.NextProtos)
-			require.Equal(t, tt.expectedTLS.InsecureSkipVerify, endpoint.TLSConfig.InsecureSkipVerify)
-			require.True(t, tt.expectedTLS.RootCAs.Equal(endpoint.TLSConfig.RootCAs))
+			require.NotNil(t, resolved.Target.TLSConfig)
+			require.Equal(t, tt.expectedTLS.ServerName, resolved.Target.TLSConfig.ServerName)
+			require.Equal(t, tt.expectedTLS.NextProtos, resolved.Target.TLSConfig.NextProtos)
+			require.Equal(t, tt.expectedTLS.InsecureSkipVerify, resolved.Target.TLSConfig.InsecureSkipVerify)
+			require.True(t, tt.expectedTLS.RootCAs.Equal(resolved.Target.TLSConfig.RootCAs))
 		})
 	}
 }

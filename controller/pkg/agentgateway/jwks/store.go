@@ -11,7 +11,7 @@ import (
 
 const DefaultJwksStorePrefix = "jwks-store"
 
-var storeLogger = logging.New("jwks_store")
+var logger = logging.New("agentgateway/jwks")
 
 // JwksResults stores fetched JWKS keysets as a KRT-visible collection.
 type JwksResults = remotecache.FetchedResults[Keyset]
@@ -37,7 +37,7 @@ func NewStore(requests krt.Collection[SharedJwksRequest], persistedEntries *Pers
 	innerStore := remotecache.NewStore(remotecache.StoreOptions[SharedJwksRequest, Keyset]{
 		Fetcher:  fetcher,
 		Requests: requests,
-		Logger:   storeLogger,
+		Logger:   logger,
 		Hydrate:  persistedEntries.LoadAll,
 	})
 

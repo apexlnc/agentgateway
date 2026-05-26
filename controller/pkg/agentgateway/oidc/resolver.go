@@ -17,18 +17,18 @@ const discoveryPath = "/.well-known/openid-configuration"
 
 var errResolverNotInitialized = errors.New("remote http resolver hasn't been initialized")
 
-// ResolvedOidcRequest packages the resolved fetch target and trust identity
-// for one OIDC owner. It is the input to the shared-request collapse step.
+// ResolvedOidcRequest is the input to the shared-request collapse step.
+// Target may differ from ExpectedIssuer when BackendRef is used.
 type ResolvedOidcRequest struct {
-	OwnerID        remotecache.OwnerID
-	Target         remotehttp.ResolvedTarget
-	ExpectedIssuer string
-	TTL            time.Duration
+	OwnerID               remotecache.OwnerID
+	Target                remotehttp.ResolvedTarget
+	ExpectedIssuer        string
+	ProviderBackendTarget *remotehttp.FetchTarget
+	TTL                   time.Duration
 }
 
-// Resolver translates a per-owner RemoteOidcOwner into a fully resolved
-// fetch target — including the discovery URL and any per-backend TLS
-// material derived from an attached AgentgatewayPolicy.
+// Resolver translates a RemoteOidcOwner into a resolved fetch request:
+// discovery URL plus any per-backend TLS from an attached policy.
 type Resolver interface {
 	ResolveOwner(krtctx krt.HandlerContext, owner RemoteOidcOwner) (*ResolvedOidcRequest, error)
 }
@@ -37,9 +37,8 @@ type defaultResolver struct {
 	endpointResolver remotehttp.Resolver
 }
 
-// NewResolver wires the OIDC resolver to the shared remotehttp.Resolver so
-// BackendRef-based OIDC fetches reuse the same backend → TLS plumbing as
-// JWKS, attached MCP authentication, and other backend-driven fetchers.
+// NewResolver wires OIDC to the shared remotehttp.Resolver so BackendRef OIDC
+// fetches reuse the same backend-to-TLS plumbing as JWKS and MCP auth.
 func NewResolver(endpointResolver remotehttp.Resolver) Resolver {
 	return &defaultResolver{endpointResolver: endpointResolver}
 }
@@ -55,12 +54,17 @@ func (r *defaultResolver) ResolveOwner(krtctx krt.HandlerContext, owner RemoteOi
 		return nil, err
 	}
 
-	return &ResolvedOidcRequest{
+	resolved := &ResolvedOidcRequest{
 		OwnerID:        owner.ID,
 		Target:         *endpoint,
 		ExpectedIssuer: owner.Config.IssuerURL,
 		TTL:            owner.TTL,
-	}, nil
+	}
+	if owner.Config.BackendRef != nil {
+		target := endpoint.Target
+		resolved.ProviderBackendTarget = &target
+	}
+	return resolved, nil
 }
 
 // discoveryURL constructs the OIDC well-known configuration endpoint URL from the given issuer URL.

@@ -28,7 +28,7 @@ var rateLimiter = workqueue.NewTypedMaxOfRateLimiter(
 )
 
 // ConfigMapController syncs the fetched-results KRT collection into ConfigMaps.
-type ConfigMapController[T Result] struct {
+type ConfigMapController[T Result[T]] struct {
 	apiClient           apiclient.Client
 	cmClient            kclient.Client[*corev1.ConfigMap]
 	eventQueue          controllers.Queue
@@ -41,7 +41,7 @@ type ConfigMapController[T Result] struct {
 	logger              *slog.Logger
 }
 
-type ConfigMapControllerOptions[T Result] struct {
+type ConfigMapControllerOptions[T Result[T]] struct {
 	APIClient           apiclient.Client
 	DeploymentNamespace string
 	ControllerName      string
@@ -51,7 +51,7 @@ type ConfigMapControllerOptions[T Result] struct {
 	Logger              *slog.Logger
 }
 
-func NewConfigMapController[T Result](opts ConfigMapControllerOptions[T]) *ConfigMapController[T] {
+func NewConfigMapController[T Result[T]](opts ConfigMapControllerOptions[T]) *ConfigMapController[T] {
 	if opts.Entries == nil {
 		panic("remotecache.ConfigMapController: Entries is required")
 	}
@@ -66,7 +66,11 @@ func NewConfigMapController[T Result](opts ConfigMapControllerOptions[T]) *Confi
 	}
 }
 
-func (c *ConfigMapController[T]) Init(ctx context.Context) {
+// Init builds the informer + workqueue. Must be called at setup time, BEFORE
+// the parent kube.Client's informers start — kclient.NewFiltered registers a
+// new informer that joins the shared factory, and late-added informers never
+// sync.
+func (c *ConfigMapController[T]) Init() {
 	c.cmClient = kclient.NewFiltered[*corev1.ConfigMap](c.apiClient,
 		kclient.Filter{
 			ObjectFilter:  c.apiClient.ObjectFilter(),
@@ -165,6 +169,12 @@ func (c *ConfigMapController[T]) NeedLeaderElection() bool {
 	return true
 }
 
+// RunnableName satisfies common.NamedRunnable so setup's dedup check catches
+// duplicate per-codec controller registrations.
+func (c *ConfigMapController[T]) RunnableName() string {
+	return c.controllerName
+}
+
 func (c *ConfigMapController[T]) newStoreConfigMap(name string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -195,8 +205,8 @@ func (c *ConfigMapController[T]) enqueuePersistedEntry(entry *Entry[T]) {
 }
 
 func (c *ConfigMapController[T]) upsertConfigMap(ctx context.Context, namespace, name string, record T) error {
-	existingCm := c.cmClient.Get(name, namespace)
-	if existingCm == nil {
+	existingCmRaw := c.cmClient.Get(name, namespace)
+	if existingCmRaw == nil {
 		c.logger.Debug("creating ConfigMap", "name", name)
 		newCm := c.newStoreConfigMap(name)
 		if err := c.entries.Serialize(newCm, record); err != nil {
@@ -211,6 +221,7 @@ func (c *ConfigMapController[T]) upsertConfigMap(ctx context.Context, namespace,
 		return nil
 	}
 
+	existingCm := existingCmRaw.DeepCopy()
 	c.logger.Debug("updating ConfigMap", "name", name)
 	if err := c.entries.Serialize(existingCm, record); err != nil {
 		c.logger.Error("error setting record in ConfigMap", "error", err)

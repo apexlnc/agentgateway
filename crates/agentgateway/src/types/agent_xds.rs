@@ -2323,6 +2323,15 @@ fn oidc_policy_from_proto(
 	let credentials = ClientCredentials::from_parts(token_endpoint_auth, client_secret)
 		.map_err(|e| err(e.to_string()))?;
 
+	// Filter `Invalid` so a proto BackendReference with no `kind` set falls back
+	// to direct call (system trust) rather than reaching `call_reference` and
+	// failing with ServiceNotFound at request time.
+	let provider_backend = oidc
+		.provider_backend
+		.as_ref()
+		.map(|r| resolve_simple_reference(Some(r)))
+		.filter(|r| !matches!(r, SimpleBackendReference::Invalid));
+
 	resolve_oidc_policy_from_xds(
 		policy_id,
 		oidc.issuer.clone(),
@@ -2333,6 +2342,7 @@ fn oidc_policy_from_proto(
 		credentials,
 		redirect_uri,
 		oidc.scopes.clone(),
+		provider_backend,
 	)
 	.map_err(|e| ProtoError::Generic(format!("failed to decode xDS OIDC policy: {e}")))
 }
@@ -3996,6 +4006,7 @@ mod tests {
 			client_secret: "client-secret".to_string(),
 			redirect_uri: "https://app.example.com/oauth/callback".to_string(),
 			scopes: vec!["openid".to_string(), "profile".to_string()],
+			provider_backend: None,
 		}
 	}
 

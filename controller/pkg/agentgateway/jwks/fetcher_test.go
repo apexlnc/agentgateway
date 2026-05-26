@@ -18,10 +18,8 @@ func TestAddKeysetToFetcher(t *testing.T) {
 	f, _ := NewFetcher(NewFetchedResults())
 	f.AddOrUpdate(expected)
 
-	fetch, ok := f.NextFetchForTest()
-	assert.True(t, ok)
-	assert.Equal(t, expected.RequestKey, fetch.RequestKey)
 	assert.Equal(t, 1, f.RequestCountForTest())
+	assert.Equal(t, 1, f.ReadyQueueLenForTest())
 }
 
 func TestRemoveKeysetFromFetcher(t *testing.T) {
@@ -76,7 +74,7 @@ func TestRetireKeysetKeepsResultThenSweptOnSuccessfulFetch(t *testing.T) {
 	newSource.RequestKey = newSource.Target.Key()
 
 	f.AddOrUpdate(newSource)
-	go f.MaybeFetch(ctx)
+	go f.Run(ctx)
 
 	keyset := awaitStoredKeyset(t, results, newSource.RequestKey)
 	assert.Equal(t, sampleJWKS, keyset.JwksJSON)
@@ -99,7 +97,7 @@ func TestSuccessfulJwksFetch(t *testing.T) {
 	source := testSharedJwksRequest(backend.URL)
 	f.AddOrUpdate(source)
 
-	go f.MaybeFetch(ctx)
+	go f.Run(ctx)
 
 	keyset := awaitStoredKeyset(t, results, source.RequestKey)
 	assert.Equal(t, sampleJWKS, keyset.JwksJSON)

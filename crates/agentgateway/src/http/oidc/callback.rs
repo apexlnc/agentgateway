@@ -127,6 +127,7 @@ pub(super) async fn handle_callback(
 		&policy.redirect_uri.redirect_uri,
 		&context.code,
 		&transaction.pkce_verifier,
+		policy.provider_backend.as_ref(),
 	)
 	.await?;
 	let id_token = token.id_token.ok_or(Error::MissingIdToken)?;
