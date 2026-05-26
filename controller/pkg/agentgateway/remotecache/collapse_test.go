@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"istio.io/istio/pkg/kube/krt"
+	"istio.io/istio/pkg/slices"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
@@ -60,10 +61,9 @@ func TestNewSharedRequestCollectionCollapsesByFetchKey(t *testing.T) {
 	)
 
 	collapsed := await(t, requests, 2)
-	byKey := make(map[remotehttp.FetchKey]collapseTestRequest, len(collapsed))
-	for _, request := range collapsed {
-		byKey[request.RequestKey] = request
-	}
+	byKey := slices.GroupUnique(collapsed, func(request collapseTestRequest) remotehttp.FetchKey {
+		return request.RequestKey
+	})
 
 	require.Contains(t, byKey, remotehttp.FetchKey("shared"))
 	assert.Equal(t, "a-owner", byKey["shared"].Owner)

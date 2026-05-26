@@ -104,15 +104,7 @@ func processOIDCPolicy(
 }
 
 func normalizedOIDCScopes(input []string) []string {
-	out := []string{"openid"}
-	seen := map[string]struct{}{"openid": {}}
-	for _, s := range input {
-		if _, ok := seen[s]; !ok {
-			out = append(out, s)
-			seen[s] = struct{}{}
-		}
-	}
-	return out
+	return slices.FilterDuplicates(append([]string{"openid"}, input...))
 }
 
 func resolveOIDCClientSecret(ctx PolicyCtx, policyNamespace string, oidcCfg *agentgateway.OIDC) (string, error) {

@@ -11,6 +11,7 @@ import (
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/kclient"
 	"istio.io/istio/pkg/kube/krt"
+	"istio.io/istio/pkg/slices"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -191,15 +192,13 @@ func (e *Entries[T]) CanonicalGet(krtctx krt.HandlerContext, requestKey remoteht
 	}
 	matches := krt.Fetch(krtctx, e.entries, krt.FilterIndex(e.byRequestKey, requestKey))
 	canonicalName := e.ConfigMapName(requestKey)
-	for _, entry := range matches {
-		if entry.Payload == nil {
-			continue
-		}
-		if entry.NamespacedName.Name == canonicalName {
-			return *entry.Payload, true
-		}
+	found := slices.FindFunc(matches, func(entry Entry[T]) bool {
+		return entry.Payload != nil && entry.NamespacedName.Name == canonicalName
+	})
+	if found == nil {
+		return zero, false
 	}
-	return zero, false
+	return *found.Payload, true
 }
 
 // LoadAll returns one payload per request key (best-of). Parse errors are joined so callers

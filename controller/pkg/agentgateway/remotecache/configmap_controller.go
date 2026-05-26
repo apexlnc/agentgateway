@@ -10,6 +10,7 @@ import (
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/kclient"
 	"istio.io/istio/pkg/kube/krt"
+	"istio.io/istio/pkg/slices"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -134,10 +135,9 @@ func (c *ConfigMapController[T]) Reconcile(req types.NamespacedName) error {
 	requestKey := remotehttp.FetchKey(req.Name)
 
 	existingEntries := c.entries.EntriesForRequestKey(requestKey)
-	existingNames := make([]string, 0, len(existingEntries))
-	for _, entry := range existingEntries {
-		existingNames = append(existingNames, entry.GetName())
-	}
+	existingNames := slices.Map(existingEntries, func(entry Entry[T]) string {
+		return entry.GetName()
+	})
 
 	result := c.results.GetKey(string(requestKey))
 	var record T
@@ -242,15 +242,11 @@ type SyncPlan struct {
 // PlanConfigMapSync chooses upsert/delete names from existing names and the canonical name.
 func PlanConfigMapSync(existingNames []string, canonicalName string, exists bool) SyncPlan {
 	if exists {
-		deleteNames := make([]string, 0, len(existingNames))
-		for _, name := range existingNames {
-			if name != canonicalName {
-				deleteNames = append(deleteNames, name)
-			}
-		}
 		return SyncPlan{
-			UpsertName:  canonicalName,
-			DeleteNames: deleteNames,
+			UpsertName: canonicalName,
+			DeleteNames: slices.Filter(existingNames, func(name string) bool {
+				return name != canonicalName
+			}),
 		}
 	}
 

@@ -1,7 +1,6 @@
 package remotecache
 
 import (
-	"cmp"
 	"time"
 
 	"istio.io/istio/pkg/kube/krt"
@@ -14,10 +13,8 @@ import (
 // CollapseSources collapses sources sharing a fetch key: lowest ownerKey
 // (stable across input order) and minimum TTL. Panics on len 0.
 func CollapseSources[S any](sources []S, ownerKey func(S) string, ttl func(S) time.Duration) (S, time.Duration) {
-	sorted := append([]S(nil), sources...)
-	slices.SortFunc(sorted, func(a, b S) int {
-		return cmp.Compare(ownerKey(a), ownerKey(b))
-	})
+	sorted := slices.Clone(sources)
+	slices.SortBy(sorted, ownerKey)
 	primary := sorted[0]
 	minTTL := ttl(primary)
 	for _, s := range sorted[1:] {
