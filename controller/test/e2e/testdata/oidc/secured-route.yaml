@@ -25,7 +25,13 @@ spec:
       name: route-oidc
   traffic:
     oidc:
-      issuerURL: http://dummy-idp.default:8081
+      issuerURL: https://dummy-idp.default.svc.cluster.local:8443
+      backendRef:
+        group: ""
+        kind: Service
+        name: dummy-idp
+        port: 8443
+        namespace: default
       clientID: mcp_gi3APARn2_uHv2oxfJJqq2yZBDV4OyNo
       clientSecret:
         name: oidc-client
@@ -34,3 +40,17 @@ spec:
         - openid
         - profile
         - email
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: idp-policy
+  namespace: default
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: dummy-idp
+  backend:
+    tls:
+      insecureSkipVerify: All

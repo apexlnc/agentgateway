@@ -11,6 +11,7 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
+	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
 
@@ -96,3 +97,34 @@ func SetJwksInConfigMap(cm *corev1.ConfigMap, keyset Keyset) error {
 	return nil
 }
 
+// ConfigMapController synchronizes fetched JWKS keysets to persisted ConfigMaps.
+type ConfigMapController struct {
+	*remotecache.ConfigMapController[Keyset]
+}
+
+// ConfigMapControllerOptions configures NewConfigMapController.
+type ConfigMapControllerOptions struct {
+	APIClient           apiclient.Client
+	DeploymentNamespace string
+	Store               *Store
+	PersistedEntries    *PersistedEntries
+}
+
+func NewConfigMapController(opts ConfigMapControllerOptions) *ConfigMapController {
+	logger := logging.New("jwks_store_configmap_controller")
+	logger.Info("creating jwks store configmap controller")
+
+	controllerOpts := remotecache.ConfigMapControllerOptions[Keyset]{
+		APIClient:           opts.APIClient,
+		DeploymentNamespace: opts.DeploymentNamespace,
+		ControllerName:      "JwksStoreConfigMapController",
+		Results:             opts.Store.FetchedResults().Collection(),
+		Entries:             opts.PersistedEntries,
+		StoreHasSynced:      opts.Store.HasSynced,
+		Logger:              logger,
+	}
+
+	return &ConfigMapController{
+		ConfigMapController: remotecache.NewConfigMapController(controllerOpts),
+	}
+}

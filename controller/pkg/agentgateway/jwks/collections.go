@@ -34,7 +34,7 @@ func NewCollections(inputs CollectionInputs) Collections {
 	}, inputs.KrtOpts.ToOptions("jwks/BackendOwners")...)
 	owners := krt.JoinCollection([]krt.Collection[RemoteJwksOwner]{policyOwners, backendOwners}, inputs.KrtOpts.ToOptions("jwks/Owners")...)
 
-	primarySources := krt.NewCollection(owners, func(kctx krt.HandlerContext, owner RemoteJwksOwner) *JwksSource {
+	sources := krt.NewCollection(owners, func(kctx krt.HandlerContext, owner RemoteJwksOwner) *JwksSource {
 		resolved, err := inputs.Resolver.ResolveOwner(kctx, owner)
 		if err != nil {
 			collectionsLogger.Error("error generating remote jwks url or tls options", "error", err, "owner", owner.ID.String())
@@ -52,7 +52,7 @@ func NewCollections(inputs CollectionInputs) Collections {
 	}, inputs.KrtOpts.ToOptions("jwks/Sources")...)
 
 	sharedRequests := remotecache.NewSharedRequestCollection(
-		primarySources,
+		sources,
 		"jwks-request-key",
 		"jwks/RequestGroups",
 		"jwks/Requests",

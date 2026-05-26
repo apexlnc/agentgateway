@@ -102,6 +102,109 @@ func TestOidcRequestKeyStable(t *testing.T) {
 	require.Equal(t, first, second, "same (target, issuer) must hash identically across calls")
 }
 
+var testFetchedAt = time.Unix(1_700_000_000, 0).UTC()
+
+func TestDiscoveredProviderResourceName(t *testing.T) {
+	p := DiscoveredProvider{
+		RequestKey:            remotehttp.FetchKey("fetch-key-abc"),
+		IssuerURL:             "https://issuer.example",
+		AuthorizationEndpoint: "https://issuer.example/auth",
+		TokenEndpoint:         "https://issuer.example/token",
+		JwksURI:               "https://issuer.example/jwks",
+		JwksInline:            `{"keys":[]}`,
+		FetchedAt:             testFetchedAt,
+	}
+	require.Equal(t, "fetch-key-abc", p.ResourceName())
+}
+
+func TestDiscoveredProviderEquals(t *testing.T) {
+	base := DiscoveredProvider{
+		RequestKey:                        remotehttp.FetchKey("fetch-key-abc"),
+		IssuerURL:                         "https://issuer.example",
+		AuthorizationEndpoint:             "https://issuer.example/auth",
+		TokenEndpoint:                     "https://issuer.example/token",
+		JwksURI:                           "https://issuer.example/jwks",
+		JwksInline:                        `{"keys":[{"kid":"a"}]}`,
+		TokenEndpointAuthMethodsSupported: []string{"client_secret_basic", "client_secret_post"},
+		FetchedAt:                         testFetchedAt,
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*DiscoveredProvider)
+		equal  bool
+	}{
+		{"identical", func(*DiscoveredProvider) {}, true},
+		{"different request key", func(p *DiscoveredProvider) { p.RequestKey = "other" }, false},
+		{"different issuer url", func(p *DiscoveredProvider) { p.IssuerURL = "https://other.example" }, false},
+		{"different authorization endpoint", func(p *DiscoveredProvider) {
+			p.AuthorizationEndpoint = "https://other.example/auth"
+		}, false},
+		{"different token endpoint", func(p *DiscoveredProvider) {
+			p.TokenEndpoint = "https://other.example/token"
+		}, false},
+		{"different jwks uri", func(p *DiscoveredProvider) { p.JwksURI = "https://other.example/jwks" }, false},
+		{"different jwks inline", func(p *DiscoveredProvider) { p.JwksInline = `{"keys":[]}` }, false},
+		{"different fetched at", func(p *DiscoveredProvider) { p.FetchedAt = p.FetchedAt.Add(time.Second) }, false},
+		{"different token endpoint auth methods supported", func(p *DiscoveredProvider) {
+			p.TokenEndpointAuthMethodsSupported = []string{"private_key_jwt"}
+		}, false},
+		// slices.Equal is order-sensitive: a permutation of the same elements
+		// must compare unequal so a re-ordered IdP response still propagates as
+		// a change event.
+		{"same auth methods different order", func(p *DiscoveredProvider) {
+			p.TokenEndpointAuthMethodsSupported = []string{"client_secret_post", "client_secret_basic"}
+		}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			other := base
+			// Deep-copy the slice so per-case mutations don't leak across cases.
+			other.TokenEndpointAuthMethodsSupported = append([]string(nil), base.TokenEndpointAuthMethodsSupported...)
+			tc.mutate(&other)
+			require.Equal(t, tc.equal, base.Equals(other))
+		})
+	}
+}
+
+func TestDiscoveredProviderEqualsTreatsNilAndEmptyAuthMethodsAsEqual(t *testing.T) {
+	a := DiscoveredProvider{
+		RequestKey:                        "fk",
+		TokenEndpointAuthMethodsSupported: nil,
+	}
+	b := DiscoveredProvider{
+		RequestKey:                        "fk",
+		TokenEndpointAuthMethodsSupported: []string{},
+	}
+	require.True(t, a.Equals(b), "nil and empty slice should be equal so KRT does not churn when an IdP fluctuates between omitting and emitting an empty array")
+}
+
+func TestDiscoveredProviderEqualsIgnoresMonotonicClock(t *testing.T) {
+	// time.Now() carries a monotonic reading; a round-trip through
+	// UTC() strips it. Both values represent the same instant, so
+	// Equals (which uses time.Time.Equal) must return true even
+	// though `==` on the struct would not.
+	now := time.Now()
+	stripped := now.UTC()
+
+	base := DiscoveredProvider{
+		RequestKey:            remotehttp.FetchKey("fetch-key-abc"),
+		IssuerURL:             "https://issuer.example",
+		AuthorizationEndpoint: "https://issuer.example/auth",
+		TokenEndpoint:         "https://issuer.example/token",
+		JwksURI:               "https://issuer.example/jwks",
+		JwksInline:            `{"keys":[{"kid":"a"}]}`,
+	}
+
+	a := base
+	a.FetchedAt = now
+	b := base
+	b.FetchedAt = stripped
+
+	require.True(t, a.Equals(b), "same instant on different clocks should be equal")
+}
+
 func TestOidcRequestKeyDifferentiatesInputs(t *testing.T) {
 	baseTarget := remotehttp.FetchTarget{URL: "https://issuer.example/.well-known/openid-configuration"}
 	baseIssuer := "https://issuer.example"

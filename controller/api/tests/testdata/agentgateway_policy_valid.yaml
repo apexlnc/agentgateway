@@ -883,3 +883,19 @@ spec:
             status: 404
             bodyExpression: "'missing ' + request.path"
 ---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: traffic-oidc-pre-routing
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: dummy
+  traffic:
+    phase: PreRouting
+    oidc:
+      issuerURL: https://issuer.example.com
+      clientID: client-1
+      redirectURI: https://gateway.example.com/oauth/callback
+---

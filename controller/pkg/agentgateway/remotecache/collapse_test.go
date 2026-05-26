@@ -9,13 +9,17 @@ import (
 	"istio.io/istio/pkg/kube/krt"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil/krttest"
+	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
 
 type collapseTestSource struct {
 	Owner string
 	Key   remotehttp.FetchKey
 	TTL   time.Duration
+}
+
+func (c collapseTestSource) ResourceName() string {
+	return c.Owner + "/" + string(c.Key)
 }
 
 type collapseTestRequest struct {
@@ -25,12 +29,12 @@ type collapseTestRequest struct {
 }
 
 func TestNewSharedRequestCollectionCollapsesByFetchKey(t *testing.T) {
-	krtOpts := krttest.KrtOptions(t)
-	sources := krttest.NewStaticCollection(t, []collapseTestSource{
+	krtOpts := krtutil.NewKrtOptions(t.Context().Done(), new(krt.DebugHandler))
+	sources := krt.NewStaticCollection(nil, []collapseTestSource{
 		{Owner: "z-owner", Key: "shared", TTL: 10 * time.Minute},
 		{Owner: "a-owner", Key: "shared", TTL: 5 * time.Minute},
 		{Owner: "other", Key: "other", TTL: 30 * time.Minute},
-	}, krtOpts, "CollapseSources")
+	}, krtOpts.ToOptions("CollapseSources")...)
 
 	requests := NewSharedRequestCollection(
 		sources,
@@ -55,7 +59,7 @@ func TestNewSharedRequestCollectionCollapsesByFetchKey(t *testing.T) {
 		},
 	)
 
-	collapsed := krttest.Await(t, requests, 2)
+	collapsed := await(t, requests, 2)
 	byKey := make(map[remotehttp.FetchKey]collapseTestRequest, len(collapsed))
 	for _, request := range collapsed {
 		byKey[request.RequestKey] = request
@@ -85,10 +89,10 @@ func TestCollapseSourcesUsesStableOwnerOrderingAndMinTTL(t *testing.T) {
 }
 
 func TestNewSharedRequestCollectionRecomputesOnSourceReset(t *testing.T) {
-	krtOpts := krttest.KrtOptions(t)
-	sources := krttest.NewStaticCollection(t, []collapseTestSource{
+	krtOpts := krtutil.NewKrtOptions(t.Context().Done(), new(krt.DebugHandler))
+	sources := krt.NewStaticCollection(nil, []collapseTestSource{
 		{Owner: "owner-a", Key: "shared", TTL: 5 * time.Minute},
-	}, krtOpts, "DynamicSources")
+	}, krtOpts.ToOptions("DynamicSources")...)
 
 	requests := NewSharedRequestCollection(
 		sources,
@@ -113,7 +117,7 @@ func TestNewSharedRequestCollectionRecomputesOnSourceReset(t *testing.T) {
 		},
 	)
 
-	initial := krttest.Await(t, requests, 1)
+	initial := await(t, requests, 1)
 	assert.Equal(t, "owner-a", initial[0].Owner)
 
 	sources.Reset([]collapseTestSource{
@@ -121,10 +125,10 @@ func TestNewSharedRequestCollectionRecomputesOnSourceReset(t *testing.T) {
 	})
 
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		updated := krttest.Await(t, requests, 1)
+		updated := await(t, requests, 1)
 		assert.Equal(c, "owner-b", updated[0].Owner)
 		assert.Equal(c, 1*time.Minute, updated[0].TTL)
-	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+	}, eventuallyTimeout, eventuallyPoll)
 }
 
 var _ krt.ResourceNamer = collapseTestRequest{}

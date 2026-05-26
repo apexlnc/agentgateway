@@ -2750,10 +2750,7 @@ pub async fn convert_route(
 			pol,
 			Some(AttachedPolicyContext {
 				oidc_policy_id: crate::http::oidc::PolicyId::route(&key),
-				oidc_cookie_encoder: crate::http::oidc::OidcCookieEncoder::from_session_encoder(
-					&config.session_encoder,
-				)
-				.ok(),
+				oidc_cookie_encoder: config.oidc_cookie_encoder(),
 			}),
 		)
 		.await?

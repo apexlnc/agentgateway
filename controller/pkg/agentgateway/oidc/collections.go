@@ -16,6 +16,7 @@ var collectionsLogger = logging.New("oidc_collections")
 
 type CollectionInputs struct {
 	AgentgatewayPolicies krt.Collection[*agentgateway.AgentgatewayPolicy]
+	Resolver             Resolver
 	KrtOpts              krtutil.KrtOptions
 }
 
@@ -24,29 +25,25 @@ type Collections struct {
 }
 
 func NewCollections(inputs CollectionInputs) Collections {
-	sources := krt.NewManyCollection(inputs.AgentgatewayPolicies, func(ctx krt.HandlerContext, policy *agentgateway.AgentgatewayPolicy) []OidcSource {
-		owners := OwnersFromPolicy(policy)
-		if len(owners) == 0 {
+	sources := krt.NewCollection(inputs.AgentgatewayPolicies, func(kctx krt.HandlerContext, policy *agentgateway.AgentgatewayPolicy) *OidcSource {
+		owner, ok := OwnerFromPolicy(policy)
+		if !ok {
 			return nil
 		}
-
-		sources := make([]OidcSource, 0, len(owners))
-		for _, owner := range owners {
-			discoveryURL, err := OidcDiscoveryURL(owner.Config.IssuerURL)
-			if err != nil {
-				collectionsLogger.Warn("skipping OIDC source with invalid issuer URL", "owner", owner.ID.String(), "issuerURL", owner.Config.IssuerURL, "error", err)
-				continue
-			}
-			target := remotehttp.FetchTarget{URL: discoveryURL}
-			sources = append(sources, OidcSource{
-				OwnerKey:       owner.ID,
-				RequestKey:     oidcRequestKey(target, owner.Config.IssuerURL),
-				ExpectedIssuer: owner.Config.IssuerURL,
-				Target:         target,
-				TTL:            owner.TTL,
-			})
+		resolved, err := inputs.Resolver.ResolveOwner(kctx, owner)
+		if err != nil {
+			collectionsLogger.Warn("skipping OIDC source: cannot resolve discovery endpoint", "owner", owner.ID.String(), "issuerURL", owner.Config.IssuerURL, "error", err)
+			return nil
 		}
-		return sources
+		return &OidcSource{
+			OwnerKey:       resolved.OwnerID,
+			RequestKey:     oidcRequestKey(resolved.Target.Target, resolved.ExpectedIssuer),
+			ExpectedIssuer: resolved.ExpectedIssuer,
+			Target:         resolved.Target.Target,
+			TLSConfig:      resolved.Target.TLSConfig,
+			ProxyTLSConfig: resolved.Target.ProxyTLSConfig,
+			TTL:            resolved.TTL,
+		}
 	}, inputs.KrtOpts.ToOptions("oidc/sources")...)
 
 	sharedRequests := remotecache.NewSharedRequestCollection(
@@ -75,6 +72,8 @@ func collapseOidcSources(grouped krt.IndexObject[remotehttp.FetchKey, OidcSource
 		RequestKey:     grouped.Key,
 		ExpectedIssuer: primary.ExpectedIssuer,
 		Target:         primary.Target,
+		TLSConfig:      primary.TLSConfig,
+		ProxyTLSConfig: primary.ProxyTLSConfig,
 		TTL:            minTTL,
 	}
 }

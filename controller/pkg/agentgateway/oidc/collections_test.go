@@ -1,6 +1,7 @@
 package oidc
 
 import (
+	"crypto/tls"
 	"testing"
 	"time"
 
@@ -12,22 +13,22 @@ import (
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/shared"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil/krttest"
+	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
 
-func TestOwnersFromPolicyExtractsOidcOwner(t *testing.T) {
+func TestOwnerFromPolicyExtractsOidcOwner(t *testing.T) {
 	policy := testOidcPolicy("p1")
 
-	owners := OwnersFromPolicy(policy)
+	owner, ok := OwnerFromPolicy(policy)
 
-	require.Len(t, owners, 1)
-	require.Equal(t, "p1", owners[0].ID.Name)
-	require.Equal(t, "default", owners[0].ID.Namespace)
-	require.Equal(t, "spec.traffic.oidc", owners[0].ID.Path)
-	require.Equal(t, OidcRefreshInterval, owners[0].TTL)
+	require.True(t, ok)
+	require.Equal(t, "p1", owner.ID.Name)
+	require.Equal(t, "default", owner.ID.Namespace)
+	require.Equal(t, "spec.traffic.oidc", owner.ID.Path)
+	require.Equal(t, OidcRefreshInterval, owner.TTL)
 }
 
-func TestOwnersFromPolicyReturnsNilWhenOidcAbsent(t *testing.T) {
+func TestOwnerFromPolicyReturnsNoneWhenOidcAbsent(t *testing.T) {
 	tests := []struct {
 		name   string
 		policy *agentgateway.AgentgatewayPolicy
@@ -64,7 +65,8 @@ func TestOwnersFromPolicyReturnsNilWhenOidcAbsent(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Nil(t, OwnersFromPolicy(tc.policy))
+			_, ok := OwnerFromPolicy(tc.policy)
+			require.False(t, ok)
 		})
 	}
 }
@@ -76,14 +78,14 @@ func TestCollapseOidcSourcesPicksMinTTL(t *testing.T) {
 		Key: requestKey,
 		Objects: []OidcSource{
 			{
-				OwnerKey:       OidcOwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "default", Name: "long", Path: "spec.traffic.oidc"},
+				OwnerKey:       remotecache.OwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "default", Name: "long", Path: "spec.traffic.oidc"},
 				RequestKey:     requestKey,
 				ExpectedIssuer: "https://idp.example",
 				Target:         target,
 				TTL:            30 * time.Minute,
 			},
 			{
-				OwnerKey:       OidcOwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "default", Name: "short", Path: "spec.traffic.oidc"},
+				OwnerKey:       remotecache.OwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "default", Name: "short", Path: "spec.traffic.oidc"},
 				RequestKey:     requestKey,
 				ExpectedIssuer: "https://idp.example",
 				Target:         target,
@@ -104,7 +106,7 @@ func TestCollapseOidcSourcesIsDeterministicAcrossOwnerOrder(t *testing.T) {
 	requestKey := oidcRequestKey(target, "https://idp.example")
 	source := func(name string, ttl time.Duration) OidcSource {
 		return OidcSource{
-			OwnerKey:       OidcOwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "default", Name: name, Path: "spec.traffic.oidc"},
+			OwnerKey:       remotecache.OwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "default", Name: name, Path: "spec.traffic.oidc"},
 			RequestKey:     requestKey,
 			ExpectedIssuer: "https://idp.example",
 			Target:         target,
@@ -132,19 +134,52 @@ func TestCollapseOidcSourcesEmptyReturnsNil(t *testing.T) {
 	}))
 }
 
+func TestCollapseOidcSourcesUsesSortedOwnerForTargetAndTLSConfig(t *testing.T) {
+	requestKey := remotehttp.FetchTarget{URL: "https://idp.example/.well-known/openid-configuration"}.Key()
+	earlierTarget := remotehttp.FetchTarget{URL: "https://idp-a.example/.well-known/openid-configuration"}
+	laterTarget := remotehttp.FetchTarget{URL: "https://idp-b.example/.well-known/openid-configuration"}
+	earlierTLS := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: "idp-a.example"}
+	laterTLS := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: "idp-b.example"}
+
+	shared := collapseOidcSources(krt.IndexObject[remotehttp.FetchKey, OidcSource]{
+		Key: requestKey,
+		Objects: []OidcSource{
+			{
+				OwnerKey:   remotecache.OwnerID{Name: "z-owner"},
+				RequestKey: requestKey,
+				Target:     laterTarget,
+				TLSConfig:  laterTLS,
+				TTL:        5 * time.Minute,
+			},
+			{
+				OwnerKey:   remotecache.OwnerID{Name: "a-owner"},
+				RequestKey: requestKey,
+				Target:     earlierTarget,
+				TLSConfig:  earlierTLS,
+				TTL:        10 * time.Minute,
+			},
+		},
+	})
+
+	require.NotNil(t, shared)
+	require.Equal(t, earlierTarget, shared.Target)
+	require.Same(t, earlierTLS, shared.TLSConfig)
+}
+
 func TestNewCollectionsCollapsesSharedKeyAcrossPolicies(t *testing.T) {
-	krtOpts := krttest.KrtOptions(t)
-	policies := krttest.NewStaticCollection(t, []*agentgateway.AgentgatewayPolicy{
+	krtOpts := krtutil.NewKrtOptions(t.Context().Done(), new(krt.DebugHandler))
+	policies := krt.NewStaticCollection(nil, []*agentgateway.AgentgatewayPolicy{
 		testOidcPolicy("a"),
 		testOidcPolicy("b"),
-	}, krtOpts, "OidcPolicies")
+	}, krtOpts.ToOptions("OidcPolicies")...)
 
 	collections := NewCollections(CollectionInputs{
 		AgentgatewayPolicies: policies,
+		Resolver:             NewResolver(nil),
 		KrtOpts:              krtOpts,
 	})
 
-	requests := krttest.Await(t, collections.SharedRequests, 1)
+	requests := await(t, collections.SharedRequests, 1)
 	require.Equal(t, OidcRefreshInterval, requests[0].TTL)
 }
 

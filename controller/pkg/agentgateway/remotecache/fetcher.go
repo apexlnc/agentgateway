@@ -19,10 +19,6 @@ type Result interface {
 	RemoteFetchedAt() time.Time
 }
 
-type Driver[S Request, R Result] interface {
-	Fetch(ctx context.Context, source S) (R, error)
-}
-
 type InternalFetchState[S Request] struct {
 	Source     S
 	Generation uint64
@@ -33,17 +29,17 @@ type InternalFetchState[S Request] struct {
 type Fetcher[S Request, R Result] struct {
 	mu       sync.Mutex
 	Results  *FetchedResults[R]
-	Driver   Driver[S, R]
+	Fetch    func(ctx context.Context, source S) (R, error)
 	requests map[remotehttp.FetchKey]InternalFetchState[S]
 	schedule *Schedule
 	wake     chan struct{}
 	logger   *slog.Logger
 }
 
-func NewFetcher[S Request, R Result](results *FetchedResults[R], driver Driver[S, R], logger *slog.Logger) *Fetcher[S, R] {
+func NewFetcher[S Request, R Result](results *FetchedResults[R], fetch func(ctx context.Context, source S) (R, error), logger *slog.Logger) *Fetcher[S, R] {
 	return &Fetcher[S, R]{
 		Results:  results,
-		Driver:   driver,
+		Fetch:    fetch,
 		requests: make(map[remotehttp.FetchKey]InternalFetchState[S]),
 		schedule: NewSchedule(),
 		wake:     make(chan struct{}, 1),
@@ -98,7 +94,7 @@ func (f *Fetcher[S, R]) MaybeFetch(ctx context.Context) {
 		}
 
 		f.logger.Debug("fetching remote resource", "request_key", fetch.RequestKey)
-		result, err := f.Driver.Fetch(ctx, state.Source)
+		result, err := f.Fetch(ctx, state.Source)
 		if err != nil {
 			next := NextRetryDelay(fetch.RetryAttempt)
 			f.logger.Error("error fetching remote resource", "request_key", fetch.RequestKey, "error", err, "retryAttempt", fetch.RetryAttempt, "next", next.String())
@@ -207,8 +203,8 @@ func (f *Fetcher[S, R]) sweepRetiredResults() {
 	}
 	f.mu.Unlock()
 
-	f.Results.DeleteObjects(func(record FetchedRecord[R]) bool {
-		_, ok := live[record.Payload.RemoteRequestKey()]
+	f.Results.DeleteObjects(func(record R) bool {
+		_, ok := live[record.RemoteRequestKey()]
 		return !ok
 	})
 }
@@ -226,6 +222,15 @@ func (f *Fetcher[S, R]) scheduleAtLocked(requestKey remotehttp.FetchKey, generat
 	f.schedule.Schedule(requestKey, generation, at, retryAttempt)
 	SignalWake(f.wake)
 }
+
+// The ForTest methods below expose internal Fetcher state for white-box
+// testing across the jwks/, oidc/, and remotecache/ test packages. They are
+// NOT part of the public API; production code MUST NOT depend on them.
+//
+// They are exported (rather than relocated to a _test.go file) because the
+// tests that need them live in sibling packages and Go's package-private
+// testing model does not span packages. The "ForTest" suffix is the explicit
+// signal that the contract may change without notice.
 
 func (f *Fetcher[S, R]) ScheduledLenForTest() int {
 	f.mu.Lock()

@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"istio.io/istio/pkg/kube/krt"
 
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
@@ -17,13 +18,13 @@ func TestCollapseJwksSourcesUsesLowestTTL(t *testing.T) {
 		Key: target.Key(),
 		Objects: []JwksSource{
 			{
-				OwnerKey:   JwksOwnerID{Name: "one"},
+				OwnerKey:   remotecache.OwnerID{Name: "one"},
 				RequestKey: target.Key(),
 				Target:     target,
 				TTL:        5 * time.Minute,
 			},
 			{
-				OwnerKey:   JwksOwnerID{Name: "two"},
+				OwnerKey:   remotecache.OwnerID{Name: "two"},
 				RequestKey: target.Key(),
 				Target:     target,
 				TTL:        2 * time.Minute,
@@ -53,14 +54,14 @@ func TestCollapseJwksSourcesUsesSortedOwnerForTargetAndTLSConfig(t *testing.T) {
 		Key: requestKey,
 		Objects: []JwksSource{
 			{
-				OwnerKey:   JwksOwnerID{Name: "z-owner"},
+				OwnerKey:   remotecache.OwnerID{Name: "z-owner"},
 				RequestKey: requestKey,
 				Target:     laterTarget,
 				TLSConfig:  laterTLS,
 				TTL:        5 * time.Minute,
 			},
 			{
-				OwnerKey:   JwksOwnerID{Name: "a-owner"},
+				OwnerKey:   remotecache.OwnerID{Name: "a-owner"},
 				RequestKey: requestKey,
 				Target:     earlierTarget,
 				TLSConfig:  earlierTLS,

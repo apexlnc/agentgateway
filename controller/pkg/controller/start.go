@@ -21,7 +21,7 @@ import (
 	apisettings "github.com/agentgateway/agentgateway/controller/api/settings"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
-	oidcpkg "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	agwplugins "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/plugins"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
@@ -29,7 +29,7 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 	"github.com/agentgateway/agentgateway/controller/pkg/syncer"
-	agentgatewaybackend "github.com/agentgateway/agentgateway/controller/pkg/syncer/backend"
+	"github.com/agentgateway/agentgateway/controller/pkg/syncer/backend"
 	"github.com/agentgateway/agentgateway/controller/pkg/utils/kubeutils"
 	"github.com/agentgateway/agentgateway/controller/pkg/utils/namespaces"
 	"github.com/agentgateway/agentgateway/controller/pkg/version"
@@ -78,7 +78,7 @@ type StartConfig struct {
 	AgwCollections *agwplugins.AgwCollections
 	Resolver       remotehttp.Resolver
 	JWKSLookup     jwks.Lookup
-	OidcLookup     oidcpkg.Lookup
+	OidcLookup     oidc.Lookup
 
 	KrtOptions                     krtutil.KrtOptions
 	ExtraAgwResourceStatusHandlers map[schema.GroupVersionKind]syncer.ResourceStatusSyncer
@@ -178,7 +178,7 @@ func NewControllerBuilder(ctx context.Context, cfg StartConfig) (*ControllerBuil
 }
 
 // Plugins registers all built-in policy plugins
-func Plugins(agw *agwplugins.AgwCollections, resolver remotehttp.Resolver, jwksLookup jwks.Lookup, oidcLookup oidcpkg.Lookup) []agwplugins.AgwPlugin {
+func Plugins(agw *agwplugins.AgwCollections, resolver remotehttp.Resolver, jwksLookup jwks.Lookup, oidcLookup oidc.Lookup) []agwplugins.AgwPlugin {
 	return []agwplugins.AgwPlugin{
 		agwplugins.NewAgentPlugin(agw, resolver, jwksLookup, oidcLookup),
 		agwplugins.NewInferencePlugin(agw),

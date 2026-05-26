@@ -8,13 +8,12 @@ import (
 
 	"github.com/agentgateway/agentgateway/api"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
-	oidcpkg "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	"github.com/agentgateway/agentgateway/controller/pkg/utils/kubeutils"
 	"github.com/agentgateway/agentgateway/controller/pkg/wellknown"
 )
 
-const oidcPolicySuffix = ":oidc"
-
+// CRD enum values (CamelCase) vs IdP wire format (snake_case, per OIDC Discovery §3 / RFC 8414).
 const (
 	oidcConfigTokenEndpointAuthMethodClientSecretBasic   = "ClientSecretBasic"
 	oidcConfigTokenEndpointAuthMethodClientSecretPost    = "ClientSecretPost"
@@ -33,15 +32,16 @@ func oidcPolicyIDForPolicyKey(key string) string {
 func processOIDCPolicy(
 	ctx PolicyCtx,
 	oidcCfg *agentgateway.OIDC,
+	policyPhase *agentgateway.PolicyPhase,
 	policyNSN types.NamespacedName,
 	policyKey string,
-	oidcLookup oidcpkg.Lookup,
+	oidcLookup oidc.Lookup,
 ) (*api.Policy, error) {
 	if oidcLookup == nil {
 		return nil, fmt.Errorf("oidc lookup is not configured")
 	}
 
-	owner, ok := oidcpkg.PolicyOIDCLookupOwner(policyNSN.Namespace, policyNSN.Name, oidcCfg)
+	owner, ok := oidc.PolicyOIDCLookupOwner(policyNSN.Namespace, policyNSN.Name, oidcCfg)
 	if !ok {
 		return nil, fmt.Errorf("could not derive OIDC owner for policy")
 	}
@@ -69,15 +69,15 @@ func processOIDCPolicy(
 		return nil, err
 	}
 
-	// OIDC phase is always Gateway in xDS IR.
+	key := policyKey + ":oidc"
 	return &api.Policy{
-		Key: policyKey + oidcPolicySuffix,
+		Key: key,
 		Kind: &api.Policy_Traffic{
 			Traffic: &api.TrafficPolicySpec{
-				Phase: api.TrafficPolicySpec_GATEWAY,
+				Phase: phase(policyPhase),
 				Kind: &api.TrafficPolicySpec_Oidc{
 					Oidc: &api.TrafficPolicySpec_OIDC{
-						PolicyId:              oidcPolicyIDForPolicyKey(policyKey + oidcPolicySuffix),
+						PolicyId:              oidcPolicyIDForPolicyKey(key),
 						Issuer:                provider.IssuerURL,
 						AuthorizationEndpoint: provider.AuthorizationEndpoint,
 						TokenEndpoint:         provider.TokenEndpoint,
@@ -128,7 +128,7 @@ func resolveOIDCClientSecret(ctx PolicyCtx, policyNamespace string, oidcCfg *age
 
 func resolveOIDCTokenEndpointAuth(
 	oidcCfg *agentgateway.OIDC,
-	provider *oidcpkg.DiscoveredProvider,
+	provider *oidc.DiscoveredProvider,
 	hasClientSecret bool,
 ) (api.TrafficPolicySpec_OIDC_TokenEndpointAuth, error) {
 	if oidcCfg.TokenEndpointAuthMethod != nil {

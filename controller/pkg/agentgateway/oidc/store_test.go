@@ -15,7 +15,7 @@ import (
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil/krttest"
+	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
 
 func TestStoreLoadsPersistedProvidersBeforeServing(t *testing.T) {
@@ -41,18 +41,19 @@ func TestStoreLoadsPersistedProvidersBeforeServing(t *testing.T) {
 	}
 	require.NoError(t, SetProviderInConfigMap(cm, persistedProvider))
 
-	krtOpts := krttest.KrtOptions(t)
-	policies := krttest.NewStaticCollection(t, []*agentgateway.AgentgatewayPolicy{
+	krtOpts := krtutil.NewKrtOptions(t.Context().Done(), new(krt.DebugHandler))
+	policies := krt.NewStaticCollection(nil, []*agentgateway.AgentgatewayPolicy{
 		testOidcPolicy("p1"),
-	}, krtOpts, "OidcPoliciesHydrate")
+	}, krtOpts.ToOptions("OidcPoliciesHydrate")...)
 
 	collections := NewCollections(CollectionInputs{
 		AgentgatewayPolicies: policies,
+		Resolver:             NewResolver(nil),
 		KrtOpts:              krtOpts,
 	})
 
 	persisted := NewPersistedEntriesFromCollection(
-		krt.NewStaticCollection[*corev1.ConfigMap](krttest.AlwaysSynced{}, []*corev1.ConfigMap{cm}),
+		krt.NewStaticCollection[*corev1.ConfigMap](nil, []*corev1.ConfigMap{cm}),
 		DefaultStorePrefix,
 		"agentgateway-system",
 	)
@@ -61,12 +62,12 @@ func TestStoreLoadsPersistedProvidersBeforeServing(t *testing.T) {
 	defer cancel()
 
 	store := NewStore(collections.SharedRequests, persisted, DefaultStorePrefix)
-	store.Fetcher.Driver.(*OidcDriver).DefaultClient = &http.Client{Transport: krttest.OfflineTransport{}}
+	store.Driver.DefaultClient = &http.Client{Transport: offlineTransport{}}
 
 	go func() {
 		_ = store.Start(ctx)
 	}()
-	require.Eventually(t, store.HasSynced, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+	require.Eventually(t, store.HasSynced, eventuallyTimeout, eventuallyPoll)
 
 	got, ok := store.ProviderByRequestKey(requestKey)
 	require.True(t, ok, "persisted provider must be served from cache before any live fetch")
@@ -97,18 +98,19 @@ func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 	}
 	require.NoError(t, SetProviderInConfigMap(cm, persistedProvider))
 
-	krtOpts := krttest.KrtOptions(t)
-	policies := krttest.NewStaticCollection(t, []*agentgateway.AgentgatewayPolicy{
+	krtOpts := krtutil.NewKrtOptions(t.Context().Done(), new(krt.DebugHandler))
+	policies := krt.NewStaticCollection(nil, []*agentgateway.AgentgatewayPolicy{
 		testOidcPolicy("p1"),
-	}, krtOpts, "OidcPoliciesDelete")
+	}, krtOpts.ToOptions("OidcPoliciesDelete")...)
 
 	collections := NewCollections(CollectionInputs{
 		AgentgatewayPolicies: policies,
+		Resolver:             NewResolver(nil),
 		KrtOpts:              krtOpts,
 	})
 
 	persisted := NewPersistedEntriesFromCollection(
-		krt.NewStaticCollection[*corev1.ConfigMap](krttest.AlwaysSynced{}, []*corev1.ConfigMap{cm}),
+		krt.NewStaticCollection[*corev1.ConfigMap](nil, []*corev1.ConfigMap{cm}),
 		DefaultStorePrefix,
 		"agentgateway-system",
 	)
@@ -117,15 +119,15 @@ func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 	defer cancel()
 
 	store := NewStore(collections.SharedRequests, persisted, DefaultStorePrefix)
-	store.Fetcher.Driver.(*OidcDriver).DefaultClient = &http.Client{Transport: krttest.OfflineTransport{}}
+	store.Driver.DefaultClient = &http.Client{Transport: offlineTransport{}}
 
 	go func() {
 		_ = store.Start(ctx)
 	}()
-	require.Eventually(t, store.HasSynced, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+	require.Eventually(t, store.HasSynced, eventuallyTimeout, eventuallyPoll)
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
-	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+	}, eventuallyTimeout, eventuallyPoll)
 
 	_, ok := store.ProviderByRequestKey(requestKey)
 	require.True(t, ok, "cache should be hydrated before policy deletion")
@@ -135,7 +137,7 @@ func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		_, ok := store.ProviderByRequestKey(requestKey)
 		assert.False(c, ok)
-	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+	}, eventuallyTimeout, eventuallyPoll)
 }
 
 func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
@@ -161,16 +163,17 @@ func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
 	}
 	require.NoError(t, SetProviderInConfigMap(cm, orphanProvider))
 
-	krtOpts := krttest.KrtOptions(t)
-	policies := krttest.NewStaticCollection[*agentgateway.AgentgatewayPolicy](t, nil, krtOpts, "OidcPoliciesOrphan")
+	krtOpts := krtutil.NewKrtOptions(t.Context().Done(), new(krt.DebugHandler))
+	policies := krt.NewStaticCollection[*agentgateway.AgentgatewayPolicy](nil, nil, krtOpts.ToOptions("OidcPoliciesOrphan")...)
 
 	collections := NewCollections(CollectionInputs{
 		AgentgatewayPolicies: policies,
+		Resolver:             NewResolver(nil),
 		KrtOpts:              krtOpts,
 	})
 
 	persisted := NewPersistedEntriesFromCollection(
-		krt.NewStaticCollection[*corev1.ConfigMap](krttest.AlwaysSynced{}, []*corev1.ConfigMap{cm}),
+		krt.NewStaticCollection[*corev1.ConfigMap](nil, []*corev1.ConfigMap{cm}),
 		DefaultStorePrefix,
 		"agentgateway-system",
 	)
@@ -179,15 +182,15 @@ func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
 	defer cancel()
 
 	store := NewStore(collections.SharedRequests, persisted, DefaultStorePrefix)
-	store.Fetcher.Driver.(*OidcDriver).DefaultClient = &http.Client{Transport: krttest.OfflineTransport{}}
+	store.Driver.DefaultClient = &http.Client{Transport: offlineTransport{}}
 
 	go func() {
 		_ = store.Start(ctx)
 	}()
-	require.Eventually(t, store.HasSynced, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+	require.Eventually(t, store.HasSynced, eventuallyTimeout, eventuallyPoll)
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		_, ok := store.ProviderByRequestKey(requestKey)
 		assert.False(c, ok, "orphan cache entry should be cleared after sync")
-	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+	}, eventuallyTimeout, eventuallyPoll)
 }

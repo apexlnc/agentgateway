@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
-	"time"
 
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/kclient"
@@ -31,8 +30,6 @@ type Codec[T Result] struct {
 	ObservabilityName string
 	Parse             func(*corev1.ConfigMap) (T, error)
 	Serialize         func(*corev1.ConfigMap, T) error
-	// Normalize repairs identity fields when derivation logic evolves across releases.
-	Normalize func(storePrefix, configMapName string, payload T) T
 }
 
 // Entry is a parsed ConfigMap; on parse failure ParseError is set and Payload is nil.
@@ -65,64 +62,20 @@ func (e Entry[T]) GetName() string {
 	return e.NamespacedName.Name
 }
 
-func (e Entry[T]) GetNamespace() string {
-	return e.NamespacedName.Namespace
-}
-
-// GetFetchedAt returns zero on parse failure so unparsable entries lose hydration tie-breaks.
-func (e Entry[T]) GetFetchedAt() time.Time {
-	if e.Payload == nil {
-		return time.Time{}
-	}
-	return (*e.Payload).RemoteFetchedAt()
-}
-
-var (
-	_ PersistedRecord = Entry[Result]{}
-	_ Hydratable      = Entry[Result]{}
-)
-
-// Hydratable lets BestHydrationEntry pick a "best" persisted entry per request key at startup.
-type Hydratable interface {
-	GetFetchedAt() time.Time
-	GetName() string
-	GetNamespace() string
-}
-
-// BestHydrationEntry picks the freshest entry, breaking ties on canonical-name then lex order.
-func BestHydrationEntry[T Hydratable](entries []T, canonicalName string) T {
-	var best T
-	var found bool
-	for _, candidate := range entries {
-		if !found || isBetterHydrationEntry(candidate, best, canonicalName) {
-			best = candidate
-			found = true
+// BestHydrationEntry returns the canonical entry when present, else any.
+// Multiple entries per request key are transient orphan-sweep artifacts;
+// only the canonical name is authoritative.
+func BestHydrationEntry[T Result](entries []Entry[T], canonicalName string) Entry[T] {
+	var fallback Entry[T]
+	for i, e := range entries {
+		if e.NamespacedName.Name == canonicalName {
+			return e
+		}
+		if i == 0 {
+			fallback = e
 		}
 	}
-	return best
-}
-
-func isBetterHydrationEntry[T Hydratable](candidate, current T, canonicalName string) bool {
-	candidateFetchedAt := candidate.GetFetchedAt()
-	currentFetchedAt := current.GetFetchedAt()
-
-	switch {
-	case candidateFetchedAt.After(currentFetchedAt):
-		return true
-	case currentFetchedAt.After(candidateFetchedAt):
-		return false
-	}
-
-	candidateCanonical := candidate.GetName() == canonicalName
-	currentCanonical := current.GetName() == canonicalName
-	if candidateCanonical != currentCanonical {
-		return candidateCanonical
-	}
-
-	if candidate.GetName() != current.GetName() {
-		return candidate.GetName() < current.GetName()
-	}
-	return candidate.GetNamespace() < current.GetNamespace()
+	return fallback
 }
 
 // Entries watches Codec-labeled ConfigMaps and exposes typed lookups by request key.
@@ -179,7 +132,6 @@ func NewFromCollection[T Result](
 				ParseError:     err.Error(),
 			}
 		}
-		payload = codec.Normalize(storePrefix, cm.Name, payload)
 		return &Entry[T]{
 			NamespacedName: namespacedName,
 			Payload:        &payload,

@@ -10,18 +10,15 @@ import (
 )
 
 // OidcRefreshInterval is how often the controller re-fetches OIDC discovery
-// documents and JWKS from the IdP. Fixed (not user-tunable) to keep the
-// dataplane behavior uniform: every mainstream IdP rotates JWKS with overlap
-// windows of days or longer, so an hour is conservative across the board, and
-// exposing a per-policy knob would let operators silently degrade JWT
-// validation by lengthening the interval past their IdP's overlap window.
+// documents and JWKS. Fixed (not user-tunable); IdP JWKS rotation overlap
+// windows are days, so an hour is conservative across the board.
 const OidcRefreshInterval = time.Hour
 
 // RemoteOidcOwner identifies the Kubernetes owner (AgentgatewayPolicy) that
 // triggered the OIDC discovery fetch and carries the configuration needed to
 // resolve and perform the fetch.
 type RemoteOidcOwner struct {
-	ID               OidcOwnerID
+	ID               remotecache.OwnerID
 	DefaultNamespace string
 	Config           agentgateway.OIDC
 	TTL              time.Duration
@@ -38,25 +35,19 @@ func (o RemoteOidcOwner) Equals(other RemoteOidcOwner) bool {
 		equality.Semantic.DeepEqual(o.Config, other.Config)
 }
 
-// OwnersFromPolicy extracts RemoteOidcOwner values from an AgentgatewayPolicy
-// that has a .spec.traffic.oidc field set.
-func OwnersFromPolicy(policy *agentgateway.AgentgatewayPolicy) []RemoteOidcOwner {
+// OwnerFromPolicy extracts the RemoteOidcOwner from an AgentgatewayPolicy that
+// has a .spec.traffic.oidc field set. The CRD permits at most one OIDC config
+// per policy, so the result is at most one owner.
+func OwnerFromPolicy(policy *agentgateway.AgentgatewayPolicy) (RemoteOidcOwner, bool) {
 	if len(policy.Spec.TargetRefs) == 0 && len(policy.Spec.TargetSelectors) == 0 {
-		return nil
+		return RemoteOidcOwner{}, false
 	}
 
 	if policy.Spec.Traffic == nil {
-		return nil
+		return RemoteOidcOwner{}, false
 	}
 
-	owner, ok := PolicyOIDCLookupOwner(policy.Namespace, policy.Name, policy.Spec.Traffic.OIDC)
-	if !ok {
-		return nil
-	}
-
-	return []RemoteOidcOwner{
-		owner,
-	}
+	return PolicyOIDCLookupOwner(policy.Namespace, policy.Name, policy.Spec.Traffic.OIDC)
 }
 
 func PolicyOIDCLookupOwner(namespace, name string, oidcCfg *agentgateway.OIDC) (RemoteOidcOwner, bool) {
@@ -65,7 +56,7 @@ func PolicyOIDCLookupOwner(namespace, name string, oidcCfg *agentgateway.OIDC) (
 	}
 
 	return RemoteOidcOwner{
-		ID: OidcOwnerID{
+		ID: remotecache.OwnerID{
 			Kind:      remotecache.OwnerKindPolicy,
 			Namespace: namespace,
 			Name:      name,

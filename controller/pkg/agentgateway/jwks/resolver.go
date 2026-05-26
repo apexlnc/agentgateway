@@ -5,11 +5,12 @@ import (
 
 	"istio.io/istio/pkg/kube/krt"
 
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
 type ResolvedJwksRequest struct {
-	OwnerID JwksOwnerID
+	OwnerID remotecache.OwnerID
 	Target  remotehttp.ResolvedTarget
 	TTL     time.Duration
 }

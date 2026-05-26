@@ -10,7 +10,6 @@ import (
 
 	"github.com/agentgateway/agentgateway/api"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
-	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil/krttest"
 )
 
 func TestNormalizedOIDCScopesAlwaysIncludesOpenidFirst(t *testing.T) {
@@ -204,7 +203,7 @@ func TestResolveOIDCClientSecret(t *testing.T) {
 		if secret != nil {
 			secrets = []*corev1.Secret{secret}
 		}
-		secretsCol := krt.NewStaticCollection(krttest.AlwaysSynced{}, secrets)
+		secretsCol := krt.NewStaticCollection(nil, secrets)
 		return PolicyCtx{
 			Krt:         krt.TestingDummyContext{},
 			Collections: &AgwCollections{Secrets: secretsCol},

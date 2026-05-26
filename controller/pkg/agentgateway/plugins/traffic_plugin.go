@@ -31,7 +31,7 @@ import (
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/shared"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
-	oidcpkg "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/utils"
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
@@ -91,7 +91,7 @@ func ConvertStatusCollection[T controllers.Object, S any](
 }
 
 // NewAgentPlugin creates a new AgentgatewayPolicy plugin
-func NewAgentPlugin(agw *AgwCollections, resolver remotehttp.Resolver, jwksLookup jwks.Lookup, oidcLookup oidcpkg.Lookup) AgwPlugin {
+func NewAgentPlugin(agw *AgwCollections, resolver remotehttp.Resolver, jwksLookup jwks.Lookup, oidcLookup oidc.Lookup) AgwPlugin {
 	return AgwPlugin{
 		ContributesPolicies: map[schema.GroupKind]PolicyPlugin{
 			wellknown.AgentgatewayPolicyGVK.GroupKind(): {
@@ -100,7 +100,7 @@ func NewAgentPlugin(agw *AgwCollections, resolver remotehttp.Resolver, jwksLooku
 						*gwv1.PolicyStatus,
 						[]AgwPolicy,
 					) {
-					return TranslateAgentgatewayPolicy(krtctx, policyCR, agw, input.References, resolver, jwksLookup, oidcLookup)
+						return TranslateAgentgatewayPolicy(krtctx, policyCR, agw, input.References, resolver, jwksLookup, oidcLookup)
 					}, agw.KrtOpts.ToOptions("policies/Agentgateway")...)
 					return ConvertStatusCollection(policyStatusCol, agw.KrtOpts.ToOptions, "policies/Agentgateway"), policyCol
 				},
@@ -120,7 +120,7 @@ type PolicyCtx struct {
 	References  ReferenceIndex
 	Resolver    remotehttp.Resolver
 	JWKSLookup  jwks.Lookup
-	OidcLookup  oidcpkg.Lookup
+	OidcLookup  oidc.Lookup
 }
 
 type ResolvedTarget struct {
@@ -138,7 +138,7 @@ func TranslateAgentgatewayPolicy(
 	references ReferenceIndex,
 	resolver remotehttp.Resolver,
 	jwksLookup jwks.Lookup,
-	oidcLookup oidcpkg.Lookup,
+	oidcLookup oidc.Lookup,
 ) (*gwv1.PolicyStatus, []AgwPolicy) {
 	var agwPolicies []AgwPolicy
 	existingStatus := policy.Status.DeepCopy()
@@ -528,7 +528,7 @@ func translateTrafficPolicyToAgw(
 	}
 
 	if traffic.OIDC != nil {
-		appendPolicy("oidc")(processOIDCPolicy(ctx, traffic.OIDC, policyName, policyName.String(), ctx.OidcLookup))
+		appendPolicy("oidc")(processOIDCPolicy(ctx, traffic.OIDC, traffic.Phase, policyName, policyName.String(), ctx.OidcLookup))
 	}
 
 	if traffic.APIKeyAuthentication != nil {

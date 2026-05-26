@@ -672,7 +672,7 @@ const (
 	PolicyPhasePostRouting PolicyPhase = "PostRouting"
 )
 
-// +kubebuilder:validation:IfThenOnlyFields:if="has(self.phase) && self.phase == 'PreRouting'",fields=phase;transformation;extProc;extAuth;jwtAuthentication;basicAuthentication;apiKeyAuthentication,message="phase PreRouting only supports extAuth, transformation, extProc, jwtAuthentication, basicAuthentication, and apiKeyAuthentication"
+// +kubebuilder:validation:IfThenOnlyFields:if="has(self.phase) && self.phase == 'PreRouting'",fields=phase;transformation;extProc;extAuth;jwtAuthentication;basicAuthentication;apiKeyAuthentication;oidc,message="phase PreRouting only supports extAuth, transformation, extProc, jwtAuthentication, basicAuthentication, apiKeyAuthentication, and oidc"
 // +kubebuilder:validation:XValidation:rule="!(has(self.oidc) && has(self.jwtAuthentication))",message="oidc and jwtAuthentication are mutually exclusive"
 type Traffic struct {
 	// The phase to apply the traffic policy to. If the phase is `PreRouting`,
@@ -917,6 +917,17 @@ type OIDC struct {
 	// +optional
 	// +kubebuilder:validation:Enum=ClientSecretBasic;ClientSecretPost;None
 	TokenEndpointAuthMethod *string `json:"tokenEndpointAuthMethod,omitempty"`
+
+	// `backendRef` optionally references the IdP backend used to fetch the
+	// OIDC discovery document and JWKS. Supported types are `Service` and
+	// static `Backend`. An `AgentgatewayPolicy` containing backend TLS config
+	// can then be attached to the `Service` or `Backend` to set TLS options
+	// for connections to the IdP — for example to trust a private CA, set an
+	// SNI override, or (in development) skip verification of a self-signed
+	// cert. When omitted, the controller fetches directly from the
+	// `issuerURL` using the system CA trust store.
+	// +optional
+	BackendRef *gwv1.BackendObjectReference `json:"backendRef,omitempty"`
 }
 
 // +k8s:enum

@@ -264,7 +264,7 @@ func (s *setup) Start(ctx context.Context) error {
 	}
 
 	// build jwks store if it doesn't exist
-	if !runnablesRegistry.Contains(jwks.RunnableName) {
+	if !runnablesRegistry.Contains(jwks.DefaultJwksStorePrefix) {
 		if err := buildJwksStore(ctx, mgr, s.APIClient, agwCollections, persistedJWKS, resolver); err != nil {
 			return fmt.Errorf("error creating jwks store %w", err)
 		}
@@ -272,7 +272,7 @@ func (s *setup) Start(ctx context.Context) error {
 
 	// build oidc store
 	if !runnablesRegistry.Contains(oidc.DefaultStorePrefix) {
-		if err := buildOidcStore(ctx, mgr, s.APIClient, agwCollections, persistedOIDC); err != nil {
+		if err := buildOidcStore(ctx, mgr, s.APIClient, agwCollections, persistedOIDC, resolver); err != nil {
 			return fmt.Errorf("error creating oidc store %w", err)
 		}
 	}
@@ -453,7 +453,12 @@ func buildJwksStore(
 		return err
 	}
 
-	jwksStoreCMCtrl := jwks.NewConfigMapController(apiClient, jwks.DefaultJwksStorePrefix, namespaces.GetPodNamespace(), jwksStore, persistedJWKS)
+	jwksStoreCMCtrl := jwks.NewConfigMapController(jwks.ConfigMapControllerOptions{
+		APIClient:           apiClient,
+		DeploymentNamespace: namespaces.GetPodNamespace(),
+		Store:               jwksStore,
+		PersistedEntries:    persistedJWKS,
+	})
 	jwksStoreCMCtrl.Init(ctx)
 	if err := mgr.Add(jwksStoreCMCtrl); err != nil {
 		return err
@@ -468,9 +473,11 @@ func buildOidcStore(
 	apiClient apiclient.Client,
 	agwCollections *agwplugins.AgwCollections,
 	persistedOIDC *oidc.PersistedEntries,
+	resolver remotehttp.Resolver,
 ) error {
 	oidcCollections := oidc.NewCollections(oidc.CollectionInputs{
 		AgentgatewayPolicies: agwCollections.AgentgatewayPolicies,
+		Resolver:             oidc.NewResolver(resolver),
 		KrtOpts:              agwCollections.KrtOpts,
 	})
 
@@ -481,7 +488,6 @@ func buildOidcStore(
 
 	oidcStoreCMCtrl := oidc.NewConfigMapController(oidc.ConfigMapControllerOptions{
 		APIClient:           apiClient,
-		StorePrefix:         oidc.DefaultStorePrefix,
 		DeploymentNamespace: namespaces.GetPodNamespace(),
 		Store:               oidcStore,
 		PersistedEntries:    persistedOIDC,

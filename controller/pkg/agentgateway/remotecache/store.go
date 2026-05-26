@@ -16,27 +16,15 @@ var FetchKeyIndexCollectionOption = krt.WithIndexCollectionFromString(func(s str
 	return remotehttp.FetchKey(s)
 })
 
-// Hydrator loads previously persisted Results so the cache can serve last-known-good data on startup.
-type Hydrator[R Result] interface {
-	LoadAll(ctx context.Context) ([]R, error)
-}
-
 type StoreOptions[S Request, R Result] struct {
 	Fetcher  *Fetcher[S, R]
 	Requests krt.Collection[S]
 	Logger   *slog.Logger
 
-	// Hydrator, if non-nil, populates Fetcher.Results before request
-	// registration. LoadAll errors are logged but never block Start so a
-	// transient persistence failure cannot stall fresh fetches.
-	Hydrator Hydrator[R]
-
-	// RetireOnRequestKeyChange, if true, calls Fetcher.Retire when a request's
-	// key changes. This stops fetching the old key but preserves its result so
-	// existing traffic can continue using last-known-good data until a newer
-	// fetch for the same resource (under a different key) or an orphan sweep
-	// removes it.
-	RetireOnRequestKeyChange bool
+	// Hydrate, if non-nil, populates Fetcher.Results before request
+	// registration. Errors are logged but never block Start so a transient
+	// persistence failure cannot stall fresh fetches.
+	Hydrate func(ctx context.Context) ([]R, error)
 }
 
 // Store bridges KRT-derived shared fetch requests to a runtime Fetcher.
@@ -57,8 +45,8 @@ func NewStore[S Request, R Result](opts StoreOptions[S, R]) *Store[S, R] {
 func (s *Store[S, R]) Start(ctx context.Context) error {
 	s.opts.Logger.Info("starting remote fetch store")
 
-	if s.opts.Hydrator != nil {
-		stored, err := s.opts.Hydrator.LoadAll(ctx)
+	if s.opts.Hydrate != nil {
+		stored, err := s.opts.Hydrate(ctx)
 		if err != nil {
 			s.opts.Logger.Error("error hydrating remote results from persistence", "error", err)
 		}
@@ -71,8 +59,11 @@ func (s *Store[S, R]) Start(ctx context.Context) error {
 			if event.New == nil {
 				return
 			}
-			// Special handling for request key changes (retire old)
-			if s.opts.RetireOnRequestKeyChange && event.Event == controllers.EventUpdate && event.Old != nil {
+			// On request-key change, retire the old key. This stops fetching it
+			// but preserves its result so existing traffic can continue using
+			// last-known-good data until a newer fetch for the same resource
+			// (under a different key) or an orphan sweep removes it.
+			if event.Event == controllers.EventUpdate && event.Old != nil {
 				oldKey := (*event.Old).RemoteRequestKey()
 				newKey := (*event.New).RemoteRequestKey()
 				if oldKey != newKey {

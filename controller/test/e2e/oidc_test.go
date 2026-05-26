@@ -26,7 +26,7 @@ import (
 
 const (
 	oidcSystemNamespace = "agentgateway-system"
-	oidcIssuerURL       = "https://dummy-idp.default:8443"
+	oidcIssuerURL       = "https://dummy-idp.default.svc.cluster.local:8443"
 	oidcClientID        = "mcp_gi3APARn2_uHv2oxfJJqq2yZBDV4OyNo"
 )
 

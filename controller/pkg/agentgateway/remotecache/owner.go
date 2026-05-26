@@ -13,8 +13,7 @@ const (
 )
 
 // OwnerID identifies the Kubernetes resource that triggers a remote fetch.
-// Subsystems alias this type (oidc.OidcOwnerID, jwks.JwksOwnerID) for
-// readable local naming without duplicating the layout.
+// Both the OIDC and JWKS subsystems use this type directly.
 type OwnerID struct {
 	Kind      OwnerKind
 	Namespace string

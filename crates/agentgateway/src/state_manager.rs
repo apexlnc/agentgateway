@@ -37,18 +37,11 @@ impl StateManager {
 		awaiting_ready: tokio::sync::watch::Sender<()>,
 	) -> anyhow::Result<Self> {
 		let xds = &config.xds;
-		let stores = Stores::new(config.ipv6_enabled, config.threading_mode);
-		match crate::http::oidc::OidcCookieEncoder::from_session_encoder(&config.session_encoder) {
-			Ok(encoder) => {
-				stores.binds.write().set_oidc_cookie_encoder(encoder);
-			},
-			Err(err) => {
-				tracing::warn!(
-					error = %err,
-					"OIDC cookie encoder not installed; OIDC policies will be rejected at xDS decode until SESSION_KEY is configured"
-				);
-			},
-		}
+		let stores = Stores::new(
+			config.ipv6_enabled,
+			config.threading_mode,
+			config.oidc_cookie_encoder(),
+		);
 		let xds_client = if let Some(addr) = &xds.address {
 			let connector = control::grpc_connector(
 				client.clone(),
@@ -406,7 +399,7 @@ mod tests {
 	}
 
 	fn test_stores() -> Stores {
-		Stores::new(false, crate::ThreadingMode::Multithreaded)
+		Stores::new(false, crate::ThreadingMode::Multithreaded, None)
 	}
 
 	fn wds_identity(name: &str, ns: &str, cluster: &str) -> SelfIdentitySource {

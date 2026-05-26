@@ -36,9 +36,9 @@ func TestFetcherFetchesAndValidatesDiscovery(t *testing.T) {
 	defer backend.Close()
 	backendURL = backend.URL
 
-	cache := NewCache()
-	f := NewFetcher(cache)
-	f.Driver.(*OidcDriver).DefaultClient = backend.Client()
+	results := NewFetchedResults()
+	f, driver := NewFetcher(results)
+	driver.DefaultClient = backend.Client()
 
 	source := SharedOidcRequest{
 		RequestKey:     remotehttp.FetchTarget{URL: backendURL}.Key(),
@@ -51,11 +51,11 @@ func TestFetcherFetchesAndValidatesDiscovery(t *testing.T) {
 	go f.MaybeFetch(ctx)
 
 	require.Eventually(t, func() bool {
-		_, ok := cache.Get(source.RequestKey)
+		_, ok := results.Get(source.RequestKey)
 		return ok
 	}, time.Second, 10*time.Millisecond)
 
-	provider, _ := cache.Get(source.RequestKey)
+	provider, _ := results.Get(source.RequestKey)
 	require.Equal(t, backendURL, provider.IssuerURL)
 	require.Equal(t, jwksJSON, provider.JwksInline)
 }
