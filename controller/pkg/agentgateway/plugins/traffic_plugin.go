@@ -55,6 +55,7 @@ const (
 	retryPolicySuffix              = ":retry"
 	timeoutPolicySuffix            = ":timeout"
 	jwtPolicySuffix                = ":jwt"
+	oidcPolicySuffix               = ":oidc"
 	basicAuthPolicySuffix          = ":basicauth"
 	apiKeyPolicySuffix             = ":apikeyauth" //nolint:gosec
 	directResponseSuffix           = ":direct-response"
@@ -528,6 +529,10 @@ func translateTrafficPolicyToAgw(
 	}
 
 	if traffic.OIDC != nil {
+		// OIDC keys off policyName (not basePolicyName) so Policy.Key seeds a
+		// stable PolicyId — that PolicyId is hashed into OIDC cookie names on
+		// the dataplane. Switching to basePolicyName would invalidate every
+		// active session cookie on rollout.
 		appendPolicy("oidc")(processOIDCPolicy(ctx, traffic.OIDC, traffic.Phase, policyName, policyName.String(), ctx.OidcLookup))
 	}
 

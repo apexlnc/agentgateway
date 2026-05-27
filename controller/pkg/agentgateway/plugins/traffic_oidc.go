@@ -33,15 +33,15 @@ func processOIDCPolicy(
 	ctx PolicyCtx,
 	oidcCfg *agentgateway.OIDC,
 	policyPhase *agentgateway.PolicyPhase,
-	policyNSN types.NamespacedName,
-	policyKey string,
+	policy types.NamespacedName,
+	basePolicyName string,
 	oidcLookup oidc.Lookup,
 ) (*api.Policy, error) {
 	if oidcLookup == nil {
 		return nil, fmt.Errorf("oidc lookup is not configured")
 	}
 
-	owner, ok := oidc.PolicyOIDCLookupOwner(policyNSN.Namespace, policyNSN.Name, oidcCfg)
+	owner, ok := oidc.PolicyOIDCLookupOwner(policy.Namespace, policy.Name, oidcCfg)
 	if !ok {
 		return nil, fmt.Errorf("could not derive OIDC owner for policy")
 	}
@@ -57,7 +57,7 @@ func processOIDCPolicy(
 
 	var clientSecret string
 	if oidcCfg.ClientSecret != nil {
-		secret, err := resolveOIDCClientSecret(ctx, policyNSN.Namespace, oidcCfg)
+		secret, err := resolveOIDCClientSecret(ctx, policy.Namespace, oidcCfg)
 		if err != nil {
 			return nil, err
 		}
@@ -71,15 +71,16 @@ func processOIDCPolicy(
 
 	var providerBackend *api.BackendReference
 	if oidcCfg.BackendRef != nil {
-		providerBackend, err = buildBackendRef(ctx, *oidcCfg.BackendRef, policyNSN.Namespace)
+		providerBackend, err = buildBackendRef(ctx, *oidcCfg.BackendRef, policy.Namespace)
 		if err != nil {
 			return nil, fmt.Errorf("oidc backendRef: %w", err)
 		}
 	}
 
-	key := policyKey + ":oidc"
+	key := basePolicyName + oidcPolicySuffix
 	return &api.Policy{
-		Key: key,
+		Key:  key,
+		Name: TypedResourceFromName(wellknown.AgentgatewayPolicyGVK.Kind, policy),
 		Kind: &api.Policy_Traffic{
 			Traffic: &api.TrafficPolicySpec{
 				Phase: phase(policyPhase),
