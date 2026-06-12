@@ -2,9 +2,8 @@ package remotecache
 
 import "fmt"
 
-// OwnerKind identifies which Kubernetes resource kind triggered a remote
-// fetch. It is the leading segment of OwnerID.String() so persisted owner
-// strings stay unambiguous across kinds.
+// OwnerKind identifies the resource kind that triggered a remote fetch;
+// leads OwnerID.String() so persisted owner strings stay unambiguous.
 type OwnerKind string
 
 const (
@@ -13,8 +12,7 @@ const (
 )
 
 // OwnerID identifies the Kubernetes resource that triggers a remote fetch.
-// Subsystems alias this type (oidc.OidcOwnerID, jwks.JwksOwnerID) for
-// readable local naming without duplicating the layout.
+// Both the OIDC and JWKS subsystems use this type directly.
 type OwnerID struct {
 	Kind      OwnerKind
 	Namespace string

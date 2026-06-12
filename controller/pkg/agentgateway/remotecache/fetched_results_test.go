@@ -1,6 +1,7 @@
 package remotecache
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -9,7 +10,6 @@ import (
 	"istio.io/istio/pkg/kube/krt"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil/krttest"
 )
 
 type fetchedResultsTestResult struct {
@@ -20,13 +20,24 @@ type fetchedResultsTestResult struct {
 
 func (r fetchedResultsTestResult) RemoteRequestKey() remotehttp.FetchKey { return r.Key }
 func (r fetchedResultsTestResult) RemoteFetchedAt() time.Time            { return r.FetchedAt }
+func (r fetchedResultsTestResult) ResourceName() string                  { return string(r.Key) }
+func (r fetchedResultsTestResult) Equals(other fetchedResultsTestResult) bool {
+	return r.Key == other.Key &&
+		r.FetchedAt.Equal(other.FetchedAt) &&
+		r.Value == other.Value
+}
 
 func TestFetchedResultsPublishesKRTEvents(t *testing.T) {
 	results := NewFetchedResults[fetchedResultsTestResult]()
 
-	var batches [][]krt.Event[FetchedRecord[fetchedResultsTestResult]]
-	registration := results.Collection().RegisterBatch(func(events []krt.Event[FetchedRecord[fetchedResultsTestResult]]) {
+	var (
+		mu      sync.Mutex
+		batches [][]krt.Event[fetchedResultsTestResult]
+	)
+	registration := results.Collection().RegisterBatch(func(events []krt.Event[fetchedResultsTestResult]) {
+		mu.Lock()
 		batches = append(batches, events)
+		mu.Unlock()
 	}, false)
 	defer registration.UnregisterHandler()
 	require.True(t, registration.WaitUntilSynced(t.Context().Done()))
@@ -35,13 +46,15 @@ func TestFetchedResultsPublishesKRTEvents(t *testing.T) {
 	results.Put(result)
 
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		mu.Lock()
+		defer mu.Unlock()
 		if assert.NotEmpty(c, batches) {
 			latest := batches[len(batches)-1]
 			assert.Len(c, latest, 1)
 			assert.NotNil(c, latest[0].New)
-			assert.Equal(c, result, latest[0].New.Payload)
+			assert.Equal(c, result, *latest[0].New)
 		}
-	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+	}, eventuallyTimeout, eventuallyPoll)
 
 	got, ok := results.Get("issuer-a")
 	require.True(t, ok)
@@ -63,8 +76,8 @@ func TestFetchedResultsDeleteObjectsRemovesMatchingRecords(t *testing.T) {
 	results.Put(fetchedResultsTestResult{Key: "keep", FetchedAt: time.Unix(100, 0), Value: "keep"})
 	results.Put(fetchedResultsTestResult{Key: "delete", FetchedAt: time.Unix(100, 0), Value: "delete"})
 
-	results.DeleteObjects(func(record FetchedRecord[fetchedResultsTestResult]) bool {
-		return record.Payload.Value == "delete"
+	results.DeleteObjects(func(record fetchedResultsTestResult) bool {
+		return record.Value == "delete"
 	})
 
 	_, ok := results.Get("delete")

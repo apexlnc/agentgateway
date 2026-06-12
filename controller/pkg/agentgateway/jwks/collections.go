@@ -8,11 +8,8 @@ import (
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
-
-var collectionsLogger = logging.New("jwks_collections")
 
 type CollectionInputs struct {
 	AgentgatewayPolicies krt.Collection[*agentgateway.AgentgatewayPolicy]
@@ -28,16 +25,16 @@ type Collections struct {
 func NewCollections(inputs CollectionInputs) Collections {
 	policyOwners := krt.NewManyCollection(inputs.AgentgatewayPolicies, func(kctx krt.HandlerContext, policy *agentgateway.AgentgatewayPolicy) []RemoteJwksOwner {
 		return OwnersFromPolicy(policy)
-	}, inputs.KrtOpts.ToOptions("jwks/PolicyOwners")...)
+	}, inputs.KrtOpts.ToOptions("jwks/policyOwners")...)
 	backendOwners := krt.NewManyCollection(inputs.Backends, func(kctx krt.HandlerContext, backend *agentgateway.AgentgatewayBackend) []RemoteJwksOwner {
 		return OwnersFromBackend(backend)
-	}, inputs.KrtOpts.ToOptions("jwks/BackendOwners")...)
-	owners := krt.JoinCollection([]krt.Collection[RemoteJwksOwner]{policyOwners, backendOwners}, inputs.KrtOpts.ToOptions("jwks/Owners")...)
+	}, inputs.KrtOpts.ToOptions("jwks/backendOwners")...)
+	owners := krt.JoinCollection([]krt.Collection[RemoteJwksOwner]{policyOwners, backendOwners}, inputs.KrtOpts.ToOptions("jwks/owners")...)
 
-	primarySources := krt.NewCollection(owners, func(kctx krt.HandlerContext, owner RemoteJwksOwner) *JwksSource {
+	sources := krt.NewCollection(owners, func(kctx krt.HandlerContext, owner RemoteJwksOwner) *JwksSource {
 		resolved, err := inputs.Resolver.ResolveOwner(kctx, owner)
 		if err != nil {
-			collectionsLogger.Error("error generating remote jwks url or tls options", "error", err, "owner", owner.ID.String())
+			logger.Error("error generating remote jwks url or tls options", "error", err, "owner", owner.ID.String())
 			return nil
 		}
 
@@ -49,13 +46,13 @@ func NewCollections(inputs CollectionInputs) Collections {
 			ProxyTLSConfig: resolved.Target.ProxyTLSConfig,
 			TTL:            resolved.TTL,
 		}
-	}, inputs.KrtOpts.ToOptions("jwks/Sources")...)
+	}, inputs.KrtOpts.ToOptions("jwks/sources")...)
 
 	sharedRequests := remotecache.NewSharedRequestCollection(
-		primarySources,
+		sources,
 		"jwks-request-key",
-		"jwks/RequestGroups",
-		"jwks/Requests",
+		"jwks/requestGroups",
+		"jwks/sharedRequests",
 		inputs.KrtOpts,
 		func(source JwksSource) remotehttp.FetchKey { return source.RequestKey },
 		collapseJwksSources,

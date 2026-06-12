@@ -9,10 +9,7 @@ import (
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 )
-
-var fetcherLogger = logging.New("oidc_fetcher")
 
 type discoveryDocument struct {
 	Issuer                            string   `json:"issuer"`
@@ -26,9 +23,11 @@ type discoveryDocument struct {
 // Fetched providers are published as KRT-visible Results.
 type Fetcher = remotecache.Fetcher[SharedOidcRequest, DiscoveredProvider]
 
-func NewFetcher(results *OidcResults) *Fetcher {
+// NewFetcher constructs a Fetcher backed by a fresh OidcDriver. The driver is
+// returned so tests can swap its DefaultClient.
+func NewFetcher(results *OidcResults) (*Fetcher, *OidcDriver) {
 	driver := &OidcDriver{DefaultClient: remotehttp.NewDefaultFetchClient()}
-	return remotecache.NewFetcher[SharedOidcRequest, DiscoveredProvider](results, driver, fetcherLogger)
+	return remotecache.NewFetcher[SharedOidcRequest, DiscoveredProvider](results, driver.Fetch, logger), driver
 }
 
 type OidcDriver struct {
@@ -36,9 +35,18 @@ type OidcDriver struct {
 }
 
 func (d *OidcDriver) Fetch(ctx context.Context, source SharedOidcRequest) (DiscoveredProvider, error) {
-	fetcherLogger.InfoContext(ctx, "fetching oidc discovery document", "url", source.Target.URL)
+	// PickClient honors per-source TLSConfig + ProxyTLSConfig populated by the
+	// resolver from an attached AgentgatewayPolicy. The same client is used for
+	// JWKS so backendRef TLS/proxy settings apply consistently across discovery
+	// and key material fetches.
+	client, err := remotehttp.PickClient(d.DefaultClient, source.Target, source.TLSConfig, source.ProxyTLSConfig)
+	if err != nil {
+		return DiscoveredProvider{}, err
+	}
 
-	doc, err := remotehttp.FetchJSON[discoveryDocument](ctx, d.DefaultClient, source.Target, "OIDC discovery")
+	logger.InfoContext(ctx, "fetching oidc discovery document", "url", source.Target.URL)
+
+	doc, err := remotehttp.FetchJSON[discoveryDocument](ctx, client, source.Target, "OIDC discovery")
 	if err != nil {
 		return DiscoveredProvider{}, err
 	}
@@ -46,8 +54,13 @@ func (d *OidcDriver) Fetch(ctx context.Context, source SharedOidcRequest) (Disco
 		return DiscoveredProvider{}, err
 	}
 
-	fetcherLogger.InfoContext(ctx, "fetching oidc jwks", "url", doc.JwksURI)
-	jwksBody, _, err := remotehttp.FetchJWKSBody(ctx, d.DefaultClient, doc.JwksURI, "OIDC JWKS")
+	jwksURL, err := oidcJWKSFetchURL(source, doc.JwksURI)
+	if err != nil {
+		return DiscoveredProvider{}, err
+	}
+
+	logger.InfoContext(ctx, "fetching oidc jwks", "url", doc.JwksURI, "fetchURL", jwksURL)
+	jwksBody, _, err := remotehttp.FetchJWKSBody(ctx, client, jwksURL, "OIDC JWKS")
 	if err != nil {
 		return DiscoveredProvider{}, fmt.Errorf("failed to fetch OIDC JWKS from %s: %w", doc.JwksURI, err)
 	}
@@ -64,6 +77,32 @@ func (d *OidcDriver) Fetch(ctx context.Context, source SharedOidcRequest) (Disco
 	}, nil
 }
 
+func oidcJWKSFetchURL(source SharedOidcRequest, jwksURI string) (string, error) {
+	if source.ProviderBackendTarget == nil {
+		return jwksURI, nil
+	}
+
+	targetURL, err := url.Parse(source.ProviderBackendTarget.URL)
+	if err != nil {
+		return "", fmt.Errorf("invalid resolved OIDC provider backend URL %q: %w", source.ProviderBackendTarget.URL, err)
+	}
+	if !targetURL.IsAbs() || targetURL.Host == "" {
+		return "", fmt.Errorf("resolved OIDC provider backend URL %q must be absolute with a host", source.ProviderBackendTarget.URL)
+	}
+	jwksURL, err := url.Parse(jwksURI)
+	if err != nil {
+		return "", fmt.Errorf("invalid OIDC jwks_uri %q: %w", jwksURI, err)
+	}
+
+	rewritten := *targetURL
+	rewritten.Path = jwksURL.Path
+	rewritten.RawPath = jwksURL.RawPath
+	rewritten.RawQuery = jwksURL.RawQuery
+	rewritten.ForceQuery = jwksURL.ForceQuery
+	rewritten.Fragment = ""
+	return rewritten.String(), nil
+}
+
 func validateDiscoveryDocument(doc discoveryDocument, expectedIssuer string) error {
 	if doc.Issuer != expectedIssuer {
 		return fmt.Errorf("issuer mismatch: discovery document reports %q but expected %q", doc.Issuer, expectedIssuer)
@@ -74,13 +113,13 @@ func validateDiscoveryDocument(doc discoveryDocument, expectedIssuer string) err
 	if err := validateAbsoluteHTTPSURL(doc.TokenEndpoint, "token_endpoint"); err != nil {
 		return err
 	}
-	if err := ValidateJwksURI(doc.JwksURI); err != nil {
+	if err := validateJwksURI(doc.JwksURI); err != nil {
 		return err
 	}
 	return nil
 }
 
-func ValidateJwksURI(raw string) error {
+func validateJwksURI(raw string) error {
 	return validateAbsoluteHTTPSURL(raw, "jwks_uri")
 }
 

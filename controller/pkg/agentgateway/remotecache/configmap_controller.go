@@ -21,79 +21,61 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
 )
 
-func newCMRateLimiter() workqueue.TypedRateLimiter[any] {
-	return workqueue.NewTypedMaxOfRateLimiter(
-		workqueue.NewTypedItemExponentialFailureRateLimiter[any](500*time.Millisecond, 10*time.Second),
-		// 10 qps, 100 bucket size.
-		&workqueue.TypedBucketRateLimiter[any]{Limiter: rate.NewLimiter(rate.Limit(10), 100)},
-	)
+// rateLimiter: per-item exponential backoff under a 10qps/100-burst token bucket.
+var rateLimiter = workqueue.NewTypedMaxOfRateLimiter(
+	workqueue.NewTypedItemExponentialFailureRateLimiter[any](500*time.Millisecond, 10*time.Second),
+	&workqueue.TypedBucketRateLimiter[any]{Limiter: rate.NewLimiter(rate.Limit(10), 100)},
+)
+
+// ConfigMapController syncs the fetched-results KRT collection into ConfigMaps.
+type ConfigMapController[T Result[T]] struct {
+	apiClient           apiclient.Client
+	cmClient            kclient.Client[*corev1.ConfigMap]
+	eventQueue          controllers.Queue
+	results             krt.Collection[T]
+	entries             *Entries[T]
+	deploymentNamespace string
+	controllerName      string
+	reconcileCtx        context.Context
+	waitForSync         []cache.InformerSynced
+	logger              *slog.Logger
 }
 
-// PersistedRecord is the metadata a Reconcile pass needs from a persisted entry.
-type PersistedRecord interface {
-	RequestKey() (remotehttp.FetchKey, bool)
-	GetName() string
+type ConfigMapControllerOptions[T Result[T]] struct {
+	APIClient           apiclient.Client
+	DeploymentNamespace string
+	ControllerName      string
+	Results             krt.Collection[T]
+	Entries             *Entries[T]
+	StoreHasSynced      func() bool
+	Logger              *slog.Logger
 }
 
-// PersistenceController syncs the fetched-results KRT collection into ConfigMaps.
-type PersistenceController[T Result, E PersistedRecord] struct {
-	apiClient            apiclient.Client
-	cmClient             kclient.Client[*corev1.ConfigMap]
-	eventQueue           controllers.Queue
-	results              krt.Collection[FetchedRecord[T]]
-	entries              krt.Collection[E]
-	entriesForRequestKey func(remotehttp.FetchKey) []E
-	serialize            func(*corev1.ConfigMap, T) error
-	nameFunc             func(remotehttp.FetchKey) string
-	labelFunc            func() map[string]string
-	labelSelector        func() string
-	rateLimiter          workqueue.TypedRateLimiter[any]
-	deploymentNamespace  string
-	controllerName       string
-	reconcileCtx         context.Context
-	waitForSync          []cache.InformerSynced
-	logger               *slog.Logger
-}
-
-type PersistenceControllerOptions[T Result, E PersistedRecord] struct {
-	ApiClient            apiclient.Client
-	DeploymentNamespace  string
-	ControllerName       string
-	Results              krt.Collection[FetchedRecord[T]]
-	Entries              krt.Collection[E]
-	EntriesForRequestKey func(remotehttp.FetchKey) []E
-	Serialize            func(*corev1.ConfigMap, T) error
-	NameFunc             func(remotehttp.FetchKey) string
-	LabelFunc            func() map[string]string
-	LabelSelector        func() string
-	StoreHasSynced       func() bool
-	Logger               *slog.Logger
-}
-
-func NewPersistenceController[T Result, E PersistedRecord](opts PersistenceControllerOptions[T, E]) *PersistenceController[T, E] {
-	return &PersistenceController[T, E]{
-		apiClient:            opts.ApiClient,
-		deploymentNamespace:  opts.DeploymentNamespace,
-		controllerName:       opts.ControllerName,
-		results:              opts.Results,
-		entries:              opts.Entries,
-		entriesForRequestKey: opts.EntriesForRequestKey,
-		serialize:            opts.Serialize,
-		nameFunc:             opts.NameFunc,
-		labelFunc:            opts.LabelFunc,
-		labelSelector:        opts.LabelSelector,
-		rateLimiter:          newCMRateLimiter(),
-		waitForSync:          []cache.InformerSynced{opts.Results.HasSynced, opts.Entries.HasSynced, opts.StoreHasSynced},
-		logger:               opts.Logger,
+func NewConfigMapController[T Result[T]](opts ConfigMapControllerOptions[T]) *ConfigMapController[T] {
+	if opts.Entries == nil {
+		panic("remotecache.ConfigMapController: Entries is required")
+	}
+	return &ConfigMapController[T]{
+		apiClient:           opts.APIClient,
+		deploymentNamespace: opts.DeploymentNamespace,
+		controllerName:      opts.ControllerName,
+		results:             opts.Results,
+		entries:             opts.Entries,
+		waitForSync:         []cache.InformerSynced{opts.Results.HasSynced, opts.Entries.Collection().HasSynced, opts.StoreHasSynced},
+		logger:              opts.Logger,
 	}
 }
 
-func (c *PersistenceController[T, E]) Init(ctx context.Context) {
+// Init builds the informer + workqueue. Must be called at setup time, BEFORE
+// the parent kube.Client's informers start — kclient.NewFiltered registers a
+// new informer that joins the shared factory, and late-added informers never
+// sync.
+func (c *ConfigMapController[T]) Init() {
 	c.cmClient = kclient.NewFiltered[*corev1.ConfigMap](c.apiClient,
 		kclient.Filter{
 			ObjectFilter:  c.apiClient.ObjectFilter(),
 			Namespace:     c.deploymentNamespace,
-			LabelSelector: c.labelSelector(),
+			LabelSelector: c.entries.LabelSelector(),
 		})
 
 	c.waitForSync = append([]cache.InformerSynced{c.cmClient.HasSynced}, c.waitForSync...)
@@ -102,11 +84,11 @@ func (c *PersistenceController[T, E]) Init(ctx context.Context) {
 		c.controllerName,
 		controllers.WithReconciler(c.Reconcile),
 		controllers.WithMaxAttempts(math.MaxInt),
-		controllers.WithRateLimiter(c.rateLimiter),
+		controllers.WithRateLimiter(rateLimiter),
 	)
 }
 
-func (c *PersistenceController[T, E]) Start(ctx context.Context) error {
+func (c *ConfigMapController[T]) Start(ctx context.Context) error {
 	c.reconcileCtx = ctx
 
 	c.logger.Info("waiting for cache to sync")
@@ -116,19 +98,19 @@ func (c *PersistenceController[T, E]) Start(ctx context.Context) error {
 		c.waitForSync...,
 	)
 
-	c.logger.Info("starting persistence controller")
-	resultRegistration := c.results.RegisterBatch(func(events []krt.Event[FetchedRecord[T]]) {
+	c.logger.Info("starting ConfigMap controller")
+	resultRegistration := c.results.RegisterBatch(func(events []krt.Event[T]) {
 		for _, event := range events {
-			c.enqueueFetchedRecord(event.Old)
-			c.enqueueFetchedRecord(event.New)
+			c.enqueueFetchedResult(event.Old)
+			c.enqueueFetchedResult(event.New)
 		}
 	}, true)
 	defer resultRegistration.UnregisterHandler()
 
-	persistedRegistration := c.entries.RegisterBatch(func(events []krt.Event[E]) {
+	persistedRegistration := c.entries.Collection().RegisterBatch(func(events []krt.Event[Entry[T]]) {
 		for _, event := range events {
-			c.enqueuePersistedRecord(event.Old)
-			c.enqueuePersistedRecord(event.New)
+			c.enqueuePersistedEntry(event.Old)
+			c.enqueuePersistedEntry(event.New)
 		}
 	}, true)
 	defer persistedRegistration.UnregisterHandler()
@@ -146,12 +128,12 @@ func (c *PersistenceController[T, E]) Start(ctx context.Context) error {
 	return nil
 }
 
-func (c *PersistenceController[T, E]) Reconcile(req types.NamespacedName) error {
+func (c *ConfigMapController[T]) Reconcile(req types.NamespacedName) error {
 	c.logger.Debug("syncing fetched result to ConfigMap(s)")
 	ctx := c.reconcileCtx
 	requestKey := remotehttp.FetchKey(req.Name)
 
-	existingEntries := c.entriesForRequestKey(requestKey)
+	existingEntries := c.entries.EntriesForRequestKey(requestKey)
 	existingNames := make([]string, 0, len(existingEntries))
 	for _, entry := range existingEntries {
 		existingNames = append(existingNames, entry.GetName())
@@ -162,8 +144,8 @@ func (c *PersistenceController[T, E]) Reconcile(req types.NamespacedName) error 
 	exists := result != nil
 	var canonicalName string
 	if exists {
-		record = result.Payload
-		canonicalName = c.nameFunc(requestKey)
+		record = *result
+		canonicalName = c.entries.ConfigMapName(requestKey)
 	}
 
 	plan := PlanConfigMapSync(existingNames, canonicalName, exists)
@@ -183,45 +165,51 @@ func (c *PersistenceController[T, E]) Reconcile(req types.NamespacedName) error 
 	return nil
 }
 
-func (c *PersistenceController[T, E]) NeedLeaderElection() bool {
+func (c *ConfigMapController[T]) NeedLeaderElection() bool {
 	return true
 }
 
-func (c *PersistenceController[T, E]) newStoreConfigMap(name string) *corev1.ConfigMap {
+// RunnableName satisfies common.NamedRunnable so setup's dedup check catches
+// duplicate per-codec controller registrations.
+func (c *ConfigMapController[T]) RunnableName() string {
+	return c.controllerName
+}
+
+func (c *ConfigMapController[T]) newStoreConfigMap(name string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: c.deploymentNamespace,
-			Labels:    c.labelFunc(),
+			Labels:    c.entries.ConfigMapLabels(),
 		},
 		Data: make(map[string]string),
 	}
 }
 
-func (c *PersistenceController[T, E]) enqueueFetchedRecord(record *FetchedRecord[T]) {
+func (c *ConfigMapController[T]) enqueueFetchedResult(record *T) {
 	if record == nil {
 		return
 	}
-	c.eventQueue.Add(RequestQueueKey(c.deploymentNamespace, record.Payload.RemoteRequestKey()))
+	c.eventQueue.Add(RequestQueueKey(c.deploymentNamespace, (*record).RemoteRequestKey()))
 }
 
-func (c *PersistenceController[T, E]) enqueuePersistedRecord(entry *E) {
+func (c *ConfigMapController[T]) enqueuePersistedEntry(entry *Entry[T]) {
 	if entry == nil {
 		return
 	}
-	requestKey, ok := (*entry).RequestKey()
+	requestKey, ok := entry.RequestKey()
 	if !ok {
 		return
 	}
 	c.eventQueue.Add(RequestQueueKey(c.deploymentNamespace, requestKey))
 }
 
-func (c *PersistenceController[T, E]) upsertConfigMap(ctx context.Context, namespace, name string, record T) error {
-	existingCm := c.cmClient.Get(name, namespace)
-	if existingCm == nil {
+func (c *ConfigMapController[T]) upsertConfigMap(ctx context.Context, namespace, name string, record T) error {
+	existingCmRaw := c.cmClient.Get(name, namespace)
+	if existingCmRaw == nil {
 		c.logger.Debug("creating ConfigMap", "name", name)
 		newCm := c.newStoreConfigMap(name)
-		if err := c.serialize(newCm, record); err != nil {
+		if err := c.entries.Serialize(newCm, record); err != nil {
 			c.logger.Error("error setting record in ConfigMap", "error", err)
 			return err
 		}
@@ -233,8 +221,9 @@ func (c *PersistenceController[T, E]) upsertConfigMap(ctx context.Context, names
 		return nil
 	}
 
+	existingCm := existingCmRaw.DeepCopy()
 	c.logger.Debug("updating ConfigMap", "name", name)
-	if err := c.serialize(existingCm, record); err != nil {
+	if err := c.entries.Serialize(existingCm, record); err != nil {
 		c.logger.Error("error setting record in ConfigMap", "error", err)
 		return err
 	}
@@ -251,11 +240,7 @@ type SyncPlan struct {
 }
 
 // PlanConfigMapSync chooses upsert/delete names from existing names and the canonical name.
-func PlanConfigMapSync(
-	existingNames []string,
-	canonicalName string,
-	exists bool,
-) SyncPlan {
+func PlanConfigMapSync(existingNames []string, canonicalName string, exists bool) SyncPlan {
 	if exists {
 		deleteNames := make([]string, 0, len(existingNames))
 		for _, name := range existingNames {

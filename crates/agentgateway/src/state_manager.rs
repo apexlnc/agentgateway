@@ -40,18 +40,9 @@ impl StateManager {
 		let stores = Stores::new_with_dynamic_ca_cert_cache(
 			config.ipv6_enabled,
 			config.threading_mode,
+			config.oidc_cookie_encoder(),
 			config.dynamic_ca_cert_cache.clone(),
 		);
-		match crate::http::oidc::OidcCookieEncoder::from_session_encoder(&config.session_encoder) {
-			Some(encoder) => {
-				stores.binds.write().set_oidc_cookie_encoder(encoder);
-			},
-			None => {
-				tracing::warn!(
-					"OIDC cookie encoder not installed; OIDC policies will be rejected at xDS decode until SESSION_KEY is configured"
-				);
-			},
-		}
 		let xds_client = if let Some(addr) = &xds.address {
 			let connector = control::grpc_connector(
 				client.clone(),
@@ -413,7 +404,7 @@ mod tests {
 	}
 
 	fn test_stores() -> Stores {
-		Stores::new(false, crate::ThreadingMode::Multithreaded)
+		Stores::new(false, crate::ThreadingMode::Multithreaded, None)
 	}
 
 	fn wds_identity(name: &str, ns: &str, cluster: &str) -> SelfIdentitySource {

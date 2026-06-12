@@ -2,9 +2,11 @@ package jwks
 
 import (
 	"crypto/tls"
-	"reflect"
 	"time"
 
+	"istio.io/istio/pkg/kube/krt"
+
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
@@ -18,10 +20,26 @@ type Keyset struct {
 func (k Keyset) RemoteRequestKey() remotehttp.FetchKey { return k.RequestKey }
 func (k Keyset) RemoteFetchedAt() time.Time            { return k.FetchedAt }
 
+func (k Keyset) ResourceName() string { return string(k.RequestKey) }
+
+// Equals: field-by-field avoids reflect.DeepEqual on every KRT diff;
+// FetchedAt uses time.Equal to ignore monotonic clock state.
+func (k Keyset) Equals(other Keyset) bool {
+	return k.RequestKey == other.RequestKey &&
+		k.URL == other.URL &&
+		k.FetchedAt.Equal(other.FetchedAt) &&
+		k.JwksJSON == other.JwksJSON
+}
+
+var (
+	_ krt.ResourceNamer   = Keyset{}
+	_ krt.Equaler[Keyset] = Keyset{}
+)
+
 // JwksSource is a per-owner JWKS request before KRT collapses equivalent
 // sources onto a shared request key.
 type JwksSource struct {
-	OwnerKey   OwnerKey
+	OwnerKey   remotecache.OwnerID
 	RequestKey remotehttp.FetchKey
 	Target     remotehttp.FetchTarget
 	// +noKrtEquals
@@ -41,7 +59,7 @@ func (s JwksSource) ResourceName() string {
 func (s JwksSource) Equals(other JwksSource) bool {
 	return s.OwnerKey == other.OwnerKey &&
 		s.RequestKey == other.RequestKey &&
-		reflect.DeepEqual(s.Target, other.Target) &&
+		s.Target.Equals(other.Target) &&
 		s.TTL == other.TTL
 }
 
@@ -71,6 +89,6 @@ func (r SharedJwksRequest) RemoteTTL() time.Duration {
 
 func (r SharedJwksRequest) Equals(other SharedJwksRequest) bool {
 	return r.RequestKey == other.RequestKey &&
-		reflect.DeepEqual(r.Target, other.Target) &&
+		r.Target.Equals(other.Target) &&
 		r.TTL == other.TTL
 }

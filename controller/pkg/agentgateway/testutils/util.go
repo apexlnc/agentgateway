@@ -220,7 +220,7 @@ func BuildMockPolicyContext(t test.Failer, inputs []any) plugins.PolicyCtx {
 		References:  plugins.BuildReferenceIndex(nil, nil, plugins.DefaultReferenceTypes(collections)),
 		Resolver:    resolver,
 		JWKSLookup:  jwks.NewLookup(jwks.NewPersistedEntriesFromCollection(collections.ConfigMaps, jwks.DefaultJwksStorePrefix, collections.SystemNamespace), jwks.NewResolver(resolver)),
-		OidcLookup:  oidc.NewLookup(persistedOIDC),
+		OidcLookup:  oidc.NewLookup(persistedOIDC, oidc.NewResolver(resolver)),
 
 		CredentialResolver: plugins.DefaultCredentialResolverFactory(collections),
 	}
@@ -274,5 +274,5 @@ func BuildJWKSLookup(collections *plugins.AgwCollections) jwks.Lookup {
 
 func BuildOIDCLookup(collections *plugins.AgwCollections) oidc.Lookup {
 	persistedOIDC := oidc.NewPersistedEntriesFromCollection(collections.ConfigMaps, oidc.DefaultStorePrefix, collections.SystemNamespace)
-	return oidc.NewLookup(persistedOIDC)
+	return oidc.NewLookup(persistedOIDC, oidc.NewResolver(BuildRemoteHTTPResolver(collections)))
 }

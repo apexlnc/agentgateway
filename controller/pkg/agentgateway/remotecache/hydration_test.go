@@ -5,59 +5,59 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
-type stubEntry struct {
-	fetchedAt time.Time
-	name      string
-	namespace string
+type hydrationTestResult struct {
+	Key       remotehttp.FetchKey
+	FetchedAt time.Time
 }
 
-func (e stubEntry) GetFetchedAt() time.Time { return e.fetchedAt }
-func (e stubEntry) GetName() string         { return e.name }
-func (e stubEntry) GetNamespace() string    { return e.namespace }
-
-var _ Hydratable = stubEntry{}
-
-func TestBestHydrationEntryPrefersLatestFetchedAt(t *testing.T) {
-	old := stubEntry{fetchedAt: time.Unix(1000, 0), name: "old"}
-	fresh := stubEntry{fetchedAt: time.Unix(2000, 0), name: "fresh"}
-
-	best := BestHydrationEntry([]stubEntry{old, fresh}, "canonical")
-	require.Equal(t, "fresh", best.name)
-
-	best = BestHydrationEntry([]stubEntry{fresh, old}, "canonical")
-	require.Equal(t, "fresh", best.name)
+func (r hydrationTestResult) RemoteRequestKey() remotehttp.FetchKey { return r.Key }
+func (r hydrationTestResult) RemoteFetchedAt() time.Time            { return r.FetchedAt }
+func (r hydrationTestResult) Equals(other hydrationTestResult) bool {
+	return r.Key == other.Key && r.FetchedAt.Equal(other.FetchedAt)
 }
 
-func TestBestHydrationEntryPrefersCanonicalOnTie(t *testing.T) {
-	at := time.Unix(1000, 0)
-	other := stubEntry{fetchedAt: at, name: "other"}
-	canonical := stubEntry{fetchedAt: at, name: "canonical"}
-
-	best := BestHydrationEntry([]stubEntry{other, canonical}, "canonical")
-	require.Equal(t, "canonical", best.name)
+func entry(name string) Entry[hydrationTestResult] {
+	return entryWithFetchedAt(name, time.Time{})
 }
 
-func TestBestHydrationEntryLexicographicNameTieBreak(t *testing.T) {
-	at := time.Unix(1000, 0)
-	z := stubEntry{fetchedAt: at, name: "z"}
-	a := stubEntry{fetchedAt: at, name: "a"}
-
-	best := BestHydrationEntry([]stubEntry{z, a}, "canonical")
-	require.Equal(t, "a", best.name)
+func entryWithFetchedAt(name string, fetchedAt time.Time) Entry[hydrationTestResult] {
+	payload := hydrationTestResult{Key: "test-key", FetchedAt: fetchedAt}
+	return Entry[hydrationTestResult]{
+		NamespacedName: types.NamespacedName{Name: name},
+		Payload:        &payload,
+	}
 }
 
-func TestBestHydrationEntryNamespaceTieBreak(t *testing.T) {
-	at := time.Unix(1000, 0)
-	nsB := stubEntry{fetchedAt: at, name: "same", namespace: "b"}
-	nsA := stubEntry{fetchedAt: at, name: "same", namespace: "a"}
+func TestBestHydrationEntryPrefersCanonical(t *testing.T) {
+	other := entry("other")
+	canonical := entry("canonical")
 
-	best := BestHydrationEntry([]stubEntry{nsB, nsA}, "canonical")
-	require.Equal(t, "a", best.namespace)
+	best := BestHydrationEntry([]Entry[hydrationTestResult]{other, canonical}, "canonical")
+	require.Equal(t, "canonical", best.GetName())
+}
+
+func TestBestHydrationEntryPrefersFreshestPayload(t *testing.T) {
+	canonical := entryWithFetchedAt("canonical", time.Unix(100, 0).UTC())
+	other := entryWithFetchedAt("other", time.Unix(200, 0).UTC())
+
+	best := BestHydrationEntry([]Entry[hydrationTestResult]{canonical, other}, "canonical")
+	require.Equal(t, "other", best.GetName())
+}
+
+func TestBestHydrationEntryFallsBackToFirstWhenNoCanonical(t *testing.T) {
+	first := entry("a")
+	second := entry("b")
+
+	best := BestHydrationEntry([]Entry[hydrationTestResult]{first, second}, "canonical")
+	require.Equal(t, "a", best.GetName())
 }
 
 func TestBestHydrationEntryEmptyReturnsZero(t *testing.T) {
-	best := BestHydrationEntry[stubEntry](nil, "canonical")
-	require.Equal(t, stubEntry{}, best)
+	best := BestHydrationEntry[hydrationTestResult](nil, "canonical")
+	require.Equal(t, Entry[hydrationTestResult]{}, best)
 }

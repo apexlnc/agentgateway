@@ -10,29 +10,40 @@ import (
 )
 
 const DefaultJwksStorePrefix = "jwks-store"
-const RunnableName = "jwks-store"
 
-var storeLogger = logging.New("jwks_store")
+var logger = logging.New("agentgateway/jwks")
+
+// JwksResults stores fetched JWKS keysets as a KRT-visible collection.
+type JwksResults = remotecache.FetchedResults[Keyset]
+
+// NewFetchedResults constructs an empty JWKS fetched-result collection.
+func NewFetchedResults() *JwksResults {
+	return remotecache.NewFetchedResults[Keyset]()
+}
 
 // Store bridges KRT-derived shared JWKS requests to the runtime that fetches,
 // persists, and serves keysets to translation.
 type Store struct {
 	*remotecache.Store[SharedJwksRequest, Keyset]
+	// Driver is the JWKS HTTP fetch driver. Exposed so tests can swap its
+	// DefaultClient for an offline transport.
+	Driver  *JwksDriver
 	results *JwksResults
 }
 
 func NewStore(requests krt.Collection[SharedJwksRequest], persistedEntries *PersistedEntries, storePrefix string) *Store {
 	results := NewFetchedResults()
+	fetcher, driver := NewFetcher(results)
 	innerStore := remotecache.NewStore(remotecache.StoreOptions[SharedJwksRequest, Keyset]{
-		Fetcher:                  NewFetcher(results),
-		Requests:                 requests,
-		Logger:                   storeLogger,
-		Hydrator:                 persistedEntries,
-		RetireOnRequestKeyChange: true,
+		Fetcher:  fetcher,
+		Requests: requests,
+		Logger:   logger,
+		Hydrate:  persistedEntries.LoadAll,
 	})
 
 	return &Store{
 		Store:   innerStore,
+		Driver:  driver,
 		results: results,
 	}
 }
@@ -46,7 +57,7 @@ func (s *Store) FetchedResults() *JwksResults {
 }
 
 func (s *Store) RunnableName() string {
-	return RunnableName
+	return DefaultJwksStorePrefix
 }
 
 var _ common.NamedRunnable = &Store{}

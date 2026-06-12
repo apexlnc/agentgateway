@@ -8,7 +8,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
-	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
@@ -17,7 +16,7 @@ import (
 // holds the serialized DiscoveredProvider.
 const oidcConfigMapKey = "oidc-store"
 
-// observabilityName names the OIDC persisted-cache subsystem in KRT collection
+// observabilityName names the OIDC persisted ConfigMap view in KRT collection
 // metric labels. Stable across releases for metric continuity.
 const observabilityName = "persisted_oidc"
 
@@ -28,14 +27,12 @@ type PersistedEntry = remotecache.Entry[DiscoveredProvider]
 // PersistedEntries is the OIDC-specific KRT view over OIDC-store ConfigMaps.
 type PersistedEntries = remotecache.Entries[DiscoveredProvider]
 
-// OidcCodec returns the persistedcache codec for OIDC discovered providers.
+// OidcCodec returns the persisted ConfigMap codec for OIDC discovered providers.
 func OidcCodec() remotecache.Codec[DiscoveredProvider] {
 	return remotecache.Codec[DiscoveredProvider]{
-		DataKey:           oidcConfigMapKey,
 		ObservabilityName: observabilityName,
 		Parse:             ProviderFromConfigMap,
 		Serialize:         SetProviderInConfigMap,
-		Normalize:         normalizePersistedProvider,
 	}
 }
 
@@ -83,26 +80,34 @@ func SetProviderInConfigMap(cm *corev1.ConfigMap, provider DiscoveredProvider) e
 	return nil
 }
 
-// normalizePersistedProvider repairs a parsed DiscoveredProvider's RequestKey
-// when its derivation logic has evolved. If the ConfigMap's name matches the
-// canonical hash for the issuer-derived request key, rewrite RequestKey to
-// the current derivation so lookups by it succeed after upgrade.
-func normalizePersistedProvider(storePrefix, configMapName string, provider DiscoveredProvider) DiscoveredProvider {
-	if provider.IssuerURL == "" {
-		return provider
+// ConfigMapController synchronizes fetched OIDC providers to persisted ConfigMaps.
+type ConfigMapController struct {
+	*remotecache.ConfigMapController[DiscoveredProvider]
+}
+
+// ConfigMapControllerOptions configures NewConfigMapController.
+type ConfigMapControllerOptions struct {
+	APIClient           apiclient.Client
+	DeploymentNamespace string
+	Store               *Store
+	PersistedEntries    *PersistedEntries
+}
+
+func NewConfigMapController(opts ConfigMapControllerOptions) *ConfigMapController {
+	cmLogger := logger.With("subcomponent", "configmap_controller")
+	cmLogger.Info("creating oidc store configmap controller")
+
+	controllerOpts := remotecache.ConfigMapControllerOptions[DiscoveredProvider]{
+		APIClient:           opts.APIClient,
+		DeploymentNamespace: opts.DeploymentNamespace,
+		ControllerName:      "OidcStoreConfigMapController",
+		Results:             opts.Store.FetchedResults().Collection(),
+		Entries:             opts.PersistedEntries,
+		StoreHasSynced:      opts.Store.HasSynced,
+		Logger:              cmLogger,
 	}
 
-	// Derive the canonical request key for this issuer. OIDC supports only
-	// direct issuer discovery URLs at present.
-	discoveryURL, err := OidcDiscoveryURL(provider.IssuerURL)
-	if err != nil {
-		return provider
+	return &ConfigMapController{
+		ConfigMapController: remotecache.NewConfigMapController(controllerOpts),
 	}
-	requestKeyFromURL := oidcRequestKey(remotehttp.FetchTarget{URL: discoveryURL}, provider.IssuerURL)
-
-	if remotecache.ConfigMapName(storePrefix, requestKeyFromURL) == configMapName {
-		provider.RequestKey = requestKeyFromURL
-	}
-
-	return provider
 }

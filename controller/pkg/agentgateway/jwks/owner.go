@@ -2,21 +2,16 @@ package jwks
 
 import (
 	"fmt"
-	"reflect"
 	"time"
+
+	"k8s.io/apimachinery/pkg/api/equality"
 
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 )
 
-// JwksOwnerID is the JWKS-flavored alias for remotecache.OwnerID; identical
-// layout, package-local name for readability at JWKS call sites.
-type JwksOwnerID = remotecache.OwnerID
-
-type OwnerKey = JwksOwnerID
-
 type RemoteJwksOwner struct {
-	ID               JwksOwnerID
+	ID               remotecache.OwnerID
 	DefaultNamespace string
 	Remote           agentgateway.RemoteJWKS
 	TTL              time.Duration
@@ -30,11 +25,11 @@ func (o RemoteJwksOwner) Equals(other RemoteJwksOwner) bool {
 	return o.ID == other.ID &&
 		o.DefaultNamespace == other.DefaultNamespace &&
 		o.TTL == other.TTL &&
-		reflect.DeepEqual(o.Remote, other.Remote)
+		equality.Semantic.DeepEqual(o.Remote, other.Remote)
 }
 
 func OwnersFromPolicy(policy *agentgateway.AgentgatewayPolicy) []RemoteJwksOwner {
-	if len(policy.Spec.TargetRefs) == 0 {
+	if len(policy.Spec.TargetRefs) == 0 && len(policy.Spec.TargetSelectors) == 0 {
 		return nil
 	}
 
@@ -79,7 +74,7 @@ func PolicyJWTProviderLookupOwner(namespace, name string, providerIndex int, pro
 	}
 
 	return RemoteJwksOwner{
-		ID: JwksOwnerID{
+		ID: remotecache.OwnerID{
 			Kind:      remotecache.OwnerKindPolicy,
 			Namespace: namespace,
 			Name:      name,
@@ -93,7 +88,7 @@ func PolicyJWTProviderLookupOwner(namespace, name string, providerIndex int, pro
 
 func PolicyBackendMCPAuthenticationLookupOwner(namespace, name string, remote agentgateway.RemoteJWKS) RemoteJwksOwner {
 	return RemoteJwksOwner{
-		ID: JwksOwnerID{
+		ID: remotecache.OwnerID{
 			Kind:      remotecache.OwnerKindPolicy,
 			Namespace: namespace,
 			Name:      name,
@@ -107,7 +102,7 @@ func PolicyBackendMCPAuthenticationLookupOwner(namespace, name string, remote ag
 
 func backendMCPAuthenticationOwner(namespace, name string, remote agentgateway.RemoteJWKS) RemoteJwksOwner {
 	return RemoteJwksOwner{
-		ID: JwksOwnerID{
+		ID: remotecache.OwnerID{
 			Kind:      remotecache.OwnerKindBackend,
 			Namespace: namespace,
 			Name:      name,

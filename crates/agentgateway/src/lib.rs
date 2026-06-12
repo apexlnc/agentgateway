@@ -555,15 +555,18 @@ impl Config {
 			port: Some(port),
 		}
 	}
+	/// Cookie encoder for OIDC policies. `Some` iff `session_encoder` is AES-backed.
+	pub(crate) fn oidc_cookie_encoder(&self) -> Option<crate::http::oidc::OidcCookieEncoder> {
+		crate::http::oidc::OidcCookieEncoder::from_session_encoder(&self.session_encoder)
+	}
+
 	pub fn as_policy_context(
 		&self,
 		policy_key: impl std::fmt::Display,
 	) -> Option<local::AttachedPolicyContext> {
 		Some(local::AttachedPolicyContext {
 			oidc_policy_id: crate::http::oidc::PolicyId::policy(&policy_key),
-			oidc_cookie_encoder: crate::http::oidc::OidcCookieEncoder::from_session_encoder(
-				&self.session_encoder,
-			),
+			oidc_cookie_encoder: self.oidc_cookie_encoder(),
 		})
 	}
 }

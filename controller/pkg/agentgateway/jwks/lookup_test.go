@@ -14,23 +14,18 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
+type alwaysSynced struct{}
+
+func (alwaysSynced) WaitUntilSynced(stop <-chan struct{}) bool { return true }
+func (alwaysSynced) HasSynced() bool                           { return true }
+
 type staticLookupResolver struct {
 	resolved *ResolvedJwksRequest
 	err      error
 }
 
-type alwaysSynced struct{}
-
 func (r staticLookupResolver) ResolveOwner(krt.HandlerContext, RemoteJwksOwner) (*ResolvedJwksRequest, error) {
 	return r.resolved, r.err
-}
-
-func (alwaysSynced) WaitUntilSynced(stop <-chan struct{}) bool {
-	return true
-}
-
-func (alwaysSynced) HasSynced() bool {
-	return true
 }
 
 func TestLookupFailsClosedWhenKeysetIsMissing(t *testing.T) {

@@ -144,6 +144,7 @@ fn test_policy() -> OidcPolicy {
 		redirect_uri: test_redirect_uri(),
 		session,
 		scopes,
+		provider_backend: None,
 	}
 }
 
@@ -542,6 +543,7 @@ async fn token_endpoint_auth_modes_shape_exchange_requests() {
 			"https://app.example.com/oauth/callback",
 			"code",
 			&SecretString::new("verifier".into()),
+			None,
 		)
 		.await
 		.expect(name);
@@ -616,6 +618,7 @@ async fn public_client_token_exchange_sends_no_client_secret() {
 		"https://app.example.com/oauth/callback",
 		"code",
 		&SecretString::new("verifier".into()),
+		None,
 	)
 	.await
 	.expect("public-client token exchange");
@@ -691,6 +694,7 @@ async fn token_exchange_bounds_transport_failures() {
 					"https://app.example.com/oauth/callback",
 					"code",
 					&SecretString::new("verifier".into()),
+					None,
 					Duration::from_millis(50),
 				)
 				.await
@@ -703,6 +707,7 @@ async fn token_exchange_bounds_transport_failures() {
 					"https://app.example.com/oauth/callback",
 					"code",
 					&SecretString::new("verifier".into()),
+					None,
 				)
 				.await
 			},
@@ -1335,6 +1340,7 @@ fn compile_test_oidc_from_xds(
 		credentials,
 		test_redirect_uri(),
 		vec!["profile".into(), "email".into()],
+		None,
 	)?
 	.compile(encoder)
 }

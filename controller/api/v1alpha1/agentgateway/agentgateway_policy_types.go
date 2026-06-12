@@ -755,7 +755,7 @@ const (
 	PolicyPhasePostRouting PolicyPhase = "PostRouting"
 )
 
-// +kubebuilder:validation:IfThenOnlyFields:if="has(self.phase) && self.phase == 'PreRouting'",fields=phase;authorization;transformation;extProc;extAuth;jwtAuthentication;basicAuthentication;apiKeyAuthentication;cors,message="phase PreRouting only supports extAuth, authorization, transformation, extProc, jwtAuthentication, basicAuthentication, apiKeyAuthentication and cors"
+// +kubebuilder:validation:IfThenOnlyFields:if="has(self.phase) && self.phase == 'PreRouting'",fields=phase;authorization;transformation;extProc;extAuth;jwtAuthentication;basicAuthentication;apiKeyAuthentication;cors;oidc,message="phase PreRouting only supports extAuth, authorization, transformation, extProc, jwtAuthentication, basicAuthentication, apiKeyAuthentication, cors and oidc"
 // +kubebuilder:validation:XValidation:rule="!(has(self.oidc) && has(self.jwtAuthentication))",message="oidc and jwtAuthentication are mutually exclusive"
 type Traffic struct {
 	// The phase to apply the traffic policy to. If the phase is `PreRouting`,
@@ -979,9 +979,10 @@ type OIDC struct {
 	ClientSecret *corev1.LocalObjectReference `json:"clientSecret,omitempty"`
 
 	// The callback URL registered with the IdP. Must be an absolute http(s)
-	// URL with no query or fragment. The `http` scheme is permitted only for
-	// `localhost` development; production deployments must use `https`.
-	// +kubebuilder:validation:Pattern=`^https?://[^?#\s]+$`
+	// URL with an explicit non-root path and no query or fragment. The `http`
+	// scheme is permitted only for `localhost` development; production
+	// deployments must use `https`.
+	// +kubebuilder:validation:Pattern=`^https?://[^/?#\s]+/[^?#\s]+$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=2048
 	// +required
@@ -1001,6 +1002,17 @@ type OIDC struct {
 	// +optional
 	// +kubebuilder:validation:Enum=ClientSecretBasic;ClientSecretPost;None
 	TokenEndpointAuthMethod *string `json:"tokenEndpointAuthMethod,omitempty"`
+
+	// Configures the transport the controller uses for OIDC discovery and
+	// JWKS fetches; the issuer identity is unchanged (`issuerURL` is still
+	// matched against the discovery `issuer` claim). Applies only to
+	// controller-side fetches, not to the dataplane's token endpoint
+	// exchange. Supported referents: `Service`, static `Backend`. Attach an
+	// `AgentgatewayPolicy` with backend TLS config to set a private CA, SNI
+	// override, or `insecureSkipVerify`. Omit to fetch from `issuerURL` using
+	// system CA trust.
+	// +optional
+	BackendRef *gwv1.BackendObjectReference `json:"backendRef,omitempty"`
 }
 
 // +k8s:enum

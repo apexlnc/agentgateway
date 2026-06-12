@@ -1,0 +1,112 @@
+package oidc
+
+import (
+	"errors"
+	"fmt"
+	"net/url"
+	"time"
+
+	"istio.io/istio/pkg/kube/krt"
+
+	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
+)
+
+const discoveryPath = "/.well-known/openid-configuration"
+
+var errResolverNotInitialized = errors.New("remote http resolver hasn't been initialized")
+
+// ResolvedOidcRequest is the input to the shared-request collapse step.
+// Target may differ from ExpectedIssuer when BackendRef is used.
+type ResolvedOidcRequest struct {
+	OwnerID               remotecache.OwnerID
+	Target                remotehttp.ResolvedTarget
+	ExpectedIssuer        string
+	ProviderBackendTarget *remotehttp.FetchTarget
+	TTL                   time.Duration
+}
+
+// Resolver translates a RemoteOidcOwner into a resolved fetch request:
+// discovery URL plus any per-backend TLS from an attached policy.
+type Resolver interface {
+	ResolveOwner(krtctx krt.HandlerContext, owner RemoteOidcOwner) (*ResolvedOidcRequest, error)
+}
+
+type defaultResolver struct {
+	endpointResolver remotehttp.Resolver
+}
+
+// NewResolver wires OIDC to the shared remotehttp.Resolver so BackendRef OIDC
+// fetches reuse the same backend-to-TLS plumbing as JWKS and MCP auth.
+func NewResolver(endpointResolver remotehttp.Resolver) Resolver {
+	return &defaultResolver{endpointResolver: endpointResolver}
+}
+
+func (r *defaultResolver) ResolveOwner(krtctx krt.HandlerContext, owner RemoteOidcOwner) (*ResolvedOidcRequest, error) {
+	discURL, err := discoveryURL(owner.Config.IssuerURL)
+	if err != nil {
+		return nil, err
+	}
+
+	endpoint, err := resolveEndpoint(krtctx, r.endpointResolver, owner.ID.Name, owner.DefaultNamespace, owner.Config, discURL)
+	if err != nil {
+		return nil, err
+	}
+
+	resolved := &ResolvedOidcRequest{
+		OwnerID:        owner.ID,
+		Target:         *endpoint,
+		ExpectedIssuer: owner.Config.IssuerURL,
+		TTL:            owner.TTL,
+	}
+	if owner.Config.BackendRef != nil {
+		target := endpoint.Target
+		resolved.ProviderBackendTarget = &target
+	}
+	return resolved, nil
+}
+
+// discoveryURL constructs the OIDC well-known configuration endpoint URL from the given issuer URL.
+// It verifies that the issuer URL is a valid, absolute HTTPS URL with no query or fragment.
+func discoveryURL(issuerURL string) (string, error) {
+	u, err := url.Parse(issuerURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid issuer URL %q: %w", issuerURL, err)
+	}
+	if !u.IsAbs() || u.Scheme != "https" || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("issuer URL must be absolute HTTPS with a host and no query or fragment")
+	}
+	return u.JoinPath(".well-known", "openid-configuration").String(), nil
+}
+
+// resolveEndpoint produces the transport target for an OIDC discovery fetch.
+// Without BackendRef: hit discoveryURL with the system trust store.
+// With BackendRef: resolver derives URL + TLS from the referenced Service or
+// Backend, applying attached AgentgatewayPolicy backend TLS settings.
+func resolveEndpoint(
+	krtctx krt.HandlerContext,
+	resolver remotehttp.Resolver,
+	policyName, defaultNS string,
+	cfg agentgateway.OIDC,
+	discURL string,
+) (*remotehttp.ResolvedTarget, error) {
+	if cfg.BackendRef == nil {
+		target := remotehttp.FetchTarget{URL: discURL}
+		return &remotehttp.ResolvedTarget{
+			Key:    target.Key(),
+			Target: target,
+		}, nil
+	}
+
+	if resolver == nil {
+		return nil, errResolverNotInitialized
+	}
+
+	return resolver.Resolve(krtctx, remotehttp.ResolveInput{
+		ParentName:       policyName,
+		DefaultNamespace: defaultNS,
+		BackendRef:       *cfg.BackendRef,
+		Path:             discoveryPath,
+	})
+}

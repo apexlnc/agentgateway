@@ -33,7 +33,6 @@ type PersistedEntries = remotecache.Entries[Keyset]
 // legacy single-entry-map fallback that JwksFromConfigMap implements.
 func JwksCodec() remotecache.Codec[Keyset] {
 	return remotecache.Codec[Keyset]{
-		DataKey:           configMapKey,
 		ObservabilityName: observabilityName,
 		Parse:             JwksFromConfigMap,
 		Serialize:         SetJwksInConfigMap,
@@ -52,26 +51,27 @@ func NewPersistedEntriesFromCollection(configMaps krt.Collection[*corev1.ConfigM
 }
 
 // JwksFromConfigMap parses a Keyset from a ConfigMap, falling back to the
-// pre-#1618 single-entry map format when present so old persisted state still
-// hydrates after upgrade.
+// pre-#1175 single-entry map format so old persisted state still hydrates.
 func JwksFromConfigMap(cm *corev1.ConfigMap) (Keyset, error) {
 	jwksStore := cm.Data[configMapKey]
 
 	var keyset Keyset
-	if err := json.Unmarshal([]byte(jwksStore), &keyset); err == nil && keyset.RequestKey != "" {
+	currentErr := json.Unmarshal([]byte(jwksStore), &keyset)
+	if currentErr == nil && keyset.RequestKey != "" {
 		return keyset, nil
 	}
 
 	// Fallback to legacy map format
 	var legacy map[string]string
-	if err := json.Unmarshal([]byte(jwksStore), &legacy); err != nil {
-		return Keyset{}, fmt.Errorf("failed to unmarshal current and legacy formats: %w", err)
+	if legacyErr := json.Unmarshal([]byte(jwksStore), &legacy); legacyErr != nil {
+		return Keyset{}, fmt.Errorf("failed to unmarshal current and legacy formats: %w", errors.Join(currentErr, legacyErr))
 	}
 	if len(legacy) != 1 {
 		return Keyset{}, fmt.Errorf("unexpected legacy jwks payload: expected 1 entry, got %d", len(legacy))
 	}
 
 	for uri, jwksJSON := range legacy {
+		// Zero FetchedAt forces refresh-and-rewrite on first reconcile to migrate legacy entries.
 		return Keyset{
 			RequestKey: remotehttp.FetchTarget{URL: uri}.Key(),
 			URL:        uri,
@@ -96,3 +96,34 @@ func SetJwksInConfigMap(cm *corev1.ConfigMap, keyset Keyset) error {
 	return nil
 }
 
+// ConfigMapController synchronizes fetched JWKS keysets to persisted ConfigMaps.
+type ConfigMapController struct {
+	*remotecache.ConfigMapController[Keyset]
+}
+
+// ConfigMapControllerOptions configures NewConfigMapController.
+type ConfigMapControllerOptions struct {
+	APIClient           apiclient.Client
+	DeploymentNamespace string
+	Store               *Store
+	PersistedEntries    *PersistedEntries
+}
+
+func NewConfigMapController(opts ConfigMapControllerOptions) *ConfigMapController {
+	cmLogger := logger.With("subcomponent", "configmap_controller")
+	cmLogger.Info("creating jwks store configmap controller")
+
+	controllerOpts := remotecache.ConfigMapControllerOptions[Keyset]{
+		APIClient:           opts.APIClient,
+		DeploymentNamespace: opts.DeploymentNamespace,
+		ControllerName:      "JwksStoreConfigMapController",
+		Results:             opts.Store.FetchedResults().Collection(),
+		Entries:             opts.PersistedEntries,
+		StoreHasSynced:      opts.Store.HasSynced,
+		Logger:              cmLogger,
+	}
+
+	return &ConfigMapController{
+		ConfigMapController: remotecache.NewConfigMapController(controllerOpts),
+	}
+}

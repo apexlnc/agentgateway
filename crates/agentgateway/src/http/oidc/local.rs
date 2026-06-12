@@ -15,6 +15,7 @@ use crate::http::oauth::{
 };
 use crate::schema_de;
 use crate::serdes::FileInlineOrRemote;
+use crate::types::agent::SimpleBackendReference;
 
 #[derive(Debug, serde::Deserialize)]
 struct OidcDiscoveryDocument {
@@ -36,6 +37,7 @@ pub(crate) struct PreparedOidcPolicy {
 	credentials: ClientCredentials,
 	redirect_uri: RedirectUri,
 	scopes: Vec<String>,
+	provider_backend: Option<SimpleBackendReference>,
 }
 
 /// Decode a fully-resolved OIDC policy delivered over xDS into typed config.
@@ -52,6 +54,7 @@ pub(crate) fn resolve_oidc_policy_from_xds(
 	credentials: ClientCredentials,
 	redirect_uri: RedirectUri,
 	scopes: Vec<String>,
+	provider_backend: Option<SimpleBackendReference>,
 ) -> Result<PreparedOidcPolicy, Error> {
 	let id_token_jwks: JwkSet = serde_json::from_str(jwks_inline).map_err(|e| {
 		Error::Config(format!(
@@ -68,6 +71,7 @@ pub(crate) fn resolve_oidc_policy_from_xds(
 		credentials,
 		redirect_uri,
 		scopes,
+		provider_backend,
 	})
 }
 
@@ -238,6 +242,7 @@ impl LocalOidcConfig {
 			credentials,
 			redirect_uri,
 			scopes,
+			provider_backend: None,
 		})
 	}
 }
@@ -330,6 +335,7 @@ impl PreparedOidcPolicy {
 			credentials,
 			redirect_uri,
 			scopes,
+			provider_backend,
 		} = self;
 		let scopes = normalize_scopes(scopes);
 		let id_token_validator = crate::http::jwt::Provider::from_jwks(
@@ -368,6 +374,7 @@ impl PreparedOidcPolicy {
 				encoder: oidc_cookie_encoder.clone(),
 			},
 			scopes,
+			provider_backend,
 		})
 	}
 }

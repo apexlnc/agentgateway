@@ -29,7 +29,7 @@ import (
 	"github.com/agentgateway/agentgateway/api"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/jwks"
-	oidcpkg "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/utils"
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
@@ -91,7 +91,7 @@ func ConvertStatusCollection[T controllers.Object, S any](
 }
 
 // NewAgentPlugin creates a new AgentgatewayPolicy plugin
-func NewAgentPlugin(agw *AgwCollections, resolver remotehttp.Resolver, jwksLookup jwks.Lookup, oidcLookup oidcpkg.Lookup, credentialResolver kubeutils.CredentialResolver) AgwPlugin {
+func NewAgentPlugin(agw *AgwCollections, resolver remotehttp.Resolver, jwksLookup jwks.Lookup, oidcLookup oidc.Lookup, credentialResolver kubeutils.CredentialResolver) AgwPlugin {
 	return AgwPlugin{
 		ContributesPolicies: map[schema.GroupKind]PolicyPlugin{
 			wellknown.AgentgatewayPolicyGVK.GroupKind(): {
@@ -122,7 +122,7 @@ type PolicyCtx struct {
 	SourceGVK   schema.GroupVersionKind
 	Resolver    remotehttp.Resolver
 	JWKSLookup  jwks.Lookup
-	OidcLookup  oidcpkg.Lookup
+	OidcLookup  oidc.Lookup
 
 	// CredentialResolver resolves credential refs: the built-in Secret resolver
 	// in OSS, or an injected resolver (which may itself be a chain). Access it
@@ -164,7 +164,7 @@ func TranslateAgentgatewayPolicy(
 	grants ReferenceGrantChecker,
 	resolver remotehttp.Resolver,
 	jwksLookup jwks.Lookup,
-	oidcLookup oidcpkg.Lookup,
+	oidcLookup oidc.Lookup,
 	credentialResolver kubeutils.CredentialResolver,
 ) (*gwv1.PolicyStatus, []AgwPolicy) {
 	var agwPolicies []AgwPolicy
@@ -576,7 +576,7 @@ func translateTrafficPolicyToAgw(
 	}
 
 	if traffic.OIDC != nil {
-		appendPolicy("oidc")(processOIDCPolicy(ctx, traffic.OIDC, policyName, policyName.String(), ctx.OidcLookup))
+		appendPolicy("oidc")(processOIDCPolicy(ctx, traffic.OIDC, traffic.Phase, policyName, policyName.String(), ctx.OidcLookup))
 	}
 
 	if traffic.APIKeyAuthentication != nil {
@@ -2118,6 +2118,11 @@ func referencedBackendRefsFromPolicy(policy *agentgateway.AgentgatewayPolicy) []
 				if p.JWKS.Remote != nil {
 					app(p.JWKS.Remote.BackendRef)
 				}
+			}
+		}
+		if s.Traffic.OIDC != nil {
+			if s.Traffic.OIDC.BackendRef != nil {
+				app(*s.Traffic.OIDC.BackendRef)
 			}
 		}
 	}

@@ -8,66 +8,62 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"istio.io/istio/pkg/util/sets"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil/krttest"
 )
 
 func TestAddKeysetToFetcher(t *testing.T) {
 	expected := testSharedJwksRequest("https://test/jwks")
 
-	f := NewFetcher(NewCache())
+	f, _ := NewFetcher(NewFetchedResults())
 	f.AddOrUpdate(expected)
 
-	fetch, ok := f.NextFetchForTest()
-	assert.True(t, ok)
-	assert.Equal(t, expected.RequestKey, fetch.RequestKey)
 	assert.Equal(t, 1, f.RequestCountForTest())
+	assert.Equal(t, 1, f.ReadyQueueLenForTest())
 }
 
 func TestRemoveKeysetFromFetcher(t *testing.T) {
 	source := testSharedJwksRequest("https://test/jwks")
-	cache := NewCache()
-	f := NewFetcher(cache)
+	results := NewFetchedResults()
+	f, _ := NewFetcher(results)
 
 	f.AddOrUpdate(source)
-	seedJwksCacheForTest(cache, source.RequestKey, source.Target.URL)
+	seedJwksResultsForTest(results, source.RequestKey, source.Target.URL)
 
 	f.Remove(source.RequestKey)
 
 	assert.Equal(t, 0, f.RequestCountForTest())
-	_, ok := cache.Get(source.RequestKey)
+	_, ok := results.Get(source.RequestKey)
 	assert.False(t, ok)
 }
 
-func TestRemoveKeysetClearsCacheEvenWithoutRequest(t *testing.T) {
+func TestRemoveKeysetClearsResultsEvenWithoutRequest(t *testing.T) {
 	source := testSharedJwksRequest("https://test/jwks")
-	cache := NewCache()
-	f := NewFetcher(cache)
-	seedJwksCacheForTest(cache, source.RequestKey, source.Target.URL)
+	results := NewFetchedResults()
+	f, _ := NewFetcher(results)
+	seedJwksResultsForTest(results, source.RequestKey, source.Target.URL)
 
 	f.Remove(source.RequestKey)
 
-	_, ok := cache.Get(source.RequestKey)
-	assert.False(t, ok, "cache should be cleared even when request was not tracked")
+	_, ok := results.Get(source.RequestKey)
+	assert.False(t, ok, "fetched result should be cleared even when request was not tracked")
 }
 
-func TestRetireKeysetKeepsCacheThenSweptOnSuccessfulFetch(t *testing.T) {
+func TestRetireKeysetKeepsResultThenSweptOnSuccessfulFetch(t *testing.T) {
 	ctx := t.Context()
 	oldSource := testSharedJwksRequest("https://test/old-jwks")
 	newSource := testSharedJwksRequest("https://test/new-jwks")
 
-	cache := NewCache()
-	f := NewFetcher(cache)
+	results := NewFetchedResults()
+	f, _ := NewFetcher(results)
 	f.AddOrUpdate(oldSource)
-	seedJwksCacheForTest(cache, oldSource.RequestKey, oldSource.Target.URL)
+	seedJwksResultsForTest(results, oldSource.RequestKey, oldSource.Target.URL)
 
 	f.Retire(oldSource.RequestKey)
 
 	assert.Equal(t, 0, f.RequestCountForTest(), "retired key should be removed from requests")
-	_, inCache := cache.Get(oldSource.RequestKey)
-	assert.True(t, inCache, "retired key should remain in cache")
+	_, inResults := results.Get(oldSource.RequestKey)
+	assert.True(t, inResults, "retired key should remain in fetched results")
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -78,22 +74,13 @@ func TestRetireKeysetKeepsCacheThenSweptOnSuccessfulFetch(t *testing.T) {
 	newSource.RequestKey = newSource.Target.Key()
 
 	f.AddOrUpdate(newSource)
+	go f.Run(ctx)
 
-	updates := f.SubscribeToUpdates()
-	go f.MaybeFetch(ctx)
+	keyset := awaitStoredKeyset(t, results, newSource.RequestKey)
+	assert.Equal(t, sampleJWKS, keyset.JwksJSON)
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		select {
-		case update := <-updates:
-			assert.True(c, update.Contains(newSource.RequestKey), "new key should be in updates")
-			assert.True(c, update.Contains(oldSource.RequestKey), "swept old key should be in updates")
-		default:
-			assert.Fail(c, "no updates yet")
-		}
-	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
-
-	_, inCache = cache.Get(oldSource.RequestKey)
-	assert.False(t, inCache, "retired key should be swept after successful fetch")
+	_, inResults = results.Get(oldSource.RequestKey)
+	assert.False(t, inResults, "retired key should be swept after successful fetch")
 }
 
 func TestSuccessfulJwksFetch(t *testing.T) {
@@ -105,16 +92,14 @@ func TestSuccessfulJwksFetch(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	cache := NewCache()
-	f := NewFetcher(cache)
+	results := NewFetchedResults()
+	f, _ := NewFetcher(results)
 	source := testSharedJwksRequest(backend.URL)
 	f.AddOrUpdate(source)
-	updates := f.SubscribeToUpdates()
 
-	go f.MaybeFetch(ctx)
+	go f.Run(ctx)
 
-	awaitJwksUpdate(t, updates, source.RequestKey)
-	keyset := awaitStoredKeyset(t, cache, source.RequestKey)
+	keyset := awaitStoredKeyset(t, results, source.RequestKey)
 	assert.Equal(t, sampleJWKS, keyset.JwksJSON)
 }
 
@@ -127,36 +112,23 @@ func testSharedJwksRequest(requestURL string) SharedJwksRequest {
 	}
 }
 
-func seedJwksCacheForTest(cache *JwksCache, requestKey remotehttp.FetchKey, url string) {
-	cache.Put(Keyset{
+func seedJwksResultsForTest(results *JwksResults, requestKey remotehttp.FetchKey, url string) {
+	results.Put(Keyset{
 		RequestKey: requestKey,
 		URL:        url,
 		JwksJSON:   `{"keys":[]}`,
 	})
 }
 
-func awaitJwksUpdate(t *testing.T, updates <-chan sets.Set[remotehttp.FetchKey], requestKey remotehttp.FetchKey) {
-	t.Helper()
-
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		select {
-		case update := <-updates:
-			assert.True(c, update.Contains(requestKey))
-		default:
-			assert.Fail(c, "no updates yet")
-		}
-	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
-}
-
-func awaitStoredKeyset(t *testing.T, cache *JwksCache, requestKey remotehttp.FetchKey) Keyset {
+func awaitStoredKeyset(t *testing.T, results *JwksResults, requestKey remotehttp.FetchKey) Keyset {
 	t.Helper()
 
 	var keyset Keyset
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		var ok bool
-		keyset, ok = cache.Get(requestKey)
+		keyset, ok = results.Get(requestKey)
 		assert.True(c, ok)
-	}, krttest.EventuallyTimeout, krttest.EventuallyPoll)
+	}, eventuallyTimeout, eventuallyPoll)
 
 	return keyset
 }

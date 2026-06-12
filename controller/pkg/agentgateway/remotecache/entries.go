@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"reflect"
-	"time"
 
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/kclient"
@@ -19,24 +17,22 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
+	"github.com/agentgateway/agentgateway/controller/pkg/metrics"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
 )
 
 const ComponentLabel = "app.kubernetes.io/component"
 
 // Codec serializes a payload T to/from a ConfigMap.
-type Codec[T Result] struct {
-	DataKey string
+type Codec[T Result[T]] struct {
 	// ObservabilityName prefixes KRT collection names; keep stable across releases to avoid metric churn.
 	ObservabilityName string
 	Parse             func(*corev1.ConfigMap) (T, error)
 	Serialize         func(*corev1.ConfigMap, T) error
-	// Normalize repairs identity fields when derivation logic evolves across releases.
-	Normalize func(storePrefix, configMapName string, payload T) T
 }
 
 // Entry is a parsed ConfigMap; on parse failure ParseError is set and Payload is nil.
-type Entry[T Result] struct {
+type Entry[T Result[T]] struct {
 	NamespacedName types.NamespacedName
 	Payload        *T
 	ParseError     string
@@ -47,7 +43,7 @@ func (e Entry[T]) ResourceName() string {
 	return e.NamespacedName.String()
 }
 
-// Equals satisfies krt.Equaler. reflect.DeepEqual covers slice payloads without per-subsystem helpers.
+// Equals satisfies krt.Equaler by delegating to the payload's typed Equals.
 func (e Entry[T]) Equals(other Entry[T]) bool {
 	return e.NamespacedName == other.NamespacedName &&
 		e.ParseError == other.ParseError &&
@@ -65,68 +61,45 @@ func (e Entry[T]) GetName() string {
 	return e.NamespacedName.Name
 }
 
-func (e Entry[T]) GetNamespace() string {
-	return e.NamespacedName.Namespace
-}
-
-// GetFetchedAt returns zero on parse failure so unparsable entries lose hydration tie-breaks.
-func (e Entry[T]) GetFetchedAt() time.Time {
-	if e.Payload == nil {
-		return time.Time{}
-	}
-	return (*e.Payload).RemoteFetchedAt()
-}
-
-var (
-	_ PersistedRecord = Entry[Result]{}
-	_ Hydratable      = Entry[Result]{}
-)
-
-// Hydratable lets BestHydrationEntry pick a "best" persisted entry per request key at startup.
-type Hydratable interface {
-	GetFetchedAt() time.Time
-	GetName() string
-	GetNamespace() string
-}
-
-// BestHydrationEntry picks the freshest entry, breaking ties on canonical-name then lex order.
-func BestHydrationEntry[T Hydratable](entries []T, canonicalName string) T {
-	var best T
-	var found bool
-	for _, candidate := range entries {
-		if !found || isBetterHydrationEntry(candidate, best, canonicalName) {
-			best = candidate
-			found = true
+// BestHydrationEntry returns the freshest payload, breaking timestamp ties
+// via canonicalName. Duplicates per key are transient migration/orphan-sweep
+// artifacts where a non-canonical entry can temporarily hold newer material.
+func BestHydrationEntry[T Result[T]](entries []Entry[T], canonicalName string) Entry[T] {
+	var best Entry[T]
+	hasBest := false
+	for _, e := range entries {
+		if !hasBest || isBetterHydrationEntry(e, best, canonicalName) {
+			best = e
+			hasBest = true
 		}
 	}
 	return best
 }
 
-func isBetterHydrationEntry[T Hydratable](candidate, current T, canonicalName string) bool {
-	candidateFetchedAt := candidate.GetFetchedAt()
-	currentFetchedAt := current.GetFetchedAt()
-
+func isBetterHydrationEntry[T Result[T]](candidate, current Entry[T], canonicalName string) bool {
 	switch {
-	case candidateFetchedAt.After(currentFetchedAt):
-		return true
-	case currentFetchedAt.After(candidateFetchedAt):
+	case candidate.Payload == nil && current.Payload != nil:
 		return false
+	case candidate.Payload != nil && current.Payload == nil:
+		return true
+	case candidate.Payload != nil && current.Payload != nil:
+		candidateFetchedAt := (*candidate.Payload).RemoteFetchedAt()
+		currentFetchedAt := (*current.Payload).RemoteFetchedAt()
+		if candidateFetchedAt.After(currentFetchedAt) {
+			return true
+		}
+		if currentFetchedAt.After(candidateFetchedAt) {
+			return false
+		}
 	}
 
-	candidateCanonical := candidate.GetName() == canonicalName
-	currentCanonical := current.GetName() == canonicalName
-	if candidateCanonical != currentCanonical {
-		return candidateCanonical
-	}
-
-	if candidate.GetName() != current.GetName() {
-		return candidate.GetName() < current.GetName()
-	}
-	return candidate.GetNamespace() < current.GetNamespace()
+	candidateCanonical := candidate.NamespacedName.Name == canonicalName
+	currentCanonical := current.NamespacedName.Name == canonicalName
+	return candidateCanonical && !currentCanonical
 }
 
 // Entries watches Codec-labeled ConfigMaps and exposes typed lookups by request key.
-type Entries[T Result] struct {
+type Entries[T Result[T]] struct {
 	codec               Codec[T]
 	storePrefix         string
 	deploymentNamespace string
@@ -136,7 +109,7 @@ type Entries[T Result] struct {
 }
 
 // New filters ConfigMaps by storePrefix label in deploymentNamespace.
-func New[T Result](
+func New[T Result[T]](
 	codec Codec[T],
 	client apiclient.Client,
 	krtOptions krtutil.KrtOptions,
@@ -148,14 +121,21 @@ func New[T Result](
 		LabelSelector: LabelSelector(storePrefix),
 	}, krtOptions.ToOptions(codec.ObservabilityName+"/ConfigMaps")...)
 
-	return NewFromCollection(codec, configMaps, storePrefix, deploymentNamespace)
+	return NewFromCollection(
+		codec,
+		configMaps,
+		storePrefix,
+		deploymentNamespace,
+		krtOptions.ToOptions(codec.ObservabilityName+"/Entries")...,
+	)
 }
 
 // NewFromCollection lets tests supply a static ConfigMap collection.
-func NewFromCollection[T Result](
+func NewFromCollection[T Result[T]](
 	codec Codec[T],
 	configMaps krt.Collection[*corev1.ConfigMap],
 	storePrefix, deploymentNamespace string,
+	opts ...krt.CollectionOption,
 ) *Entries[T] {
 	entries := krt.NewCollection(configMaps, func(_ krt.HandlerContext, cm *corev1.ConfigMap) *Entry[T] {
 		if cm == nil {
@@ -179,12 +159,11 @@ func NewFromCollection[T Result](
 				ParseError:     err.Error(),
 			}
 		}
-		payload = codec.Normalize(storePrefix, cm.Name, payload)
 		return &Entry[T]{
 			NamespacedName: namespacedName,
 			Payload:        &payload,
 		}
-	})
+	}, opts...)
 
 	byRequestKey := krt.NewIndex(entries, codec.ObservabilityName+"-request-key", func(entry Entry[T]) []remotehttp.FetchKey {
 		requestKey, ok := entry.RequestKey()
@@ -244,6 +223,7 @@ func (e *Entries[T]) LoadAll(ctx context.Context) ([]T, error) {
 		if !ok {
 			err := fmt.Errorf("error deserializing %s ConfigMap %s: %s", e.codec.ObservabilityName, entry.NamespacedName.String(), entry.ParseError)
 			e.logger.ErrorContext(ctx, "error deserializing ConfigMap", "error", err, "ConfigMap", entry.NamespacedName.String())
+			hydrationParseErrors.Inc(metrics.Label{Name: codecLabel, Value: e.codec.ObservabilityName})
 			errs = append(errs, err)
 			continue
 		}
@@ -286,6 +266,11 @@ func (e *Entries[T]) EntriesForRequestKey(requestKey remotehttp.FetchKey) []Entr
 	return e.byRequestKey.Lookup(requestKey)
 }
 
+// Serialize writes record into cm via the codec.
+func (e *Entries[T]) Serialize(cm *corev1.ConfigMap, record T) error {
+	return e.codec.Serialize(cm, record)
+}
+
 // ConfigMapName returns the canonical ConfigMap name for a (storePrefix,
 // requestKey) pair. Format: <storePrefix>-<sha256(requestKey)>.
 func ConfigMapName(storePrefix string, requestKey remotehttp.FetchKey) string {
@@ -301,13 +286,13 @@ func ConfigMapLabels(storePrefix string) map[string]string {
 	return map[string]string{ComponentLabel: storePrefix}
 }
 
-func payloadEquals[T Result](a, b *T) bool {
+func payloadEquals[T Result[T]](a, b *T) bool {
 	switch {
 	case a == nil && b == nil:
 		return true
 	case a == nil || b == nil:
 		return false
 	default:
-		return reflect.DeepEqual(*a, *b)
+		return (*a).Equals(*b)
 	}
 }

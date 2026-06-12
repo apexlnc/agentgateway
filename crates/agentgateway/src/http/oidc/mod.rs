@@ -12,6 +12,7 @@ use tracing::debug;
 use crate::http::{Body, PolicyResponse, Request, Response, jwt};
 use crate::proxy::httpproxy::PolicyClient;
 use crate::telemetry::log::RequestLog;
+use crate::types::agent::SimpleBackendReference;
 
 mod callback;
 mod local;
@@ -152,6 +153,11 @@ pub struct OidcPolicy {
 	pub redirect_uri: RedirectUri,
 	pub session: SessionConfig,
 	pub scopes: Vec<String>,
+	/// Optional backend reference for token-endpoint calls. When set, exchange_code
+	/// routes through `PolicyClient::call_reference` so attached backend TLS policies
+	/// apply (private CA, insecureSkipVerify, SNI). When None, `simple_call` is used
+	/// with the system trust store.
+	pub provider_backend: Option<SimpleBackendReference>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

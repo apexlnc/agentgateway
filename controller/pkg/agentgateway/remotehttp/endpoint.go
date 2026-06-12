@@ -9,6 +9,14 @@ type FetchTarget struct {
 	ProxyTransport TransportFingerprint `json:"proxyTransport"`
 }
 
+// Equals avoids reflect.DeepEqual on the KRT diff hot path.
+func (t FetchTarget) Equals(other FetchTarget) bool {
+	return t.URL == other.URL &&
+		t.ProxyURL == other.ProxyURL &&
+		t.Transport.Equals(other.Transport) &&
+		t.ProxyTransport.Equals(other.ProxyTransport)
+}
+
 type ResolvedTarget struct {
 	Key            FetchKey
 	Target         FetchTarget

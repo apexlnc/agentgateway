@@ -104,8 +104,7 @@ pub struct Store {
 	listener_change_tx: watch::Sender<u64>,
 	listener_change_rx: watch::Receiver<u64>,
 
-	/// Cookie-crypto encoder applied to xDS-delivered OIDC policies at Store ingestion.
-	/// It is present only when the gateway session encoder is backed by AES key material.
+	/// Cookie encoder for xDS-delivered OIDC policies. `Some` iff `SESSION_KEY` is AES-backed.
 	oidc_cookie_encoder: Option<crate::http::oidc::OidcCookieEncoder>,
 
 	tx: tokio::sync::mpsc::UnboundedSender<BindEvent>,
@@ -562,13 +561,15 @@ impl Store {
 		Self::new(
 			ipv6_enabled,
 			crate::ThreadingMode::Multithreaded,
+			None,
 			Default::default(),
 		)
 	}
 
-	pub fn new(
+	pub(crate) fn new(
 		ipv6_enabled: bool,
 		threading_mode: crate::ThreadingMode,
+		oidc_cookie_encoder: Option<crate::http::oidc::OidcCookieEncoder>,
 		dynamic_ca_cert_cache: crate::DynamicCaCertCacheConfig,
 	) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -592,29 +593,10 @@ impl Store {
 			tcp_routes: Default::default(),
 			listener_change_tx,
 			listener_change_rx,
-			oidc_cookie_encoder: None,
+			oidc_cookie_encoder,
 			tx,
 			rx: Some(rx),
 		}
-	}
-
-	/// Install the ambient cookie-crypto encoder used to compile xDS OIDC
-	/// policies into runtime [`crate::http::oidc::OidcPolicy`] values.
-	///
-	/// Must be called exactly once, during gateway construction, before xDS
-	/// ingestion begins. Calling it after the first OIDC policy has been
-	/// ingested would silently rotate the encoder for subsequently-translated
-	/// policies while leaving already-cached `OidcPolicy` values bound to the
-	/// previous encoder — a footgun the `debug_assert!` traps in tests.
-	///
-	/// Until this is called, the xDS proto-decode rejects OIDC policies with
-	/// `SESSION_KEY is not configured on this gateway`.
-	pub(crate) fn set_oidc_cookie_encoder(&mut self, encoder: crate::http::oidc::OidcCookieEncoder) {
-		debug_assert!(
-			self.oidc_cookie_encoder.is_none(),
-			"OIDC cookie encoder already installed; set_oidc_cookie_encoder must be called once",
-		);
-		self.oidc_cookie_encoder = Some(encoder);
 	}
 
 	fn listener_target_ref(listener: &ListenerKey) -> RouteTargetRef<'_> {
@@ -3047,6 +3029,7 @@ mod tests {
 						redirect_uri: "https://example.com/callback".to_string(),
 						jwks_inline: jwks_inline.to_string(),
 						scopes: vec![],
+						provider_backend: None,
 					},
 				)),
 				phase: agent::traffic_policy_spec::PolicyPhase::Route.into(),
@@ -3076,9 +3059,8 @@ mod tests {
 			"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		)
 		.expect("aes session encoder");
-		let oidc_encoder =
-			crate::http::oidc::OidcCookieEncoder::from_session_encoder(&session_encoder)
-				.expect("oidc cookie encoder");
+		let oidc_encoder = crate::http::oidc::OidcCookieEncoder::from_session_encoder(&session_encoder)
+			.expect("oidc cookie encoder");
 
 		let mut store = Store::new(
 			false,
