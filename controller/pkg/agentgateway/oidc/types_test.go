@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"testing"
 	"time"
 
@@ -81,13 +82,13 @@ func TestOidcRequestSpecEqualsDistinguishesEveryComparedField(t *testing.T) {
 		return OidcSource{
 			OwnerKey: remotecache.OwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "ns", Name: "n", Path: "p"},
 			oidcRequestSpec: oidcRequestSpec{
-				RequestKey:            "rk",
-				ExpectedIssuer:        "https://idp.example",
-				Target:                remotehttp.FetchTarget{URL: "https://idp.example/.well-known"},
-				ProviderBackendTarget: &remotehttp.FetchTarget{URL: "https://backend"},
-				TLSConfig:             shared,
-				ProxyTLSConfig:        shared,
-				TTL:                   5 * time.Minute,
+				RequestKey:     "rk",
+				ExpectedIssuer: "https://idp.example",
+				Target:         remotehttp.FetchTarget{URL: "https://idp.example/.well-known"},
+				ViaBackendRef:  true,
+				TLSConfig:      shared,
+				ProxyTLSConfig: shared,
+				TTL:            5 * time.Minute,
 			},
 		}
 	}
@@ -95,12 +96,12 @@ func TestOidcRequestSpecEqualsDistinguishesEveryComparedField(t *testing.T) {
 	require.True(t, base().Equals(base()), "identical sources must be equal")
 
 	mutators := map[string]func(*OidcSource){
-		"OwnerKey":              func(s *OidcSource) { s.OwnerKey.Name = "other" },
-		"RequestKey":            func(s *OidcSource) { s.RequestKey = "other" },
-		"ExpectedIssuer":        func(s *OidcSource) { s.ExpectedIssuer = "https://other" },
-		"Target":                func(s *OidcSource) { s.Target = remotehttp.FetchTarget{URL: "https://other"} },
-		"ProviderBackendTarget": func(s *OidcSource) { s.ProviderBackendTarget = nil },
-		"TTL":                   func(s *OidcSource) { s.TTL = time.Hour },
+		"OwnerKey":       func(s *OidcSource) { s.OwnerKey.Name = "other" },
+		"RequestKey":     func(s *OidcSource) { s.RequestKey = "other" },
+		"ExpectedIssuer": func(s *OidcSource) { s.ExpectedIssuer = "https://other" },
+		"Target":         func(s *OidcSource) { s.Target = remotehttp.FetchTarget{URL: "https://other"} },
+		"ViaBackendRef":  func(s *OidcSource) { s.ViaBackendRef = false },
+		"TTL":            func(s *OidcSource) { s.TTL = time.Hour },
 	}
 	for name, mutate := range mutators {
 		got := base()
@@ -126,7 +127,7 @@ func TestOidcRequestKeyIsDomainSeparated(t *testing.T) {
 	target := remotehttp.FetchTarget{URL: "https://issuer.example/.well-known/openid-configuration"}
 	expectedIssuer := "https://issuer.example"
 
-	key := oidcRequestKey(target, expectedIssuer, nil)
+	key := oidcRequestKey(target, expectedIssuer, false)
 
 	require.NotEqual(t, target.Key(), key)
 	require.NotEqual(t, oldOidcRequestKeyForTest(target, expectedIssuer), key)
@@ -149,8 +150,8 @@ func TestOidcRequestKeyStable(t *testing.T) {
 	target := remotehttp.FetchTarget{URL: "https://issuer.example/.well-known/openid-configuration"}
 	issuer := "https://issuer.example"
 
-	first := oidcRequestKey(target, issuer, nil)
-	second := oidcRequestKey(target, issuer, nil)
+	first := oidcRequestKey(target, issuer, false)
+	second := oidcRequestKey(target, issuer, false)
 
 	require.Equal(t, first, second, "same (target, issuer) must hash identically across calls")
 }
@@ -214,7 +215,7 @@ func TestDiscoveredProviderEquals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			other := base
 			// Deep-copy the slice so per-case mutations don't leak across cases.
-			other.TokenEndpointAuthMethodsSupported = append([]string(nil), base.TokenEndpointAuthMethodsSupported...)
+			other.TokenEndpointAuthMethodsSupported = slices.Clone(base.TokenEndpointAuthMethodsSupported)
 			tc.mutate(&other)
 			require.Equal(t, tc.equal, base.Equals(other))
 		})
@@ -261,13 +262,13 @@ func TestDiscoveredProviderEqualsIgnoresMonotonicClock(t *testing.T) {
 func TestOidcRequestKeyDifferentiatesInputs(t *testing.T) {
 	baseTarget := remotehttp.FetchTarget{URL: "https://issuer.example/.well-known/openid-configuration"}
 	baseIssuer := "https://issuer.example"
-	baseKey := oidcRequestKey(baseTarget, baseIssuer, nil)
+	baseKey := oidcRequestKey(baseTarget, baseIssuer, false)
 
 	tests := []struct {
-		name                  string
-		target                remotehttp.FetchTarget
-		issuer                string
-		providerBackendTarget *remotehttp.FetchTarget
+		name          string
+		target        remotehttp.FetchTarget
+		issuer        string
+		viaBackendRef bool
 	}{
 		{
 			name:   "different target URL",
@@ -290,16 +291,16 @@ func TestOidcRequestKeyDifferentiatesInputs(t *testing.T) {
 			issuer: "http://issuer.example",
 		},
 		{
-			name:                  "provider backend target",
-			target:                baseTarget,
-			issuer:                baseIssuer,
-			providerBackendTarget: &baseTarget,
+			name:          "via provider backend",
+			target:        baseTarget,
+			issuer:        baseIssuer,
+			viaBackendRef: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			other := oidcRequestKey(tc.target, tc.issuer, tc.providerBackendTarget)
+			other := oidcRequestKey(tc.target, tc.issuer, tc.viaBackendRef)
 			require.NotEqual(t, baseKey, other,
 				"request keys must differ when sharing inputs differ")
 		})

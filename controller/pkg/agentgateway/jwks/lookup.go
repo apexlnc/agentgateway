@@ -23,16 +23,12 @@ func NewLookup(persisted *PersistedEntries, resolver Resolver) Lookup {
 }
 
 func (l *lookup) InlineForOwner(krtctx krt.HandlerContext, owner RemoteJwksOwner) (string, error) {
-	if l.persisted == nil {
-		return "", fmt.Errorf("jwks persisted cache is not configured")
-	}
-
 	resolved, err := l.resolver.ResolveOwner(krtctx, owner)
 	if err != nil {
 		return "", err
 	}
 
-	keyset, ok := l.persisted.CanonicalGet(krtctx, resolved.Target.Key)
+	keyset, ok := l.persisted.CanonicalGet(krtctx, resolved.RequestKey())
 	if !ok {
 		return "", fmt.Errorf("jwks keyset for %q isn't available (not yet fetched or fetch failed)", resolved.Target.Target.URL)
 	}

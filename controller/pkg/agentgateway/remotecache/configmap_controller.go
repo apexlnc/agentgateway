@@ -3,6 +3,7 @@ package remotecache
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"math"
 	"time"
 
@@ -39,31 +40,6 @@ type ConfigMapController[T Result[T]] struct {
 	controllerName      string
 	waitForSync         []cache.InformerSynced
 	logger              *slog.Logger
-}
-
-type ConfigMapControllerOptions[T Result[T]] struct {
-	APIClient           apiclient.Client
-	DeploymentNamespace string
-	ControllerName      string
-	Results             krt.Collection[T]
-	Entries             *Entries[T]
-	StoreHasSynced      func() bool
-	Logger              *slog.Logger
-}
-
-func NewConfigMapController[T Result[T]](opts ConfigMapControllerOptions[T]) *ConfigMapController[T] {
-	if opts.Entries == nil {
-		panic("remotecache.ConfigMapController: Entries is required")
-	}
-	return &ConfigMapController[T]{
-		apiClient:           opts.APIClient,
-		deploymentNamespace: opts.DeploymentNamespace,
-		controllerName:      opts.ControllerName,
-		results:             opts.Results,
-		entries:             opts.Entries,
-		waitForSync:         []cache.InformerSynced{opts.Results.HasSynced, opts.Entries.Collection().HasSynced, opts.StoreHasSynced},
-		logger:              opts.Logger,
-	}
 }
 
 // Init builds the informer + workqueue. Must be called at setup time, BEFORE
@@ -218,11 +194,18 @@ func (c *ConfigMapController[T]) upsertConfigMap(namespace, name string, record 
 	}
 
 	existingCm := existingCmRaw.DeepCopy()
-	c.logger.Debug("updating ConfigMap", "name", name)
 	if err := c.entries.Serialize(existingCm, record); err != nil {
 		c.logger.Error("error setting record in ConfigMap", "error", err)
 		return err
 	}
+	// Skip no-op writes: each Update echoes back through the informer and
+	// re-enqueues this key, so an unconditional write doubles every PUT and
+	// replays one PUT per cached entry on startup right after hydration
+	// loaded identical data.
+	if maps.Equal(existingCmRaw.Data, existingCm.Data) {
+		return nil
+	}
+	c.logger.Debug("updating ConfigMap", "name", name)
 	if _, err := c.cmClient.Update(existingCm); err != nil {
 		c.logger.Error("error updating ConfigMap", "error", err)
 		return err
@@ -279,13 +262,14 @@ func NewStoreConfigMapController[R Result[R]](
 	logger *slog.Logger,
 ) *ConfigMapController[R] {
 	logger.Info("creating store configmap controller", "controller", controllerName)
-	return NewConfigMapController(ConfigMapControllerOptions[R]{
-		APIClient:           apiClient,
-		DeploymentNamespace: deploymentNamespace,
-		ControllerName:      controllerName,
-		Results:             store.FetchedResults().Collection(),
-		Entries:             entries,
-		StoreHasSynced:      store.HasSynced,
-		Logger:              logger,
-	})
+	results := store.FetchedResults().Collection()
+	return &ConfigMapController[R]{
+		apiClient:           apiClient,
+		deploymentNamespace: deploymentNamespace,
+		controllerName:      controllerName,
+		results:             results,
+		entries:             entries,
+		waitForSync:         []cache.InformerSynced{results.HasSynced, entries.Collection().HasSynced, store.HasSynced},
+		logger:              logger,
+	}
 }

@@ -21,7 +21,7 @@ import (
 func TestStoreLoadsPersistedProvidersBeforeServing(t *testing.T) {
 	const issuer = "https://idp.example"
 	target := remotehttp.FetchTarget{URL: "https://idp.example/.well-known/openid-configuration"}
-	requestKey := oidcRequestKey(target, issuer, nil)
+	requestKey := oidcRequestKey(target, issuer, false)
 
 	persistedProvider := DiscoveredProvider{
 		RequestKey:            requestKey,
@@ -54,14 +54,13 @@ func TestStoreLoadsPersistedProvidersBeforeServing(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		krt.NewStaticCollection[*corev1.ConfigMap](nil, []*corev1.ConfigMap{cm}),
-		DefaultStorePrefix,
 		"agentgateway-system",
 	)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	store := NewStore(collections.SharedRequests, persisted, DefaultStorePrefix)
+	store := NewStore(collections.SharedRequests, persisted)
 	store.Driver.DefaultClient = &http.Client{Transport: offlineTransport{}}
 
 	go func() {
@@ -69,7 +68,7 @@ func TestStoreLoadsPersistedProvidersBeforeServing(t *testing.T) {
 	}()
 	require.Eventually(t, store.HasSynced, eventuallyTimeout, eventuallyPoll)
 
-	got, ok := store.ProviderByRequestKey(requestKey)
+	got, ok := store.FetchedResults().Get(requestKey)
 	require.True(t, ok, "persisted provider must be served from cache before any live fetch")
 	require.Equal(t, persistedProvider.IssuerURL, got.IssuerURL)
 	require.Equal(t, persistedProvider.JwksURI, got.JwksURI)
@@ -78,7 +77,7 @@ func TestStoreLoadsPersistedProvidersBeforeServing(t *testing.T) {
 func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 	const issuer = "https://idp.example"
 	target := remotehttp.FetchTarget{URL: "https://idp.example/.well-known/openid-configuration"}
-	requestKey := oidcRequestKey(target, issuer, nil)
+	requestKey := oidcRequestKey(target, issuer, false)
 
 	persistedProvider := DiscoveredProvider{
 		RequestKey:            requestKey,
@@ -111,14 +110,13 @@ func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		krt.NewStaticCollection[*corev1.ConfigMap](nil, []*corev1.ConfigMap{cm}),
-		DefaultStorePrefix,
 		"agentgateway-system",
 	)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	store := NewStore(collections.SharedRequests, persisted, DefaultStorePrefix)
+	store := NewStore(collections.SharedRequests, persisted)
 	store.Driver.DefaultClient = &http.Client{Transport: offlineTransport{}}
 
 	go func() {
@@ -129,13 +127,13 @@ func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
 	}, eventuallyTimeout, eventuallyPoll)
 
-	_, ok := store.ProviderByRequestKey(requestKey)
+	_, ok := store.FetchedResults().Get(requestKey)
 	require.True(t, ok, "cache should be hydrated before policy deletion")
 
 	policies.Reset(nil)
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		_, ok := store.ProviderByRequestKey(requestKey)
+		_, ok := store.FetchedResults().Get(requestKey)
 		assert.False(c, ok)
 	}, eventuallyTimeout, eventuallyPoll)
 }
@@ -143,7 +141,7 @@ func TestStoreClearsCacheWhenLastPolicyDeleted(t *testing.T) {
 func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
 	const issuer = "https://idp.example"
 	target := remotehttp.FetchTarget{URL: "https://idp.example/.well-known/openid-configuration"}
-	requestKey := oidcRequestKey(target, issuer, nil)
+	requestKey := oidcRequestKey(target, issuer, false)
 
 	orphanProvider := DiscoveredProvider{
 		RequestKey:            requestKey,
@@ -174,14 +172,13 @@ func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		krt.NewStaticCollection[*corev1.ConfigMap](nil, []*corev1.ConfigMap{cm}),
-		DefaultStorePrefix,
 		"agentgateway-system",
 	)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	store := NewStore(collections.SharedRequests, persisted, DefaultStorePrefix)
+	store := NewStore(collections.SharedRequests, persisted)
 	store.Driver.DefaultClient = &http.Client{Transport: offlineTransport{}}
 
 	go func() {
@@ -190,7 +187,7 @@ func TestStoreClearsOrphanCacheAtStartup(t *testing.T) {
 	require.Eventually(t, store.HasSynced, eventuallyTimeout, eventuallyPoll)
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		_, ok := store.ProviderByRequestKey(requestKey)
+		_, ok := store.FetchedResults().Get(requestKey)
 		assert.False(c, ok, "orphan cache entry should be cleared after sync")
 	}, eventuallyTimeout, eventuallyPoll)
 }

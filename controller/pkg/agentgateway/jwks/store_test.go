@@ -103,11 +103,10 @@ func TestStoreTracksSharedRequestCollectionLifecycle(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		staticJwksConfigMaps(t, krtOpts, nil),
-		DefaultJwksStorePrefix,
 		"agentgateway-system",
 	)
 
-	store := NewStore(requests, persisted, DefaultJwksStorePrefix)
+	store := NewStore(requests, persisted)
 	store.Driver.DefaultClient = &http.Client{Transport: offlineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
@@ -155,10 +154,9 @@ func TestStoreDropsOldFetchStateWhenPolicyRetargets(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		staticJwksConfigMaps(t, krtOpts, nil),
-		DefaultJwksStorePrefix,
 		"agentgateway-system",
 	)
-	store := NewStore(collections.SharedRequests, persisted, DefaultJwksStorePrefix)
+	store := NewStore(collections.SharedRequests, persisted)
 	store.Driver.DefaultClient = &http.Client{Transport: offlineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
@@ -205,17 +203,16 @@ func TestStoreLoadsPersistedKeysetsBeforeServing(t *testing.T) {
 	}, krtOpts.ToOptions("jwks/PersistedStartupSharedRequests")...)
 	persisted := NewPersistedEntriesFromCollection(
 		staticJwksConfigMaps(t, krtOpts, []*corev1.ConfigMap{cm}),
-		DefaultJwksStorePrefix,
 		"agentgateway-system",
 	)
-	store := NewStore(requests, persisted, DefaultJwksStorePrefix)
+	store := NewStore(requests, persisted)
 	store.Driver.DefaultClient = &http.Client{Transport: offlineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
 	}()
 
 	assert.Eventually(t, store.HasSynced, eventuallyTimeout, eventuallyPoll)
-	actual, ok := store.JwksByRequestKey(keyset.RequestKey)
+	actual, ok := store.FetchedResults().Get(keyset.RequestKey)
 	assert.True(t, ok)
 	assert.Equal(t, keyset, actual)
 }
@@ -243,10 +240,9 @@ func TestStoreClearsResultWhenLastPolicyDeleted(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		staticJwksConfigMaps(t, krtOpts, nil),
-		DefaultJwksStorePrefix,
 		"agentgateway-system",
 	)
-	store := NewStore(collections.SharedRequests, persisted, DefaultJwksStorePrefix)
+	store := NewStore(collections.SharedRequests, persisted)
 	store.Driver.DefaultClient = &http.Client{Transport: offlineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
@@ -258,15 +254,15 @@ func TestStoreClearsResultWhenLastPolicyDeleted(t *testing.T) {
 		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
 	}, eventuallyTimeout, eventuallyPoll)
 
-	seedStoreJwksResultForTest(store.results, requestKey, uri)
-	_, ok := store.JwksByRequestKey(requestKey)
+	seedStoreJwksResultForTest(store.FetchedResults(), requestKey, uri)
+	_, ok := store.FetchedResults().Get(requestKey)
 	assert.True(t, ok, "result should be populated before policy deletion")
 
 	// Delete the AgentPolicy.
 	policies.Reset(nil)
 
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		_, ok := store.JwksByRequestKey(requestKey)
+		_, ok := store.FetchedResults().Get(requestKey)
 		assert.False(c, ok, "result should be cleared when last policy is deleted")
 	}, eventuallyTimeout, eventuallyPoll)
 }
@@ -295,10 +291,9 @@ func TestStoreClearsResultWhenAllSharedPoliciesDeleted(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		staticJwksConfigMaps(t, krtOpts, nil),
-		DefaultJwksStorePrefix,
 		"agentgateway-system",
 	)
-	store := NewStore(collections.SharedRequests, persisted, DefaultJwksStorePrefix)
+	store := NewStore(collections.SharedRequests, persisted)
 	store.Driver.DefaultClient = &http.Client{Transport: offlineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
@@ -310,12 +305,12 @@ func TestStoreClearsResultWhenAllSharedPoliciesDeleted(t *testing.T) {
 		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
 	}, eventuallyTimeout, eventuallyPoll)
 
-	seedStoreJwksResultForTest(store.results, requestKey, uri)
+	seedStoreJwksResultForTest(store.FetchedResults(), requestKey, uri)
 
 	policies.Reset(nil)
 
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		_, ok := store.JwksByRequestKey(requestKey)
+		_, ok := store.FetchedResults().Get(requestKey)
 		assert.False(c, ok)
 	}, eventuallyTimeout, eventuallyPoll)
 }
@@ -357,10 +352,9 @@ func TestStoreClearsResultWhenPolicyDeletedAfterWarmStart(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		staticJwksConfigMaps(t, krtOpts, []*corev1.ConfigMap{cm}),
-		DefaultJwksStorePrefix,
 		"agentgateway-system",
 	)
-	store := NewStore(collections.SharedRequests, persisted, DefaultJwksStorePrefix)
+	store := NewStore(collections.SharedRequests, persisted)
 	store.Driver.DefaultClient = &http.Client{Transport: offlineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
@@ -372,13 +366,13 @@ func TestStoreClearsResultWhenPolicyDeletedAfterWarmStart(t *testing.T) {
 		assert.Equal(c, 1, store.Fetcher.RequestCountForTest())
 	}, eventuallyTimeout, eventuallyPoll)
 
-	_, ok := store.JwksByRequestKey(requestKey)
+	_, ok := store.FetchedResults().Get(requestKey)
 	assert.True(t, ok, "result should be seeded from persisted ConfigMap")
 
 	policies.Reset(nil)
 
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		_, ok := store.JwksByRequestKey(requestKey)
+		_, ok := store.FetchedResults().Get(requestKey)
 		assert.False(c, ok)
 	}, eventuallyTimeout, eventuallyPoll)
 }
@@ -418,10 +412,9 @@ func TestStoreClearsOrphanResultAtStartup(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		staticJwksConfigMaps(t, krtOpts, []*corev1.ConfigMap{cm}),
-		DefaultJwksStorePrefix,
 		"agentgateway-system",
 	)
-	store := NewStore(collections.SharedRequests, persisted, DefaultJwksStorePrefix)
+	store := NewStore(collections.SharedRequests, persisted)
 	store.Driver.DefaultClient = &http.Client{Transport: offlineTransport{}}
 	go func() {
 		_ = store.Start(ctx)
@@ -431,7 +424,7 @@ func TestStoreClearsOrphanResultAtStartup(t *testing.T) {
 
 	// After sync, the orphan result should be cleared.
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		_, ok := store.JwksByRequestKey(requestKey)
+		_, ok := store.FetchedResults().Get(requestKey)
 		assert.False(c, ok, "orphan result should be cleared after sync")
 	}, eventuallyTimeout, eventuallyPoll)
 }
@@ -529,7 +522,6 @@ func resolvedJwksRequest(owner RemoteJwksOwner, requestURL string) *ResolvedJwks
 	return &ResolvedJwksRequest{
 		OwnerID: owner.ID,
 		Target: remotehttp.ResolvedTarget{
-			Key:    target.Key(),
 			Target: target,
 		},
 		TTL: owner.TTL,

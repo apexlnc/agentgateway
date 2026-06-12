@@ -173,14 +173,11 @@ func buildDummyIDPServerCertificate() (tls.Certificate, error) {
 	return tls.X509KeyPair(serverCertPEM, serverKeyPEM)
 }
 
-// OAuth2/OIDC constants
+// OAuth2/OIDC constants; client credentials live in testoidc, shared with the
+// e2e suite.
 const (
-	hardcodedClientID = "mcp_gi3APARn2_uHv2oxfJJqq2yZBDV4OyNo"
-	// nolint: gosec // Test code only
-	hardcodedClientSecret = "secret_2nGx_bjvo9z72Aw3-hKTWMusEo2-yTfH"
 	hardcodedRefreshToken = "fixed_refresh_token_123"
 	redirectURI           = "http://localhost:8081/callback"
-	oidcIssuer            = "https://agentgateway.dev"
 	oidcKeyID             = "oidc-test-key"
 )
 
@@ -217,8 +214,8 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	registration := map[string]any{
-		"client_id":                  hardcodedClientID,
-		"client_secret":              hardcodedClientSecret,
+		"client_id":                  testoidc.ClientID,
+		"client_secret":              testoidc.ClientSecret,
 		"client_name":                "Test Client",
 		"client_description":         "A test MCP client",
 		"redirect_uris":              []string{redirectURI},
@@ -242,7 +239,7 @@ func handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	clientID := query.Get("client_id")
 	redirectURI := query.Get("redirect_uri")
 
-	if clientID != hardcodedClientID || redirectURI == "" {
+	if clientID != testoidc.ClientID || redirectURI == "" {
 		sendJSONResponse(w, r, map[string]string{"error": "invalid_client"}, http.StatusBadRequest)
 		return
 	}
@@ -314,7 +311,7 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 
 	case "refresh_token":
 		// For refresh token, still require confidential client auth
-		if clientID != hardcodedClientID || clientSecret != hardcodedClientSecret {
+		if clientID != testoidc.ClientID || clientSecret != testoidc.ClientSecret {
 			sendJSONResponse(w, r, map[string]string{"error": "invalid_client"}, http.StatusBadRequest)
 			return
 		}
@@ -449,12 +446,8 @@ func signOIDCIDToken(nonce, clientID, issuer string) (string, error) {
 		return "", err
 	}
 	if clientID == "" {
-		clientID = hardcodedClientID
+		clientID = testoidc.ClientID
 	}
-	if issuer == "" {
-		issuer = oidcIssuer
-	}
-
 	token := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{
 		"iss":   issuer,
 		"sub":   "ignore@agentgateway.dev",

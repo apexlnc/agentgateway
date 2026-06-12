@@ -4,7 +4,6 @@ import (
 	"istio.io/istio/pkg/kube/krt"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
-	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/common"
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 )
@@ -27,13 +26,11 @@ type Store struct {
 	*remotecache.Store[SharedOidcRequest, DiscoveredProvider]
 	// Driver is the OIDC HTTP fetch driver. Exposed so tests can swap its
 	// DefaultClient for an offline transport.
-	Driver  *OidcDriver
-	results *OidcResults
+	Driver *OidcDriver
 }
 
-func NewStore(requests krt.Collection[SharedOidcRequest], persistedEntries *PersistedEntries, storePrefix string) *Store {
-	results := NewFetchedResults()
-	fetcher, driver := NewFetcher(results)
+func NewStore(requests krt.Collection[SharedOidcRequest], persistedEntries *PersistedEntries) *Store {
+	fetcher, driver := NewFetcher(NewFetchedResults())
 	innerStore := remotecache.NewStore(remotecache.StoreOptions[SharedOidcRequest, DiscoveredProvider]{
 		Fetcher:  fetcher,
 		Requests: requests,
@@ -42,20 +39,9 @@ func NewStore(requests krt.Collection[SharedOidcRequest], persistedEntries *Pers
 	})
 
 	return &Store{
-		Store:   innerStore,
-		Driver:  driver,
-		results: results,
+		Store:  innerStore,
+		Driver: driver,
 	}
-}
-
-// ProviderByRequestKey returns the cached provider for the given request key,
-// or false if absent. Test-only: production reads through FetchedResults().
-func (s *Store) ProviderByRequestKey(requestKey remotehttp.FetchKey) (DiscoveredProvider, bool) {
-	return s.results.Get(requestKey)
-}
-
-func (s *Store) FetchedResults() *OidcResults {
-	return s.results
 }
 
 func (s *Store) RunnableName() string {

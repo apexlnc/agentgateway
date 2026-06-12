@@ -149,7 +149,6 @@ func TestResolveEndpoint(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, resolved)
 			require.Equal(t, tt.expectedURL, resolved.Target.Target.URL)
-			require.Equal(t, resolved.Target.Key, resolved.Target.Target.Key())
 			if tt.expectedTLS == nil {
 				require.Nil(t, resolved.Target.TLSConfig)
 				return

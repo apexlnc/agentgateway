@@ -27,23 +27,12 @@ func NewLookup(persisted *PersistedEntries, resolver Resolver) Lookup {
 }
 
 func (l *lookupImpl) ResolveForOwner(krtctx krt.HandlerContext, owner RemoteOidcOwner) (*DiscoveredProvider, error) {
-	if l.persisted == nil {
-		return nil, fmt.Errorf("oidc provider lookup is not configured")
-	}
-	if l.resolver == nil {
-		return nil, fmt.Errorf("oidc resolver is not configured")
-	}
-
 	resolved, err := l.resolver.ResolveOwner(krtctx, owner)
 	if err != nil {
 		return nil, err
 	}
-	if resolved == nil {
-		return nil, fmt.Errorf("oidc resolver returned nil request")
-	}
 
-	requestKey := oidcRequestKey(resolved.Target.Target, resolved.ExpectedIssuer, resolved.ProviderBackendTarget)
-	provider, ok := l.persisted.CanonicalGet(krtctx, requestKey)
+	provider, ok := l.persisted.CanonicalGet(krtctx, resolved.RequestKey())
 	if !ok {
 		return nil, fmt.Errorf("oidc provider for %q isn't available (not yet fetched or fetch failed)", resolved.Target.Target.URL)
 	}

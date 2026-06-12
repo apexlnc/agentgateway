@@ -32,7 +32,6 @@ pub struct TransactionState {
 	pub transaction_id: String,
 	pub csrf_state: String,
 	pub nonce: String,
-	#[serde(serialize_with = "crate::serdes::ser_redact")]
 	pub pkce_verifier: SecretString,
 	pub original_uri: String,
 	pub expires_at_unix: u64,
@@ -43,8 +42,10 @@ impl Serialize for TransactionState {
 	where
 		S: Serializer,
 	{
-		// Cookie payloads must serialize the raw secret values so the encrypted blob can be
-		// round-tripped. The field-level redact serializers are for external config/debug output.
+		// Cookie payloads must serialize the raw secret values so the encrypted
+		// blob can be round-tripped; this hand-written impl is the ONLY
+		// serializer for this type (the derive is Deserialize-only), so never
+		// serialize it outside the encrypted-cookie path.
 		#[derive(Serialize)]
 		#[serde(rename_all = "camelCase")]
 		struct SerializableTransactionState<'a> {
@@ -74,9 +75,8 @@ impl Serialize for TransactionState {
 #[serde(rename_all = "camelCase")]
 pub struct BrowserSession {
 	pub policy_id: PolicyId,
-	#[serde(serialize_with = "crate::serdes::ser_redact")]
 	pub raw_id_token: SecretString,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[serde(default)]
 	pub expires_at_unix: Option<u64>,
 }
 
@@ -85,8 +85,10 @@ impl Serialize for BrowserSession {
 	where
 		S: Serializer,
 	{
-		// Cookie payloads must serialize the raw secret values so the encrypted blob can be
-		// round-tripped. The field-level redact serializers are for external config/debug output.
+		// Cookie payloads must serialize the raw secret values so the encrypted
+		// blob can be round-tripped; this hand-written impl is the ONLY
+		// serializer for this type (the derive is Deserialize-only), so never
+		// serialize it outside the encrypted-cookie path.
 		#[derive(Serialize)]
 		#[serde(rename_all = "camelCase")]
 		struct SerializableBrowserSession<'a> {

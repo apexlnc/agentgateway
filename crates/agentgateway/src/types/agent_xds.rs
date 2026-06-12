@@ -1216,10 +1216,14 @@ impl Route {
 			.as_ref()
 			.ok_or(ProtoError::MissingRequiredField)?
 			.into();
+		let oidc_ctx = OidcConvertCtx {
+			cookie_encoder: oidc_cookie_encoder,
+			resource: OidcEnclosingResource::Route(&s.key),
+		};
 		let inline_policies = s
 			.traffic_policies
 			.iter()
-			.map(|policy| traffic_policy_from_proto(policy, diagnostics, oidc_cookie_encoder))
+			.map(|policy| traffic_policy_from_proto(policy, diagnostics, oidc_ctx))
 			.collect::<Result<Vec<_>, _>>()?;
 		let r = Route {
 			key: strng::new(&s.key),
@@ -1832,12 +1836,40 @@ fn convert_health(
 	}
 }
 
+/// Per-resource OIDC conversion context: the cookie encoder (present only
+/// when SESSION_KEY is configured) plus the enclosing resource the session
+/// PolicyId ("policy/<key>" or "route/<key>", mirroring the local-config
+/// path) is derived from.
+#[derive(Clone, Copy)]
+struct OidcConvertCtx<'a> {
+	cookie_encoder: Option<&'a OidcCookieEncoder>,
+	resource: OidcEnclosingResource<'a>,
+}
+
+/// The xDS resource enclosing a traffic policy, for OIDC session PolicyId
+/// derivation. The PolicyId string is built only in the OIDC decode arm so
+/// the many non-OIDC resources skip the allocation.
+#[derive(Clone, Copy)]
+enum OidcEnclosingResource<'a> {
+	Route(&'a str),
+	Policy(&'a str),
+}
+
+impl OidcEnclosingResource<'_> {
+	fn session_policy_id(self) -> crate::http::oidc::PolicyId {
+		match self {
+			Self::Route(key) => crate::http::oidc::PolicyId::route(key),
+			Self::Policy(key) => crate::http::oidc::PolicyId::policy(key),
+		}
+	}
+}
+
 fn phased_traffic_policy_from_proto(
 	spec: &proto::agent::TrafficPolicySpec,
 	diagnostics: &mut Diagnostics,
-	oidc_cookie_encoder: Option<&OidcCookieEncoder>,
+	oidc_ctx: OidcConvertCtx<'_>,
 ) -> Result<PhasedTrafficPolicy, ProtoError> {
-	let policy = traffic_policy_from_proto(spec, diagnostics, oidc_cookie_encoder)?;
+	let policy = traffic_policy_from_proto(spec, diagnostics, oidc_ctx)?;
 	Ok(PhasedTrafficPolicy {
 		phase: match proto::agent::traffic_policy_spec::PolicyPhase::try_from(spec.phase)? {
 			proto::agent::traffic_policy_spec::PolicyPhase::Route => PolicyPhase::Route,
@@ -1850,7 +1882,7 @@ fn phased_traffic_policy_from_proto(
 fn traffic_policy_from_proto(
 	spec: &proto::agent::TrafficPolicySpec,
 	diagnostics: &mut Diagnostics,
-	oidc_cookie_encoder: Option<&OidcCookieEncoder>,
+	oidc_ctx: OidcConvertCtx<'_>,
 ) -> Result<TrafficPolicy, ProtoError> {
 	use crate::types::proto::agent::traffic_policy_spec as tps;
 	Ok(match &spec.kind {
@@ -1929,12 +1961,12 @@ fn traffic_policy_from_proto(
 		},
 		Some(tps::Kind::Oidc(oidc)) => {
 			// Check encoder before decode so we don't allocate client_secret on a rejected path.
-			let encoder = oidc_cookie_encoder.ok_or_else(|| {
+			let encoder = oidc_ctx.cookie_encoder.ok_or_else(|| {
 				ProtoError::Generic(
 					"received xDS OIDC policy but SESSION_KEY is not configured on this gateway".into(),
 				)
 			})?;
-			let policy = oidc_policy_from_proto(oidc)?;
+			let policy = oidc_policy_from_proto(oidc, oidc_ctx.resource.session_policy_id())?;
 			let compiled = policy
 				.compile(encoder)
 				.map_err(|e| ProtoError::Generic(format!("failed to compile xDS OIDC policy: {e}")))?;
@@ -2544,20 +2576,15 @@ fn convert_duration(d: prost_types::Duration) -> Duration {
 
 fn oidc_policy_from_proto(
 	oidc: &proto::agent::traffic_policy_spec::Oidc,
+	policy_id: crate::http::oidc::PolicyId,
 ) -> Result<crate::http::oidc::PreparedOidcPolicy, ProtoError> {
-	use std::str::FromStr;
-
 	use proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth as ProtoAuth;
 
 	use crate::http::oidc::{
-		ClientCredentials, PolicyId, PreparedOidcPolicy, ProviderEndpoint, RedirectUri,
-		parse_jwks_inline,
+		ClientCredentials, PreparedOidcPolicy, ProviderEndpoint, RedirectUri, parse_jwks_inline,
 	};
 
 	let err = |msg: String| ProtoError::Generic(format!("xDS OIDC: {msg}"));
-
-	let policy_id =
-		PolicyId::from_str(&oidc.policy_id).map_err(|e| err(format!("invalid policy_id: {e}")))?;
 	let authorization_endpoint = ProviderEndpoint::try_from(oidc.authorization_endpoint.as_str())
 		.map_err(|e| err(format!("invalid authorization_endpoint: {e}")))?;
 	let token_endpoint = ProviderEndpoint::try_from(oidc.token_endpoint.as_str())
@@ -2574,13 +2601,8 @@ fn oidc_policy_from_proto(
 		return Err(err("jwks_inline must not be empty".into()));
 	}
 
-	let client_secret = if oidc.client_secret.is_empty() {
-		None
-	} else {
-		Some(secrecy::SecretString::new(
-			oidc.client_secret.clone().into(),
-		))
-	};
+	let client_secret =
+		default_as_none(oidc.client_secret.as_str()).map(|s| secrecy::SecretString::new(s.into()));
 
 	// `token_endpoint_auth` is an optional controller override. When unspecified,
 	// resolve the method from the IdP-advertised list exactly as the local-config
@@ -2593,11 +2615,7 @@ fn oidc_policy_from_proto(
 		))
 	})? {
 		ProtoAuth::Unspecified => {
-			let advertised = if oidc.token_endpoint_auth_methods_supported.is_empty() {
-				None
-			} else {
-				Some(oidc.token_endpoint_auth_methods_supported.clone())
-			};
+			let advertised = default_as_none(oidc.token_endpoint_auth_methods_supported.clone());
 			http::oauth::parse_token_endpoint_auth_methods(advertised, client_secret.as_ref())
 				.map_err(err)?
 		},
@@ -3072,11 +3090,15 @@ pub(crate) fn targeted_policy_from_proto(
 		.ok_or(ProtoError::MissingRequiredField)
 		.and_then(policy_target_from_proto)?;
 
+	let oidc_ctx = OidcConvertCtx {
+		cookie_encoder: oidc_cookie_encoder,
+		resource: OidcEnclosingResource::Policy(&p.key),
+	};
 	let policy = match &p.kind {
 		Some(pol::Kind::Traffic(spec)) => PolicyType::Traffic(phased_traffic_policy_from_proto(
 			spec,
 			diagnostics,
-			oidc_cookie_encoder,
+			oidc_ctx,
 		)?),
 		Some(pol::Kind::Backend(spec)) => {
 			PolicyType::Backend(backend_policy_from_proto(spec, diagnostics)?)
@@ -3085,7 +3107,7 @@ pub(crate) fn targeted_policy_from_proto(
 			PolicyType::Frontend(frontend_policy_from_proto(spec, diagnostics)?)
 		},
 		Some(pol::Kind::Conditional(cond)) => {
-			conditional_policy_from_proto(cond, diagnostics, oidc_cookie_encoder)?
+			conditional_policy_from_proto(cond, diagnostics, oidc_ctx)?
 		},
 		None => return Err(ProtoError::MissingRequiredField),
 	};
@@ -3109,7 +3131,7 @@ fn policy_inheritance_from_proto(inheritance: i32) -> PolicyInheritance {
 fn conditional_policy_from_proto(
 	cond: &proto::agent::ConditionalPolicies,
 	diagnostics: &mut Diagnostics,
-	oidc_cookie_encoder: Option<&OidcCookieEncoder>,
+	oidc_ctx: OidcConvertCtx<'_>,
 ) -> Result<PolicyType, ProtoError> {
 	use crate::types::proto::agent::conditional_policy as cp;
 
@@ -3121,8 +3143,7 @@ fn conditional_policy_from_proto(
 		};
 		match kind {
 			cp::Kind::Traffic(spec) => {
-				let traffic_policy =
-					phased_traffic_policy_from_proto(spec, diagnostics, oidc_cookie_encoder)?;
+				let traffic_policy = phased_traffic_policy_from_proto(spec, diagnostics, oidc_ctx)?;
 				let policy_kind = traffic_policy_kind_name(&traffic_policy.policy);
 				let policy_phase = traffic_policy.phase;
 				if let Some((expected_kind, expected_phase)) = expected_shape {
@@ -3763,7 +3784,7 @@ mod tests {
 		};
 
 		let mut diagnostics = Diagnostics::default();
-		let policy = traffic_policy_from_proto(&spec, &mut diagnostics, None)?;
+		let policy = test_traffic_policy_from_proto(&spec, &mut diagnostics, None)?;
 		let warnings = diagnostics.into_warnings();
 		assert_eq!(warnings.len(), 1);
 		assert!(warnings[0].contains("failed to create JWT provider"));
@@ -3865,7 +3886,7 @@ mod tests {
 			kind: Some(proto::agent::traffic_policy_spec::Kind::Csrf(csrf_spec)),
 		};
 
-		let policy = traffic_policy_from_proto(&spec, &mut Diagnostics::default(), None)?;
+		let policy = test_traffic_policy_from_proto(&spec, &mut Diagnostics::default(), None)?;
 
 		if let TrafficPolicy::Csrf(_csrf_policy) = policy {
 			// We can't directly access the HashSet since it's private, but we can test
@@ -3895,7 +3916,7 @@ mod tests {
 			)),
 		};
 
-		let policy = traffic_policy_from_proto(&spec, &mut Diagnostics::default(), None)?;
+		let policy = test_traffic_policy_from_proto(&spec, &mut Diagnostics::default(), None)?;
 		let TrafficPolicy::ExtProc(policy) = policy else {
 			panic!("expected ext_proc policy");
 		};
@@ -3945,7 +3966,7 @@ mod tests {
 			)),
 		};
 
-		let policy = traffic_policy_from_proto(&spec, &mut Diagnostics::default(), None)?;
+		let policy = test_traffic_policy_from_proto(&spec, &mut Diagnostics::default(), None)?;
 		let TrafficPolicy::ExtProc(policy) = policy else {
 			panic!("expected ext_proc policy");
 		};
@@ -3984,7 +4005,7 @@ mod tests {
 			)),
 		};
 
-		let policy = traffic_policy_from_proto(&spec, &mut Diagnostics::default(), None)?;
+		let policy = test_traffic_policy_from_proto(&spec, &mut Diagnostics::default(), None)?;
 		let TrafficPolicy::ExtProc(policy) = policy else {
 			panic!("expected ext_proc policy");
 		};
@@ -4401,7 +4422,6 @@ mod tests {
 	fn sample_oidc_proto() -> proto::agent::traffic_policy_spec::Oidc {
 		use proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth;
 		proto::agent::traffic_policy_spec::Oidc {
-			policy_id: "policy/default/my-policy:oidc".to_string(),
 			issuer: "https://issuer.example.com".to_string(),
 			authorization_endpoint: "https://issuer.example.com/authorize".to_string(),
 			token_endpoint: "https://issuer.example.com/token".to_string(),
@@ -4427,6 +4447,23 @@ mod tests {
 		}
 	}
 
+	/// Test shim supplying a fixed session PolicyId, mirroring what
+	/// targeted_policy_from_proto derives from the resource key in production.
+	fn test_traffic_policy_from_proto(
+		spec: &proto::agent::TrafficPolicySpec,
+		diagnostics: &mut Diagnostics,
+		cookie_encoder: Option<&OidcCookieEncoder>,
+	) -> Result<TrafficPolicy, ProtoError> {
+		traffic_policy_from_proto(
+			spec,
+			diagnostics,
+			OidcConvertCtx {
+				cookie_encoder,
+				resource: OidcEnclosingResource::Policy("default/test-policy:oidc"),
+			},
+		)
+	}
+
 	fn test_oidc_cookie_encoder() -> OidcCookieEncoder {
 		let session_encoder = crate::http::sessionpersistence::Encoder::aes(
 			"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -4447,10 +4484,11 @@ mod tests {
 	fn assert_oidc_proto_rejected(oidc: proto::agent::traffic_policy_spec::Oidc, expected: &str) {
 		let spec = oidc_traffic_spec(oidc);
 		let encoder = test_oidc_cookie_encoder();
-		let err = match traffic_policy_from_proto(&spec, &mut Diagnostics::default(), Some(&encoder)) {
-			Ok(_) => panic!("expected xDS OIDC policy to be rejected"),
-			Err(err) => err,
-		};
+		let err =
+			match test_traffic_policy_from_proto(&spec, &mut Diagnostics::default(), Some(&encoder)) {
+				Ok(_) => panic!("expected xDS OIDC policy to be rejected"),
+				Err(err) => err,
+			};
 		let msg = err.to_string();
 		assert!(
 			msg.contains(expected),
@@ -4463,7 +4501,8 @@ mod tests {
 		let spec = oidc_traffic_spec(sample_oidc_proto());
 
 		let encoder = test_oidc_cookie_encoder();
-		let policy = traffic_policy_from_proto(&spec, &mut Diagnostics::default(), Some(&encoder))?;
+		let policy =
+			test_traffic_policy_from_proto(&spec, &mut Diagnostics::default(), Some(&encoder))?;
 		let TrafficPolicy::Oidc(_) = &policy else {
 			panic!("Expected Oidc");
 		};
@@ -4474,7 +4513,7 @@ mod tests {
 	fn test_oidc_spec_requires_session_key() {
 		let spec = oidc_traffic_spec(sample_oidc_proto());
 
-		let err = match traffic_policy_from_proto(&spec, &mut Diagnostics::default(), None) {
+		let err = match test_traffic_policy_from_proto(&spec, &mut Diagnostics::default(), None) {
 			Ok(_) => panic!("expected missing SESSION_KEY"),
 			Err(err) => err,
 		};
@@ -4482,20 +4521,6 @@ mod tests {
 			err.to_string().contains("SESSION_KEY"),
 			"unexpected error: {err}",
 		);
-	}
-
-	#[test]
-	fn test_oidc_spec_rejects_invalid_policy_id() {
-		let mut oidc = sample_oidc_proto();
-		oidc.policy_id = "not-a-valid-prefix".into();
-		assert_oidc_proto_rejected(oidc, "invalid policy_id");
-	}
-
-	#[test]
-	fn test_oidc_spec_rejects_empty_policy_id() {
-		let mut oidc = sample_oidc_proto();
-		oidc.policy_id = String::new();
-		assert_oidc_proto_rejected(oidc, "invalid policy_id");
 	}
 
 	#[test]
@@ -4511,7 +4536,8 @@ mod tests {
 
 		let spec = oidc_traffic_spec(oidc);
 		let encoder = test_oidc_cookie_encoder();
-		let policy = traffic_policy_from_proto(&spec, &mut Diagnostics::default(), Some(&encoder))?;
+		let policy =
+			test_traffic_policy_from_proto(&spec, &mut Diagnostics::default(), Some(&encoder))?;
 		assert!(matches!(policy, TrafficPolicy::Oidc(_)));
 		Ok(())
 	}
@@ -4542,7 +4568,8 @@ mod tests {
 
 		let spec = oidc_traffic_spec(oidc);
 		let encoder = test_oidc_cookie_encoder();
-		let policy = traffic_policy_from_proto(&spec, &mut Diagnostics::default(), Some(&encoder))?;
+		let policy =
+			test_traffic_policy_from_proto(&spec, &mut Diagnostics::default(), Some(&encoder))?;
 		assert!(matches!(policy, TrafficPolicy::Oidc(_)));
 		Ok(())
 	}

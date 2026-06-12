@@ -16,6 +16,13 @@ type ResolvedJwksRequest struct {
 	TTL     time.Duration
 }
 
+// RequestKey derives the fetch key from the resolved target. A method rather
+// than a field so the fetch-request collection and the translation-time
+// lookup cannot diverge on key derivation (mirrors ResolvedOidcRequest).
+func (r *ResolvedJwksRequest) RequestKey() remotehttp.FetchKey {
+	return r.Target.Target.Key()
+}
+
 type Resolver interface {
 	ResolveOwner(krtctx krt.HandlerContext, owner RemoteJwksOwner) (*ResolvedJwksRequest, error)
 }

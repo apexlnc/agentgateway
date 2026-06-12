@@ -238,12 +238,14 @@ func (s *setup) Start(ctx context.Context) error {
 	})
 	persistedJWKS := s.PersistedJWKS
 	if persistedJWKS == nil {
-		persistedJWKS = jwks.NewPersistedEntries(s.APIClient, krtOpts, jwks.DefaultJwksStorePrefix, namespaces.GetPodNamespace())
+		persistedJWKS = jwks.NewPersistedEntries(s.APIClient, krtOpts, namespaces.GetPodNamespace())
 	}
-	jwksLookup := jwks.NewLookup(persistedJWKS, jwks.NewResolver(resolver))
+	jwksResolver := jwks.NewResolver(resolver)
+	jwksLookup := jwks.NewLookup(persistedJWKS, jwksResolver)
 
-	persistedOIDC := oidc.NewPersistedEntries(s.APIClient, krtOpts, oidc.DefaultStorePrefix, namespaces.GetPodNamespace())
-	oidcLookup := oidc.NewLookup(persistedOIDC, oidc.NewResolver(resolver))
+	persistedOIDC := oidc.NewPersistedEntries(s.APIClient, krtOpts, namespaces.GetPodNamespace())
+	oidcResolver := oidc.NewResolver(resolver)
+	oidcLookup := oidc.NewLookup(persistedOIDC, oidcResolver)
 
 	for _, mgrCfgFunc := range s.ExtraManagerConfig {
 		err := mgrCfgFunc(mgr)
@@ -268,14 +270,14 @@ func (s *setup) Start(ctx context.Context) error {
 
 	// build jwks store if it doesn't exist
 	if !runnablesRegistry.Contains(jwks.DefaultJwksStorePrefix) {
-		if err := buildJwksStore(mgr, s.APIClient, agwCollections, persistedJWKS, resolver); err != nil {
+		if err := buildJwksStore(mgr, s.APIClient, agwCollections, persistedJWKS, jwksResolver); err != nil {
 			return fmt.Errorf("error creating jwks store %w", err)
 		}
 	}
 
 	// build oidc store
 	if !runnablesRegistry.Contains(oidc.DefaultStorePrefix) {
-		if err := buildOidcStore(mgr, s.APIClient, agwCollections, persistedOIDC, resolver); err != nil {
+		if err := buildOidcStore(mgr, s.APIClient, agwCollections, persistedOIDC, oidcResolver); err != nil {
 			return fmt.Errorf("error creating oidc store %w", err)
 		}
 	}
@@ -442,16 +444,16 @@ func buildJwksStore(
 	apiClient apiclient.Client,
 	agwCollections *agwplugins.AgwCollections,
 	persistedJWKS *jwks.PersistedEntries,
-	resolver remotehttp.Resolver,
+	resolver jwks.Resolver,
 ) error {
 	jwksCollections := jwks.NewCollections(jwks.CollectionInputs{
 		AgentgatewayPolicies: agwCollections.AgentgatewayPolicies,
 		Backends:             agwCollections.Backends,
-		Resolver:             jwks.NewResolver(resolver),
+		Resolver:             resolver,
 		KrtOpts:              agwCollections.KrtOpts,
 	})
 
-	jwksStore := jwks.NewStore(jwksCollections.SharedRequests, persistedJWKS, jwks.DefaultJwksStorePrefix)
+	jwksStore := jwks.NewStore(jwksCollections.SharedRequests, persistedJWKS)
 	if err := mgr.Add(jwksStore); err != nil {
 		return err
 	}
@@ -477,15 +479,15 @@ func buildOidcStore(
 	apiClient apiclient.Client,
 	agwCollections *agwplugins.AgwCollections,
 	persistedOIDC *oidc.PersistedEntries,
-	resolver remotehttp.Resolver,
+	resolver oidc.Resolver,
 ) error {
 	oidcCollections := oidc.NewCollections(oidc.CollectionInputs{
 		AgentgatewayPolicies: agwCollections.AgentgatewayPolicies,
-		Resolver:             oidc.NewResolver(resolver),
+		Resolver:             resolver,
 		KrtOpts:              agwCollections.KrtOpts,
 	})
 
-	oidcStore := oidc.NewStore(oidcCollections.SharedRequests, persistedOIDC, oidc.DefaultStorePrefix)
+	oidcStore := oidc.NewStore(oidcCollections.SharedRequests, persistedOIDC)
 	if err := mgr.Add(oidcStore); err != nil {
 		return err
 	}

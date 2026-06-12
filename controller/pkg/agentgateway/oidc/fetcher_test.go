@@ -100,11 +100,11 @@ func TestOidcDriverRoutesBackendRefJWKSViaResolvedTarget(t *testing.T) {
 	target := remotehttp.FetchTarget{URL: backend.URL + discoveryPath}
 	driver := &OidcDriver{DefaultClient: backend.Client()}
 	source := SharedOidcRequest{oidcRequestSpec{
-		RequestKey:            oidcRequestKey(target, expectedIssuer, &target),
-		ExpectedIssuer:        expectedIssuer,
-		Target:                target,
-		ProviderBackendTarget: &target,
-		TTL:                   time.Hour,
+		RequestKey:     oidcRequestKey(target, expectedIssuer, true),
+		ExpectedIssuer: expectedIssuer,
+		Target:         target,
+		ViaBackendRef:  true,
+		TTL:            time.Hour,
 	}}
 
 	provider, err := driver.Fetch(t.Context(), source)

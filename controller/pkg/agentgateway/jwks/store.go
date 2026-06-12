@@ -4,7 +4,6 @@ import (
 	"istio.io/istio/pkg/kube/krt"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
-	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/common"
 	"github.com/agentgateway/agentgateway/controller/pkg/logging"
 )
@@ -27,13 +26,11 @@ type Store struct {
 	*remotecache.Store[SharedJwksRequest, Keyset]
 	// Driver is the JWKS HTTP fetch driver. Exposed so tests can swap its
 	// DefaultClient for an offline transport.
-	Driver  *JwksDriver
-	results *JwksResults
+	Driver *JwksDriver
 }
 
-func NewStore(requests krt.Collection[SharedJwksRequest], persistedEntries *PersistedEntries, storePrefix string) *Store {
-	results := NewFetchedResults()
-	fetcher, driver := NewFetcher(results)
+func NewStore(requests krt.Collection[SharedJwksRequest], persistedEntries *PersistedEntries) *Store {
+	fetcher, driver := NewFetcher(NewFetchedResults())
 	innerStore := remotecache.NewStore(remotecache.StoreOptions[SharedJwksRequest, Keyset]{
 		Fetcher:  fetcher,
 		Requests: requests,
@@ -42,18 +39,9 @@ func NewStore(requests krt.Collection[SharedJwksRequest], persistedEntries *Pers
 	})
 
 	return &Store{
-		Store:   innerStore,
-		Driver:  driver,
-		results: results,
+		Store:  innerStore,
+		Driver: driver,
 	}
-}
-
-func (s *Store) JwksByRequestKey(requestKey remotehttp.FetchKey) (Keyset, bool) {
-	return s.results.Get(requestKey)
-}
-
-func (s *Store) FetchedResults() *JwksResults {
-	return s.results
 }
 
 func (s *Store) RunnableName() string {

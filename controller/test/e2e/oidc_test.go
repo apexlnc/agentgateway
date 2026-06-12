@@ -7,6 +7,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -27,8 +30,37 @@ import (
 const (
 	oidcSystemNamespace = "agentgateway-system"
 	oidcIssuerURL       = "https://dummy-idp.default.svc.cluster.local:8443"
-	oidcClientID        = "mcp_gi3APARn2_uHv2oxfJJqq2yZBDV4OyNo"
+	oidcClientID        = testoidc.ClientID
 )
+
+// TestOidcTestdataPinsSharedClientID pins every clientID literal in the OIDC
+// testdata manifests to the shared testoidc fixture; YAML cannot reference
+// the Go constant, so this guard is what keeps them from drifting.
+func TestOidcTestdataPinsSharedClientID(t *testing.T) {
+	manifests, err := filepath.Glob(manifest("oidc", "*.yaml"))
+	if err != nil || len(manifests) == 0 {
+		t.Fatalf("globbing oidc testdata manifests: %v (%d found)", err, len(manifests))
+	}
+	found := 0
+	for _, path := range manifests {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for line := range strings.SplitSeq(string(raw), "\n") {
+			if !strings.Contains(line, "clientID:") {
+				continue
+			}
+			found++
+			if want := "clientID: " + testoidc.ClientID; strings.TrimSpace(line) != want {
+				t.Errorf("%s: %q drifted from the shared fixture (want %q)", filepath.Base(path), strings.TrimSpace(line), want)
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("no clientID lines found in oidc testdata; guard is vacuous")
+	}
+}
 
 func TestOidc(tt *testing.T) {
 	t := New(tt)
@@ -171,10 +203,7 @@ func findOIDCCookie(cookies []*http.Cookie, prefix string) *http.Cookie {
 }
 
 func cookieIsCleared(setCookies []string, name string) bool {
-	for _, v := range setCookies {
-		if strings.HasPrefix(v, name+"=") && strings.Contains(v, "Max-Age=0") {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(setCookies, func(v string) bool {
+		return strings.HasPrefix(v, name+"=") && strings.Contains(v, "Max-Age=0")
+	})
 }

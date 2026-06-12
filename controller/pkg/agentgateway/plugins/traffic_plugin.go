@@ -412,27 +412,12 @@ func ClonePoliciesForTarget(base []*api.Policy, policyTarget *api.PolicyTarget) 
 	out := make([]*api.Policy, 0, len(base))
 	attachment := attachmentName(policyTarget)
 	for _, p := range base {
-		// OIDC carries a nested policy_id that must track the cloned effective
-		// key, so a shallow clone would alias it across attachments.
-		var clone *api.Policy
-		if p.GetTraffic().GetOidc() != nil {
-			clone = protomarshal.Clone(p)
-		} else {
-			clone = protomarshal.ShallowClone(p)
-		}
+		clone := protomarshal.ShallowClone(p)
 		clone.Key += attachment
 		clone.Target = policyTarget
-		syncOIDCPolicyIDWithPolicyKey(clone)
 		out = append(out, clone)
 	}
 	return out
-}
-
-func syncOIDCPolicyIDWithPolicyKey(p *api.Policy) {
-	if p.GetTraffic().GetOidc() == nil {
-		return
-	}
-	p.GetTraffic().GetOidc().PolicyId = oidcPolicyIDForPolicyKey(p.Key)
 }
 
 func translateTrafficPolicyToAgw(
@@ -577,11 +562,12 @@ func translateTrafficPolicyToAgw(
 	}
 
 	if traffic.OIDC != nil {
-		// OIDC keys off policyName (not basePolicyName) so Policy.Key seeds a
-		// stable PolicyId — that PolicyId is hashed into OIDC cookie names on
-		// the dataplane. Switching to basePolicyName would invalidate every
-		// active session cookie on rollout.
-		appendPolicy("oidc")(processOIDCPolicy(ctx, traffic.OIDC, traffic.Phase, policyName, policyName.String(), ctx.OidcLookup))
+		// OIDC keys off policyName (not basePolicyName) so the effective
+		// Policy.Key stays stable — the dataplane derives the OIDC session
+		// PolicyId (hashed into cookie names) from that key. Switching to
+		// basePolicyName would invalidate every active session cookie on
+		// rollout.
+		appendPolicy("oidc")(processOIDCPolicy(ctx, traffic.OIDC, traffic.Phase, policyName))
 	}
 
 	if traffic.APIKeyAuthentication != nil {

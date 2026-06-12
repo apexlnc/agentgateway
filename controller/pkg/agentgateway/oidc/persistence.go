@@ -37,14 +37,14 @@ func OidcCodec() remotecache.Codec[DiscoveredProvider] {
 }
 
 // NewPersistedEntries constructs the KRT-backed OIDC persistence layer.
-func NewPersistedEntries(client apiclient.Client, krtOptions krtutil.KrtOptions, storePrefix, deploymentNamespace string) *PersistedEntries {
-	return remotecache.New(OidcCodec(), client, krtOptions, storePrefix, deploymentNamespace)
+func NewPersistedEntries(client apiclient.Client, krtOptions krtutil.KrtOptions, deploymentNamespace string) *PersistedEntries {
+	return remotecache.New(OidcCodec(), client, krtOptions, DefaultStorePrefix, deploymentNamespace)
 }
 
 // NewPersistedEntriesFromCollection constructs a PersistedEntries from an
 // existing ConfigMap collection. Useful for testing with static collections.
-func NewPersistedEntriesFromCollection(configMaps krt.Collection[*corev1.ConfigMap], storePrefix, deploymentNamespace string) *PersistedEntries {
-	return remotecache.NewFromCollection(OidcCodec(), configMaps, storePrefix, deploymentNamespace)
+func NewPersistedEntriesFromCollection(configMaps krt.Collection[*corev1.ConfigMap], deploymentNamespace string) *PersistedEntries {
+	return remotecache.NewFromCollection(OidcCodec(), configMaps, DefaultStorePrefix, deploymentNamespace)
 }
 
 // ProviderFromConfigMap parses a DiscoveredProvider from a ConfigMap.

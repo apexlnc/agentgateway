@@ -3020,7 +3020,6 @@ mod tests {
 			kind: Some(agent::policy::Kind::Traffic(agent::TrafficPolicySpec {
 				kind: Some(agent::traffic_policy_spec::Kind::Oidc(
 					agent::traffic_policy_spec::Oidc {
-						policy_id: "route/test-route".to_string(),
 						issuer: "https://example.com".to_string(),
 						authorization_endpoint: "https://example.com/auth".to_string(),
 						token_endpoint: "https://example.com/token".to_string(),

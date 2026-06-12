@@ -56,23 +56,6 @@ impl PolicyId {
 	}
 }
 
-impl std::str::FromStr for PolicyId {
-	type Err = String;
-
-	fn from_str(value: &str) -> Result<Self, Self::Err> {
-		let (prefix, rest) = value
-			.split_once('/')
-			.ok_or_else(|| format!("policy id '{value}' missing '<prefix>/' segment"))?;
-		if rest.is_empty() {
-			return Err(format!("policy id '{value}' has empty identifier"));
-		}
-		if !matches!(prefix, "route" | "policy") {
-			return Err(format!("unknown policy id prefix '{prefix}'"));
-		}
-		Ok(Self(value.to_string()))
-	}
-}
-
 /// Validated absolute HTTP(S) endpoint used by an OIDC provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderEndpoint(url::Url);
@@ -270,12 +253,6 @@ pub enum Error {
 	Http(#[from] anyhow::Error),
 }
 
-struct CallbackQuery {
-	state: String,
-	code: Option<String>,
-	error: Option<String>,
-}
-
 impl OidcPolicy {
 	pub async fn apply(
 		&self,
@@ -283,7 +260,7 @@ impl OidcPolicy {
 		req: &mut Request,
 		client: PolicyClient,
 	) -> Result<PolicyResponse, Error> {
-		if let Some(response) = self.maybe_handle_callback(req, client.clone()).await? {
+		if let Some(response) = callback::maybe_handle(self, req, client.clone()).await? {
 			return Ok(response);
 		}
 
@@ -316,46 +293,6 @@ impl OidcPolicy {
 		// OIDC is an interactive browser policy: unauthenticated non-callback requests enter login.
 		callback::start_login(self, req)
 	}
-
-	async fn maybe_handle_callback(
-		&self,
-		req: &mut Request,
-		client: PolicyClient,
-	) -> Result<Option<PolicyResponse>, Error> {
-		if req.method() != ::http::Method::GET
-			|| req.uri().path() != self.redirect_uri.callback_path.path()
-		{
-			return Ok(None);
-		}
-
-		let Some(query) = CallbackQuery::parse(req) else {
-			return Ok(None);
-		};
-
-		let callback_state = callback::CallbackTransactionState::decode(&query.state)?;
-		let transaction_cookie_name = self
-			.session
-			.transaction_cookie_name(&callback_state.transaction_id);
-		let transaction_cookie = crate::http::read_request_cookie(req, &transaction_cookie_name)
-			.ok_or(Error::MissingTransaction)?
-			.to_string();
-		if let Some(error) = query.error {
-			return Err(Error::ProviderCallback(error));
-		}
-		let code = query.code.ok_or(Error::InvalidCallback)?;
-		let response = callback::handle_callback(
-			self,
-			callback::CallbackRequestContext {
-				code,
-				callback_state,
-				transaction_cookie_name,
-				transaction_cookie,
-			},
-			client,
-		)
-		.await?;
-		Ok(Some(response))
-	}
 }
 
 impl crate::store::RequestPolicyTrait for OidcPolicy {
@@ -380,32 +317,6 @@ fn is_cors_preflight(req: &Request) -> bool {
 			.get(header::ACCESS_CONTROL_REQUEST_METHOD)
 			.map(|value| !value.as_bytes().is_empty())
 			.unwrap_or(false)
-}
-
-impl CallbackQuery {
-	/// Parse callback query parameters from the request in a single pass.
-	/// Returns `None` if the query does not contain `state` + (`code` | `error`),
-	/// meaning this request is not an OAuth2 callback.
-	fn parse(req: &Request) -> Option<Self> {
-		let mut state = None;
-		let mut code = None;
-		let mut error = None;
-		for (key, value) in
-			url::form_urlencoded::parse(req.uri().query().unwrap_or_default().as_bytes())
-		{
-			match key.as_ref() {
-				"state" => state = Some(value.into_owned()),
-				"code" => code = Some(value.into_owned()),
-				"error" => error = Some(value.into_owned()),
-				_ => {},
-			}
-		}
-		let state = state?;
-		if code.is_none() && error.is_none() {
-			return None;
-		}
-		Some(CallbackQuery { state, code, error })
-	}
 }
 
 pub(crate) fn build_redirect_response(

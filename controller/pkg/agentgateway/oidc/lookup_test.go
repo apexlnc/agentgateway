@@ -31,8 +31,8 @@ func TestLookupUsesResolvedTargetKey(t *testing.T) {
 			ServerName: "issuer.example",
 		},
 	}
-	requestKey := oidcRequestKey(backendTarget, issuer, &backendTarget)
-	require.NotEqual(t, oidcRequestKey(directTarget, issuer, nil), requestKey)
+	requestKey := oidcRequestKey(backendTarget, issuer, true)
+	require.NotEqual(t, oidcRequestKey(directTarget, issuer, false), requestKey)
 
 	provider := DiscoveredProvider{
 		RequestKey:            requestKey,
@@ -53,16 +53,14 @@ func TestLookupUsesResolvedTargetKey(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		krt.NewStaticCollection[*corev1.ConfigMap](nil, []*corev1.ConfigMap{cm}, krt.WithName("oidc/LookupResolvedTargetConfigMaps")),
-		DefaultStorePrefix,
 		"agentgateway-system",
 	)
 	lookup := NewLookup(persisted, staticLookupResolver{resolved: &ResolvedOidcRequest{
 		Target: remotehttp.ResolvedTarget{
-			Key:    backendTarget.Key(),
 			Target: backendTarget,
 		},
-		ExpectedIssuer:        issuer,
-		ProviderBackendTarget: &backendTarget,
+		ExpectedIssuer: issuer,
+		ViaBackendRef:  true,
 	}})
 	persisted.Collection().WaitUntilSynced(stop)
 

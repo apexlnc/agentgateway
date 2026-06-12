@@ -8,6 +8,7 @@ import (
 
 	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/ptr"
+	"istio.io/istio/pkg/slices"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -112,7 +113,7 @@ func (r *defaultResolver) Resolve(krtctx krt.HandlerContext, input ResolveInput)
 			Verification: resolved.proxyTLS.verification,
 			ServerName:   resolved.proxyTLS.serverName,
 			CABundleHash: resolved.proxyTLS.caBundleHash,
-			NextProtos:   append([]string(nil), resolved.proxyTLS.nextProtos...),
+			NextProtos:   slices.Clone(resolved.proxyTLS.nextProtos),
 		}
 	}
 
@@ -124,7 +125,6 @@ func (r *defaultResolver) Resolve(krtctx krt.HandlerContext, input ResolveInput)
 	if resolved.tls == nil {
 		target.URL = fmt.Sprintf("http://%s/%s", resolved.connectHost, path)
 		return &ResolvedTarget{
-			Key:            target.Key(),
 			Target:         target,
 			ProxyTLSConfig: proxyTLSConfig,
 		}, nil
@@ -135,11 +135,10 @@ func (r *defaultResolver) Resolve(krtctx krt.HandlerContext, input ResolveInput)
 		Verification: resolved.tls.verification,
 		ServerName:   resolved.tls.serverName,
 		CABundleHash: resolved.tls.caBundleHash,
-		NextProtos:   append([]string(nil), resolved.tls.nextProtos...),
+		NextProtos:   slices.Clone(resolved.tls.nextProtos),
 	}
 
 	return &ResolvedTarget{
-		Key:            target.Key(),
 		Target:         target,
 		TLSConfig:      resolved.tls.tlsConfig,
 		ProxyTLSConfig: proxyTLSConfig,

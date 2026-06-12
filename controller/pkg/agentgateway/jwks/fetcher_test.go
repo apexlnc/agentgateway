@@ -49,40 +49,6 @@ func TestRemoveKeysetClearsResultsEvenWithoutRequest(t *testing.T) {
 	assert.False(t, ok, "fetched result should be cleared even when request was not tracked")
 }
 
-func TestRetireKeysetKeepsResultThenSweptOnSuccessfulFetch(t *testing.T) {
-	ctx := t.Context()
-	oldSource := testSharedJwksRequest("https://test/old-jwks")
-	newSource := testSharedJwksRequest("https://test/new-jwks")
-
-	results := NewFetchedResults()
-	f, _ := NewFetcher(results)
-	f.AddOrUpdate(oldSource)
-	seedJwksResultsForTest(results, oldSource.RequestKey, oldSource.Target.URL)
-
-	f.Retire(oldSource.RequestKey)
-
-	assert.Equal(t, 0, f.RequestCountForTest(), "retired key should be removed from requests")
-	_, inResults := results.Get(oldSource.RequestKey)
-	assert.True(t, inResults, "retired key should remain in fetched results")
-
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, sampleJWKS)
-	}))
-	defer backend.Close()
-	newSource.Target.URL = backend.URL
-	newSource.RequestKey = newSource.Target.Key()
-
-	f.AddOrUpdate(newSource)
-	go f.Run(ctx)
-
-	keyset := awaitStoredKeyset(t, results, newSource.RequestKey)
-	assert.Equal(t, sampleJWKS, keyset.JwksJSON)
-
-	_, inResults = results.Get(oldSource.RequestKey)
-	assert.False(t, inResults, "retired key should be swept after successful fetch")
-}
-
 func TestSuccessfulJwksFetch(t *testing.T) {
 	ctx := t.Context()
 

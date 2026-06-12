@@ -34,12 +34,8 @@ func (r *FetchedResults[R]) Put(result R) {
 	r.collection.UpdateObject(result)
 }
 
-func (r *FetchedResults[R]) Delete(key remotehttp.FetchKey) bool {
-	_, existed := r.Get(key)
-	if existed {
-		r.collection.DeleteObject(string(key))
-	}
-	return existed
+func (r *FetchedResults[R]) Delete(key remotehttp.FetchKey) {
+	r.collection.DeleteObject(string(key))
 }
 
 func (r *FetchedResults[R]) DeleteObjects(filter func(R) bool) {

@@ -10449,9 +10449,6 @@ func (x *TrafficPolicySpec_HostRewrite) GetMode() TrafficPolicySpec_HostRewrite_
 // itself.
 type TrafficPolicySpec_OIDC struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Runtime session namespace. Encoded as "route/<key>" or "policy/<key>",
-	// where <key> is the effective emitted xDS resource key.
-	PolicyId string `protobuf:"bytes,1,opt,name=policy_id,json=policyId,proto3" json:"policy_id,omitempty"`
 	// IdP issuer identifier (matches the "iss" claim on id tokens).
 	Issuer string `protobuf:"bytes,2,opt,name=issuer,proto3" json:"issuer,omitempty"`
 	// Absolute authorization endpoint URL (the /authorize URL).
@@ -10475,7 +10472,8 @@ type TrafficPolicySpec_OIDC struct {
 	ClientSecret string `protobuf:"bytes,8,opt,name=client_secret,json=clientSecret,proto3" json:"client_secret,omitempty"`
 	// Absolute callback URI registered with the IdP.
 	RedirectUri string `protobuf:"bytes,9,opt,name=redirect_uri,json=redirectUri,proto3" json:"redirect_uri,omitempty"`
-	// Requested scopes. When empty, the dataplane falls back to ["openid"].
+	// Requested scopes. The dataplane always includes `openid` and drops
+	// duplicates (normalize_scopes, shared with the local-config path).
 	Scopes []string `protobuf:"bytes,10,rep,name=scopes,proto3" json:"scopes,omitempty"`
 	// Optional backend reference used for token-endpoint calls. When set, the
 	// dataplane routes the token exchange through the referenced backend and
@@ -10521,13 +10519,6 @@ func (x *TrafficPolicySpec_OIDC) ProtoReflect() protoreflect.Message {
 // Deprecated: Use TrafficPolicySpec_OIDC.ProtoReflect.Descriptor instead.
 func (*TrafficPolicySpec_OIDC) Descriptor() ([]byte, []int) {
 	return file_resource_proto_rawDescGZIP(), []int{53, 14}
-}
-
-func (x *TrafficPolicySpec_OIDC) GetPolicyId() string {
-	if x != nil {
-		return x.PolicyId
-	}
-	return ""
 }
 
 func (x *TrafficPolicySpec_OIDC) GetIssuer() string {
@@ -11172,7 +11163,7 @@ type TrafficPolicySpec_ExtProc_NamespacedMetadataContext struct {
 
 func (x *TrafficPolicySpec_ExtProc_NamespacedMetadataContext) Reset() {
 	*x = TrafficPolicySpec_ExtProc_NamespacedMetadataContext{}
-	mi := &file_resource_proto_msgTypes[120]
+	mi := &file_resource_proto_msgTypes[122]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11184,7 +11175,7 @@ func (x *TrafficPolicySpec_ExtProc_NamespacedMetadataContext) String() string {
 func (*TrafficPolicySpec_ExtProc_NamespacedMetadataContext) ProtoMessage() {}
 
 func (x *TrafficPolicySpec_ExtProc_NamespacedMetadataContext) ProtoReflect() protoreflect.Message {
-	mi := &file_resource_proto_msgTypes[120]
+	mi := &file_resource_proto_msgTypes[122]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11197,7 +11188,7 @@ func (x *TrafficPolicySpec_ExtProc_NamespacedMetadataContext) ProtoReflect() pro
 
 // Deprecated: Use TrafficPolicySpec_ExtProc_NamespacedMetadataContext.ProtoReflect.Descriptor instead.
 func (*TrafficPolicySpec_ExtProc_NamespacedMetadataContext) Descriptor() ([]byte, []int) {
-	return file_resource_proto_rawDescGZIP(), []int{53, 12, 0}
+	return file_resource_proto_rawDescGZIP(), []int{53, 12, 2}
 }
 
 func (x *TrafficPolicySpec_ExtProc_NamespacedMetadataContext) GetContext() map[string]string {
@@ -11224,7 +11215,7 @@ type TrafficPolicySpec_ExtProc_ProcessingOptions struct {
 
 func (x *TrafficPolicySpec_ExtProc_ProcessingOptions) Reset() {
 	*x = TrafficPolicySpec_ExtProc_ProcessingOptions{}
-	mi := &file_resource_proto_msgTypes[121]
+	mi := &file_resource_proto_msgTypes[123]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11236,7 +11227,7 @@ func (x *TrafficPolicySpec_ExtProc_ProcessingOptions) String() string {
 func (*TrafficPolicySpec_ExtProc_ProcessingOptions) ProtoMessage() {}
 
 func (x *TrafficPolicySpec_ExtProc_ProcessingOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_resource_proto_msgTypes[121]
+	mi := &file_resource_proto_msgTypes[123]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11249,7 +11240,7 @@ func (x *TrafficPolicySpec_ExtProc_ProcessingOptions) ProtoReflect() protoreflec
 
 // Deprecated: Use TrafficPolicySpec_ExtProc_ProcessingOptions.ProtoReflect.Descriptor instead.
 func (*TrafficPolicySpec_ExtProc_ProcessingOptions) Descriptor() ([]byte, []int) {
-	return file_resource_proto_rawDescGZIP(), []int{53, 12, 1}
+	return file_resource_proto_rawDescGZIP(), []int{53, 12, 3}
 }
 
 func (x *TrafficPolicySpec_ExtProc_ProcessingOptions) GetRequestBodyMode() TrafficPolicySpec_ExtProc_BodySendMode {
@@ -14798,7 +14789,7 @@ const file_resource_proto_rawDesc = "" +
 	"\x03add\x18\x01 \x03(\v2;.agentgateway.dev.resource.FrontendPolicySpec.Metrics.FieldR\x03addB\x06\n" +
 	"\x04kind\"?\n" +
 	"\x14JWTValidationOptions\x12'\n" +
-	"\x0frequired_claims\x18\x01 \x03(\tR\x0erequiredClaims\"\xc1R\n" +
+	"\x0frequired_claims\x18\x01 \x03(\tR\x0erequiredClaims\"\xaaR\n" +
 	"\x11TrafficPolicySpec\x12N\n" +
 	"\x05phase\x18\x01 \x01(\x0e28.agentgateway.dev.resource.TrafficPolicySpec.PolicyPhaseR\x05phase\x12>\n" +
 	"\atimeout\x18\x02 \x01(\v2\".agentgateway.dev.resource.TimeoutH\x00R\atimeout\x128\n" +
@@ -14986,7 +14977,13 @@ const file_resource_proto_rawDesc = "" +
 	"\x12request_attributes\x18\x03 \x03(\v2K.agentgateway.dev.resource.TrafficPolicySpec.ExtProc.RequestAttributesEntryR\x11requestAttributes\x12}\n" +
 	"\x13response_attributes\x18\x04 \x03(\v2L.agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ResponseAttributesEntryR\x12responseAttributes\x12t\n" +
 	"\x10metadata_context\x18\x05 \x03(\v2I.agentgateway.dev.resource.TrafficPolicySpec.ExtProc.MetadataContextEntryR\x0fmetadataContext\x12u\n" +
-	"\x12processing_options\x18\x06 \x01(\v2F.agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ProcessingOptionsR\x11processingOptions\x1a\xce\x01\n" +
+	"\x12processing_options\x18\x06 \x01(\v2F.agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ProcessingOptionsR\x11processingOptions\x1aD\n" +
+	"\x16RequestAttributesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aE\n" +
+	"\x17ResponseAttributesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a\xce\x01\n" +
 	"\x19NamespacedMetadataContext\x12u\n" +
 	"\acontext\x18\x01 \x03(\v2[.agentgateway.dev.resource.TrafficPolicySpec.ExtProc.NamespacedMetadataContext.ContextEntryR\acontext\x1a:\n" +
 	"\fContextEntry\x12\x10\n" +
@@ -14999,13 +14996,7 @@ const file_resource_proto_rawDesc = "" +
 	"\x14response_header_mode\x18\x04 \x01(\x0e2J.agentgateway.dev.resource.TrafficPolicySpec.ExtProc.HeaderTrailerSendModeR\x12responseHeaderMode\x12|\n" +
 	"\x14request_trailer_mode\x18\x05 \x01(\x0e2J.agentgateway.dev.resource.TrafficPolicySpec.ExtProc.HeaderTrailerSendModeR\x12requestTrailerMode\x12~\n" +
 	"\x15response_trailer_mode\x18\x06 \x01(\x0e2J.agentgateway.dev.resource.TrafficPolicySpec.ExtProc.HeaderTrailerSendModeR\x13responseTrailerMode\x12.\n" +
-	"\x13allow_mode_override\x18\a \x01(\bR\x11allowModeOverride\x1aD\n" +
-	"\x16RequestAttributesEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aE\n" +
-	"\x17ResponseAttributesEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a\x92\x01\n" +
+	"\x13allow_mode_override\x18\a \x01(\bR\x11allowModeOverride\x1a\x92\x01\n" +
 	"\x14MetadataContextEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12d\n" +
 	"\x05value\x18\x02 \x01(\v2N.agentgateway.dev.resource.TrafficPolicySpec.ExtProc.NamespacedMetadataContextR\x05value:\x028\x01\"-\n" +
@@ -15025,9 +15016,8 @@ const file_resource_proto_rawDesc = "" +
 	"\x04mode\x18\x01 \x01(\x0e2=.agentgateway.dev.resource.TrafficPolicySpec.HostRewrite.ModeR\x04mode\"\x1a\n" +
 	"\x04Mode\x12\b\n" +
 	"\x04NONE\x10\x00\x12\b\n" +
-	"\x04AUTO\x10\x01\x1a\xcb\x05\n" +
-	"\x04OIDC\x12\x1b\n" +
-	"\tpolicy_id\x18\x01 \x01(\tR\bpolicyId\x12\x16\n" +
+	"\x04AUTO\x10\x01\x1a\xb4\x05\n" +
+	"\x04OIDC\x12\x16\n" +
 	"\x06issuer\x18\x02 \x01(\tR\x06issuer\x125\n" +
 	"\x16authorization_endpoint\x18\x03 \x01(\tR\x15authorizationEndpoint\x12%\n" +
 	"\x0etoken_endpoint\x18\x04 \x01(\tR\rtokenEndpoint\x12s\n" +
@@ -15045,7 +15035,7 @@ const file_resource_proto_rawDesc = "" +
 	"\x1fTOKEN_ENDPOINT_AUTH_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13CLIENT_SECRET_BASIC\x10\x01\x12\x16\n" +
 	"\x12CLIENT_SECRET_POST\x10\x02\x12\b\n" +
-	"\x04NONE\x10\x03\"%\n" +
+	"\x04NONE\x10\x03J\x04\b\x01\x10\x02\"%\n" +
 	"\vPolicyPhase\x12\t\n" +
 	"\x05ROUTE\x10\x00\x12\v\n" +
 	"\aGATEWAY\x10\x01B\x06\n" +
@@ -15658,10 +15648,10 @@ var file_resource_proto_goTypes = []any{
 	(*TrafficPolicySpec_APIKey_User)(nil), // 162: agentgateway.dev.resource.TrafficPolicySpec.APIKey.User
 	(*TrafficPolicySpec_TransformationPolicy_Transform)(nil), // 163: agentgateway.dev.resource.TrafficPolicySpec.TransformationPolicy.Transform
 	nil, // 164: agentgateway.dev.resource.TrafficPolicySpec.TransformationPolicy.Transform.MetadataEntry
-	(*TrafficPolicySpec_ExtProc_NamespacedMetadataContext)(nil), // 165: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.NamespacedMetadataContext
-	(*TrafficPolicySpec_ExtProc_ProcessingOptions)(nil),         // 166: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ProcessingOptions
-	nil,                           // 167: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.RequestAttributesEntry
-	nil,                           // 168: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ResponseAttributesEntry
+	nil, // 165: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.RequestAttributesEntry
+	nil, // 166: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ResponseAttributesEntry
+	(*TrafficPolicySpec_ExtProc_NamespacedMetadataContext)(nil), // 167: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.NamespacedMetadataContext
+	(*TrafficPolicySpec_ExtProc_ProcessingOptions)(nil),         // 168: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ProcessingOptions
 	nil,                           // 169: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.MetadataContextEntry
 	nil,                           // 170: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.NamespacedMetadataContext.ContextEntry
 	(*BackendPolicySpec_Ai)(nil),  // 171: agentgateway.dev.resource.BackendPolicySpec.Ai
@@ -15924,10 +15914,10 @@ var file_resource_proto_depIdxs = []int32{
 	163, // 199: agentgateway.dev.resource.TrafficPolicySpec.TransformationPolicy.response:type_name -> agentgateway.dev.resource.TrafficPolicySpec.TransformationPolicy.Transform
 	107, // 200: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.target:type_name -> agentgateway.dev.resource.BackendReference
 	23,  // 201: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.failure_mode:type_name -> agentgateway.dev.resource.TrafficPolicySpec.ExtProc.FailureMode
-	167, // 202: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.request_attributes:type_name -> agentgateway.dev.resource.TrafficPolicySpec.ExtProc.RequestAttributesEntry
-	168, // 203: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.response_attributes:type_name -> agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ResponseAttributesEntry
+	165, // 202: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.request_attributes:type_name -> agentgateway.dev.resource.TrafficPolicySpec.ExtProc.RequestAttributesEntry
+	166, // 203: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.response_attributes:type_name -> agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ResponseAttributesEntry
 	169, // 204: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.metadata_context:type_name -> agentgateway.dev.resource.TrafficPolicySpec.ExtProc.MetadataContextEntry
-	166, // 205: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.processing_options:type_name -> agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ProcessingOptions
+	168, // 205: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.processing_options:type_name -> agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ProcessingOptions
 	26,  // 206: agentgateway.dev.resource.TrafficPolicySpec.HostRewrite.mode:type_name -> agentgateway.dev.resource.TrafficPolicySpec.HostRewrite.Mode
 	27,  // 207: agentgateway.dev.resource.TrafficPolicySpec.OIDC.token_endpoint_auth:type_name -> agentgateway.dev.resource.TrafficPolicySpec.OIDC.TokenEndpointAuth
 	107, // 208: agentgateway.dev.resource.TrafficPolicySpec.OIDC.provider_backend:type_name -> agentgateway.dev.resource.BackendReference
@@ -15951,7 +15941,7 @@ var file_resource_proto_depIdxs = []int32{
 	25,  // 226: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ProcessingOptions.response_header_mode:type_name -> agentgateway.dev.resource.TrafficPolicySpec.ExtProc.HeaderTrailerSendMode
 	25,  // 227: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ProcessingOptions.request_trailer_mode:type_name -> agentgateway.dev.resource.TrafficPolicySpec.ExtProc.HeaderTrailerSendMode
 	25,  // 228: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.ProcessingOptions.response_trailer_mode:type_name -> agentgateway.dev.resource.TrafficPolicySpec.ExtProc.HeaderTrailerSendMode
-	165, // 229: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.MetadataContextEntry.value:type_name -> agentgateway.dev.resource.TrafficPolicySpec.ExtProc.NamespacedMetadataContext
+	167, // 229: agentgateway.dev.resource.TrafficPolicySpec.ExtProc.MetadataContextEntry.value:type_name -> agentgateway.dev.resource.TrafficPolicySpec.ExtProc.NamespacedMetadataContext
 	195, // 230: agentgateway.dev.resource.BackendPolicySpec.Ai.prompt_guard:type_name -> agentgateway.dev.resource.BackendPolicySpec.Ai.PromptGuard
 	197, // 231: agentgateway.dev.resource.BackendPolicySpec.Ai.defaults:type_name -> agentgateway.dev.resource.BackendPolicySpec.Ai.DefaultsEntry
 	198, // 232: agentgateway.dev.resource.BackendPolicySpec.Ai.overrides:type_name -> agentgateway.dev.resource.BackendPolicySpec.Ai.OverridesEntry

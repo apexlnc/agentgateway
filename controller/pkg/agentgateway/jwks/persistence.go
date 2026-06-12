@@ -40,14 +40,14 @@ func JwksCodec() remotecache.Codec[Keyset] {
 }
 
 // NewPersistedEntries constructs the KRT-backed JWKS persistence layer.
-func NewPersistedEntries(client apiclient.Client, krtOptions krtutil.KrtOptions, storePrefix, deploymentNamespace string) *PersistedEntries {
-	return remotecache.New(JwksCodec(), client, krtOptions, storePrefix, deploymentNamespace)
+func NewPersistedEntries(client apiclient.Client, krtOptions krtutil.KrtOptions, deploymentNamespace string) *PersistedEntries {
+	return remotecache.New(JwksCodec(), client, krtOptions, DefaultJwksStorePrefix, deploymentNamespace)
 }
 
 // NewPersistedEntriesFromCollection constructs a PersistedEntries from an
 // existing ConfigMap collection. Useful for testing with static collections.
-func NewPersistedEntriesFromCollection(configMaps krt.Collection[*corev1.ConfigMap], storePrefix, deploymentNamespace string) *PersistedEntries {
-	return remotecache.NewFromCollection(JwksCodec(), configMaps, storePrefix, deploymentNamespace)
+func NewPersistedEntriesFromCollection(configMaps krt.Collection[*corev1.ConfigMap], deploymentNamespace string) *PersistedEntries {
+	return remotecache.NewFromCollection(JwksCodec(), configMaps, DefaultJwksStorePrefix, deploymentNamespace)
 }
 
 // JwksFromConfigMap parses a Keyset from a ConfigMap, falling back to the

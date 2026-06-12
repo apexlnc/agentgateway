@@ -69,9 +69,9 @@ type oidcRequestSpec struct {
 	RequestKey     remotehttp.FetchKey
 	ExpectedIssuer string
 	Target         remotehttp.FetchTarget
-	// ProviderBackendTarget is set when provider calls should go through a
-	// resolved backend transport instead of connecting directly to provider URLs.
-	ProviderBackendTarget *remotehttp.FetchTarget
+	// ViaBackendRef is true when provider calls go through a resolved backend
+	// transport (Target points at the backend) instead of the provider URLs.
+	ViaBackendRef bool
 	// +noKrtEquals
 	TLSConfig *tls.Config
 	// +noKrtEquals
@@ -86,31 +86,31 @@ func (s oidcRequestSpec) equals(other oidcRequestSpec) bool {
 	return s.RequestKey == other.RequestKey &&
 		s.ExpectedIssuer == other.ExpectedIssuer &&
 		s.Target.Equals(other.Target) &&
-		fetchTargetPtrEqual(s.ProviderBackendTarget, other.ProviderBackendTarget) &&
+		s.ViaBackendRef == other.ViaBackendRef &&
 		s.TTL == other.TTL
 }
 
 // oidcRequestJSON is the krt-snapshot view of a spec: the embedded *tls.Config
 // objects are not serializable, so their presence is reported as booleans.
 type oidcRequestJSON struct {
-	RequestKey            remotehttp.FetchKey     `json:"requestKey"`
-	ExpectedIssuer        string                  `json:"expectedIssuer"`
-	Target                remotehttp.FetchTarget  `json:"target"`
-	ProviderBackendTarget *remotehttp.FetchTarget `json:"providerBackendTarget,omitempty"`
-	HasTLSConfig          bool                    `json:"hasTLSConfig"`
-	HasProxyTLSConfig     bool                    `json:"hasProxyTLSConfig"`
-	TTL                   time.Duration           `json:"ttl"`
+	RequestKey        remotehttp.FetchKey    `json:"requestKey"`
+	ExpectedIssuer    string                 `json:"expectedIssuer"`
+	Target            remotehttp.FetchTarget `json:"target"`
+	ViaBackendRef     bool                   `json:"viaBackendRef"`
+	HasTLSConfig      bool                   `json:"hasTLSConfig"`
+	HasProxyTLSConfig bool                   `json:"hasProxyTLSConfig"`
+	TTL               time.Duration          `json:"ttl"`
 }
 
 func (s oidcRequestSpec) snapshot() oidcRequestJSON {
 	return oidcRequestJSON{
-		RequestKey:            s.RequestKey,
-		ExpectedIssuer:        s.ExpectedIssuer,
-		Target:                s.Target,
-		ProviderBackendTarget: s.ProviderBackendTarget,
-		HasTLSConfig:          s.TLSConfig != nil,
-		HasProxyTLSConfig:     s.ProxyTLSConfig != nil,
-		TTL:                   s.TTL,
+		RequestKey:        s.RequestKey,
+		ExpectedIssuer:    s.ExpectedIssuer,
+		Target:            s.Target,
+		ViaBackendRef:     s.ViaBackendRef,
+		HasTLSConfig:      s.TLSConfig != nil,
+		HasProxyTLSConfig: s.ProxyTLSConfig != nil,
+		TTL:               s.TTL,
 	}
 }
 
@@ -150,27 +150,14 @@ func (r SharedOidcRequest) MarshalJSON() ([]byte, error) {
 	return json.Marshal(r.oidcRequestSpec.snapshot())
 }
 
-// fetchTargetPtrEqual compares two optional FetchTarget pointers without
-// reflect, using FetchTarget.Equals for non-nil pairs.
-func fetchTargetPtrEqual(a, b *remotehttp.FetchTarget) bool {
-	switch {
-	case a == nil && b == nil:
-		return true
-	case a == nil || b == nil:
-		return false
-	default:
-		return a.Equals(*b)
-	}
-}
-
-// oidcRequestKey domain-separates by (target, expectedIssuer,
-// providerBackendTarget) — all three are part of trust identity.
-func oidcRequestKey(target remotehttp.FetchTarget, expectedIssuer string, providerBackendTarget *remotehttp.FetchTarget) remotehttp.FetchKey {
+// oidcRequestKey domain-separates by (target, expectedIssuer, transport
+// mode) — all three are part of trust identity.
+func oidcRequestKey(target remotehttp.FetchTarget, expectedIssuer string, viaBackendRef bool) remotehttp.FetchKey {
 	parts := []string{oidcRequestKeyDomain, target.Key().String(), expectedIssuer}
-	if providerBackendTarget == nil {
-		parts = append(parts, "direct")
+	if viaBackendRef {
+		parts = append(parts, "provider-backend")
 	} else {
-		parts = append(parts, "provider-backend", providerBackendTarget.Key().String())
+		parts = append(parts, "direct")
 	}
 	return remotehttp.HashKey(parts...)
 }

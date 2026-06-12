@@ -106,7 +106,6 @@ func TestLoadAllPrefersCanonicalAcrossDuplicates(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		krt.NewStaticCollection[*corev1.ConfigMap](alwaysSynced{}, []*corev1.ConfigMap{legacy, canonical}, krt.WithName("jwks/PersistedKeysetsCanonicalTieConfigMaps")),
-		DefaultJwksStorePrefix,
 		"agentgateway-system",
 	)
 	keysets, err := persisted.LoadAll(context.Background())
@@ -151,7 +150,6 @@ func TestLoadAllPrefersFreshestAcrossDuplicates(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		krt.NewStaticCollection[*corev1.ConfigMap](alwaysSynced{}, []*corev1.ConfigMap{canonical, legacy}, krt.WithName("jwks/PersistedKeysetsFreshestConfigMaps")),
-		DefaultJwksStorePrefix,
 		"agentgateway-system",
 	)
 	keysets, err := persisted.LoadAll(context.Background())

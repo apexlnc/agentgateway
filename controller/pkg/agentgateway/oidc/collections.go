@@ -35,13 +35,13 @@ func NewCollections(inputs CollectionInputs) Collections {
 		return &OidcSource{
 			OwnerKey: resolved.OwnerID,
 			oidcRequestSpec: oidcRequestSpec{
-				RequestKey:            oidcRequestKey(resolved.Target.Target, resolved.ExpectedIssuer, resolved.ProviderBackendTarget),
-				ExpectedIssuer:        resolved.ExpectedIssuer,
-				Target:                resolved.Target.Target,
-				ProviderBackendTarget: resolved.ProviderBackendTarget,
-				TLSConfig:             resolved.Target.TLSConfig,
-				ProxyTLSConfig:        resolved.Target.ProxyTLSConfig,
-				TTL:                   resolved.TTL,
+				RequestKey:     resolved.RequestKey(),
+				ExpectedIssuer: resolved.ExpectedIssuer,
+				Target:         resolved.Target.Target,
+				ViaBackendRef:  resolved.ViaBackendRef,
+				TLSConfig:      resolved.Target.TLSConfig,
+				ProxyTLSConfig: resolved.Target.ProxyTLSConfig,
+				TTL:            resolved.TTL,
 			},
 		}
 	}, inputs.KrtOpts.ToOptions("oidc/sources")...)
@@ -67,12 +67,12 @@ func collapseOidcSources(grouped krt.IndexObject[remotehttp.FetchKey, OidcSource
 		func(s OidcSource) string { return s.OwnerKey.String() },
 		func(s OidcSource) time.Duration { return s.TTL })
 	return &SharedOidcRequest{oidcRequestSpec{
-		RequestKey:            grouped.Key,
-		ExpectedIssuer:        primary.ExpectedIssuer,
-		Target:                primary.Target,
-		ProviderBackendTarget: primary.ProviderBackendTarget,
-		TLSConfig:             primary.TLSConfig,
-		ProxyTLSConfig:        primary.ProxyTLSConfig,
-		TTL:                   minTTL,
+		RequestKey:     grouped.Key,
+		ExpectedIssuer: primary.ExpectedIssuer,
+		Target:         primary.Target,
+		ViaBackendRef:  primary.ViaBackendRef,
+		TLSConfig:      primary.TLSConfig,
+		ProxyTLSConfig: primary.ProxyTLSConfig,
+		TTL:            minTTL,
 	}}
 }

@@ -45,16 +45,12 @@ func newFetchRateLimiter() workqueue.TypedRateLimiter[remotehttp.FetchKey] {
 // Lock order: f.mu may be held across FetchedResults calls; callers MUST NOT
 // acquire krt locks before f.mu.
 type Fetcher[S Request, R Result[R]] struct {
-	mu sync.Mutex
-	// retireDirty is set whenever Retire removes a request, signalling that
-	// SweepOrphans has work to do on the next opportunity. Avoids the O(N)
-	// sweep on every successful fetch when no retirements have happened.
-	retireDirty bool
-	Results     *FetchedResults[R]
-	Fetch       func(ctx context.Context, source S) (R, error)
-	requests    map[remotehttp.FetchKey]S
-	queue       workqueue.TypedRateLimitingInterface[remotehttp.FetchKey]
-	logger      *slog.Logger
+	mu       sync.Mutex
+	Results  *FetchedResults[R]
+	Fetch    func(ctx context.Context, source S) (R, error)
+	requests map[remotehttp.FetchKey]S
+	queue    workqueue.TypedRateLimitingInterface[remotehttp.FetchKey]
+	logger   *slog.Logger
 }
 
 func NewFetcher[S Request, R Result[R]](
@@ -71,6 +67,12 @@ func NewFetcher[S Request, R Result[R]](
 	}
 }
 
+// fetchWorkers bounds concurrent remote fetches so one slow or hung endpoint
+// (up to the client timeout) cannot stall refreshes for every other issuer.
+// The workqueue still serializes per key, so a given request is never fetched
+// concurrently.
+const fetchWorkers = 4
+
 func (f *Fetcher[S, R]) Run(ctx context.Context) {
 	done := make(chan struct{})
 	defer close(done)
@@ -81,8 +83,14 @@ func (f *Fetcher[S, R]) Run(ctx context.Context) {
 		case <-done:
 		}
 	}()
-	for f.processOne(ctx) {
+	var wg sync.WaitGroup
+	for range fetchWorkers {
+		wg.Go(func() {
+			for f.processOne(ctx) {
+			}
+		})
 	}
+	wg.Wait()
 }
 
 func (f *Fetcher[S, R]) processOne(ctx context.Context) bool {
@@ -114,7 +122,6 @@ func (f *Fetcher[S, R]) processOne(ctx context.Context) bool {
 	}
 
 	f.commit(key, result)
-	f.maybeSweepOrphans()
 	return true
 }
 
@@ -172,39 +179,16 @@ func (f *Fetcher[S, R]) Remove(key remotehttp.FetchKey) {
 	f.Results.Delete(key)
 }
 
-// Retire stops fetching for key but preserves the last-known-good result
-// until a fresh fetch under a different key — or SweepOrphans — removes it.
-func (f *Fetcher[S, R]) Retire(key remotehttp.FetchKey) {
-	f.mu.Lock()
-	if _, existed := f.requests[key]; existed {
-		delete(f.requests, key)
-		f.retireDirty = true
-	}
-	f.mu.Unlock()
-
-	f.queue.Forget(key)
-}
-
 // SweepOrphans drops Results whose key is no longer live; used post-hydration
 // to clear ConfigMaps whose owner has gone away.
 func (f *Fetcher[S, R]) SweepOrphans() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.retireDirty = false
 
 	f.Results.DeleteObjects(func(record R) bool {
 		_, ok := f.requests[record.RemoteRequestKey()]
 		return !ok
 	})
-}
-
-func (f *Fetcher[S, R]) maybeSweepOrphans() {
-	f.mu.Lock()
-	dirty := f.retireDirty
-	f.mu.Unlock()
-	if dirty {
-		f.SweepOrphans()
-	}
 }
 
 // ForTest methods expose internal state for white-box tests in sibling

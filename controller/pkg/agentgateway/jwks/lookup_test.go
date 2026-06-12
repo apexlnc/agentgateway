@@ -32,14 +32,12 @@ func TestLookupFailsClosedWhenKeysetIsMissing(t *testing.T) {
 	target := remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}
 	persisted := NewPersistedEntriesFromCollection(
 		krt.NewStaticCollection[*corev1.ConfigMap](alwaysSynced{}, nil, krt.WithName("jwks/LookupMissingPersistedConfigMaps")),
-		DefaultJwksStorePrefix,
 		"agentgateway-system",
 	)
 	lookupIndex := NewLookup(
 		persisted,
 		staticLookupResolver{resolved: &ResolvedJwksRequest{
 			Target: remotehttp.ResolvedTarget{
-				Key:    target.Key(),
 				Target: target,
 			},
 		}},
@@ -71,14 +69,12 @@ func TestLookupReturnsPersistedKeyset(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		krt.NewStaticCollection[*corev1.ConfigMap](alwaysSynced{}, []*corev1.ConfigMap{cm}, krt.WithName("jwks/LookupPersistedConfigMaps")),
-		DefaultJwksStorePrefix,
 		"agentgateway-system",
 	)
 	lookupIndex := NewLookup(
 		persisted,
 		staticLookupResolver{resolved: &ResolvedJwksRequest{
 			Target: remotehttp.ResolvedTarget{
-				Key:    target.Key(),
 				Target: target,
 			},
 		}},
@@ -111,14 +107,12 @@ func TestLookupRequiresCanonicalPersistedKeysetName(t *testing.T) {
 
 	persisted := NewPersistedEntriesFromCollection(
 		krt.NewStaticCollection[*corev1.ConfigMap](alwaysSynced{}, []*corev1.ConfigMap{cm}, krt.WithName("jwks/LookupLegacyNameConfigMaps")),
-		DefaultJwksStorePrefix,
 		"agentgateway-system",
 	)
 	lookupIndex := NewLookup(
 		persisted,
 		staticLookupResolver{resolved: &ResolvedJwksRequest{
 			Target: remotehttp.ResolvedTarget{
-				Key:    target.Key(),
 				Target: target,
 			},
 		}},
@@ -136,7 +130,6 @@ func TestLookupPropagatesResolverError(t *testing.T) {
 	lookupIndex := NewLookup(
 		NewPersistedEntriesFromCollection(
 			krt.NewStaticCollection[*corev1.ConfigMap](alwaysSynced{}, nil, krt.WithName("jwks/LookupResolverErrorConfigMaps")),
-			DefaultJwksStorePrefix,
 			"agentgateway-system",
 		),
 		staticLookupResolver{err: sentinel},
@@ -145,21 +138,4 @@ func TestLookupPropagatesResolverError(t *testing.T) {
 	_, err := lookupIndex.InlineForOwner(krt.TestingDummyContext{}, RemoteJwksOwner{})
 
 	assert.ErrorIs(t, err, sentinel)
-}
-
-func TestLookupFailsWhenPersistedCacheIsNotConfigured(t *testing.T) {
-	target := remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}
-	lookupIndex := &lookup{
-		resolver: staticLookupResolver{resolved: &ResolvedJwksRequest{
-			Target: remotehttp.ResolvedTarget{
-				Key:    target.Key(),
-				Target: target,
-			},
-		}},
-		persisted: nil,
-	}
-
-	_, err := lookupIndex.InlineForOwner(krt.TestingDummyContext{}, RemoteJwksOwner{})
-
-	assert.EqualError(t, err, "jwks persisted cache is not configured")
 }

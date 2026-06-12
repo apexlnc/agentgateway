@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"istio.io/istio/pkg/slices"
 	"k8s.io/apimachinery/pkg/types"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -14,21 +13,13 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/wellknown"
 )
 
-// oidcPolicyIDForPolicyKey returns the canonical xDS PolicyId for an emitted
-// xDS Policy key.
-func oidcPolicyIDForPolicyKey(key string) string {
-	return "policy/" + key
-}
-
 func processOIDCPolicy(
 	ctx PolicyCtx,
 	oidcCfg *agentgateway.OIDC,
 	policyPhase *agentgateway.PolicyPhase,
 	policy types.NamespacedName,
-	basePolicyName string,
-	oidcLookup oidc.Lookup,
 ) (*api.Policy, error) {
-	if oidcLookup == nil {
+	if ctx.OidcLookup == nil {
 		return nil, fmt.Errorf("oidc lookup is not configured")
 	}
 
@@ -37,22 +28,14 @@ func processOIDCPolicy(
 		return nil, fmt.Errorf("could not derive OIDC owner for policy")
 	}
 
-	provider, err := oidcLookup.ResolveForOwner(ctx.Krt, owner)
+	provider, err := ctx.OidcLookup.ResolveForOwner(ctx.Krt, owner)
 	if err != nil {
 		return nil, err
 	}
 
-	if provider.JwksInline == "" {
-		return nil, fmt.Errorf("oidc provider for %q has no jwks_inline (fetch pending)", oidcCfg.IssuerURL)
-	}
-
-	var clientSecret string
-	if oidcCfg.ClientSecret != nil {
-		secret, err := resolveOIDCClientSecret(ctx, policy.Namespace, oidcCfg)
-		if err != nil {
-			return nil, err
-		}
-		clientSecret = secret
+	clientSecret, err := resolveOIDCClientSecret(ctx, policy.Namespace, oidcCfg)
+	if err != nil {
+		return nil, err
 	}
 
 	tokenAuth, err := resolveOIDCTokenEndpointAuth(oidcCfg, clientSecret != "")
@@ -68,24 +51,24 @@ func processOIDCPolicy(
 		}
 	}
 
-	key := basePolicyName + oidcPolicySuffix
 	return &api.Policy{
-		Key:  key,
+		Key:  policy.String() + oidcPolicySuffix,
 		Name: TypedResourceFromName(wellknown.AgentgatewayPolicyGVK.Kind, policy),
 		Kind: &api.Policy_Traffic{
 			Traffic: &api.TrafficPolicySpec{
 				Phase: phase(policyPhase),
 				Kind: &api.TrafficPolicySpec_Oidc{
 					Oidc: &api.TrafficPolicySpec_OIDC{
-						PolicyId:                          oidcPolicyIDForPolicyKey(key),
-						Issuer:                            provider.IssuerURL,
-						AuthorizationEndpoint:             provider.AuthorizationEndpoint,
-						TokenEndpoint:                     provider.TokenEndpoint,
-						JwksInline:                        provider.JwksInline,
-						ClientId:                          oidcCfg.ClientID,
-						ClientSecret:                      clientSecret,
-						RedirectUri:                       oidcCfg.RedirectURI,
-						Scopes:                            normalizedOIDCScopes(oidcCfg.Scopes),
+						Issuer:                provider.IssuerURL,
+						AuthorizationEndpoint: provider.AuthorizationEndpoint,
+						TokenEndpoint:         provider.TokenEndpoint,
+						JwksInline:            provider.JwksInline,
+						ClientId:              oidcCfg.ClientID,
+						ClientSecret:          clientSecret,
+						RedirectUri:           oidcCfg.RedirectURI,
+						// Scope normalization (always-include `openid`, dedupe) is owned by
+						// the dataplane's normalize_scopes, shared with the local-config path.
+						Scopes:                            oidcCfg.Scopes,
 						TokenEndpointAuth:                 tokenAuth,
 						TokenEndpointAuthMethodsSupported: provider.TokenEndpointAuthMethodsSupported,
 						ProviderBackend:                   providerBackend,
@@ -94,10 +77,6 @@ func processOIDCPolicy(
 			},
 		},
 	}, nil
-}
-
-func normalizedOIDCScopes(input []string) []string {
-	return slices.FilterDuplicates(append([]string{"openid"}, input...))
 }
 
 func resolveOIDCClientSecret(ctx PolicyCtx, policyNamespace string, oidcCfg *agentgateway.OIDC) (string, error) {

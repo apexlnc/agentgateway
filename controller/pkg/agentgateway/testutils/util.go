@@ -212,14 +212,14 @@ func BuildMockPolicyContext(t test.Failer, inputs []any) plugins.PolicyCtx {
 		referenceTypes.KnownToReferences,
 		collections.KrtOpts,
 	))
-	persistedOIDC := oidc.NewPersistedEntriesFromCollection(collections.ConfigMaps, oidc.DefaultStorePrefix, collections.SystemNamespace)
+	persistedOIDC := oidc.NewPersistedEntriesFromCollection(collections.ConfigMaps, collections.SystemNamespace)
 	return plugins.PolicyCtx{
 		Krt:         krt.TestingDummyContext{},
 		Collections: collections,
 		Grants:      grants,
 		References:  plugins.BuildReferenceIndex(nil, nil, plugins.DefaultReferenceTypes(collections)),
 		Resolver:    resolver,
-		JWKSLookup:  jwks.NewLookup(jwks.NewPersistedEntriesFromCollection(collections.ConfigMaps, jwks.DefaultJwksStorePrefix, collections.SystemNamespace), jwks.NewResolver(resolver)),
+		JWKSLookup:  jwks.NewLookup(jwks.NewPersistedEntriesFromCollection(collections.ConfigMaps, collections.SystemNamespace), jwks.NewResolver(resolver)),
 		OidcLookup:  oidc.NewLookup(persistedOIDC, oidc.NewResolver(resolver)),
 
 		CredentialResolver: plugins.DefaultCredentialResolverFactory(collections),
@@ -269,11 +269,11 @@ func BuildRemoteHTTPResolver(collections *plugins.AgwCollections) remotehttp.Res
 }
 
 func BuildJWKSLookup(collections *plugins.AgwCollections) jwks.Lookup {
-	persistedJWKS := jwks.NewPersistedEntriesFromCollection(collections.ConfigMaps, jwks.DefaultJwksStorePrefix, collections.SystemNamespace)
+	persistedJWKS := jwks.NewPersistedEntriesFromCollection(collections.ConfigMaps, collections.SystemNamespace)
 	return jwks.NewLookup(persistedJWKS, jwks.NewResolver(BuildRemoteHTTPResolver(collections)))
 }
 
 func BuildOIDCLookup(collections *plugins.AgwCollections) oidc.Lookup {
-	persistedOIDC := oidc.NewPersistedEntriesFromCollection(collections.ConfigMaps, oidc.DefaultStorePrefix, collections.SystemNamespace)
+	persistedOIDC := oidc.NewPersistedEntriesFromCollection(collections.ConfigMaps, collections.SystemNamespace)
 	return oidc.NewLookup(persistedOIDC, oidc.NewResolver(BuildRemoteHTTPResolver(collections)))
 }

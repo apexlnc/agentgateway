@@ -17,11 +17,20 @@ const discoveryPath = "/.well-known/openid-configuration"
 // ResolvedOidcRequest is the input to the shared-request collapse step.
 // Target may differ from ExpectedIssuer when BackendRef is used.
 type ResolvedOidcRequest struct {
-	OwnerID               remotecache.OwnerID
-	Target                remotehttp.ResolvedTarget
-	ExpectedIssuer        string
-	ProviderBackendTarget *remotehttp.FetchTarget
-	TTL                   time.Duration
+	OwnerID        remotecache.OwnerID
+	Target         remotehttp.ResolvedTarget
+	ExpectedIssuer string
+	// ViaBackendRef is true when provider calls go through a resolved backend
+	// transport (Target points at the backend) instead of the provider URLs.
+	ViaBackendRef bool
+	TTL           time.Duration
+}
+
+// RequestKey derives the fetch key from the resolved trust identity. A method
+// rather than a field so the fetch-request collection and the
+// translation-time lookup cannot diverge on key derivation.
+func (r *ResolvedOidcRequest) RequestKey() remotehttp.FetchKey {
+	return oidcRequestKey(r.Target.Target, r.ExpectedIssuer, r.ViaBackendRef)
 }
 
 // Resolver translates a RemoteOidcOwner into a resolved fetch request:
@@ -51,17 +60,13 @@ func (r *defaultResolver) ResolveOwner(krtctx krt.HandlerContext, owner RemoteOi
 		return nil, err
 	}
 
-	resolved := &ResolvedOidcRequest{
+	return &ResolvedOidcRequest{
 		OwnerID:        owner.ID,
 		Target:         *endpoint,
 		ExpectedIssuer: owner.Config.IssuerURL,
+		ViaBackendRef:  owner.Config.BackendRef != nil,
 		TTL:            owner.TTL,
-	}
-	if owner.Config.BackendRef != nil {
-		target := endpoint.Target
-		resolved.ProviderBackendTarget = &target
-	}
-	return resolved, nil
+	}, nil
 }
 
 // discoveryURL constructs the OIDC well-known configuration endpoint URL from the given issuer URL.
@@ -74,7 +79,7 @@ func discoveryURL(issuerURL string) (string, error) {
 	if !u.IsAbs() || u.Scheme != "https" || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
 		return "", fmt.Errorf("issuer URL must be absolute HTTPS with a host and no query or fragment")
 	}
-	return u.JoinPath(".well-known", "openid-configuration").String(), nil
+	return u.JoinPath(discoveryPath).String(), nil
 }
 
 // resolveEndpoint produces the transport target for an OIDC discovery fetch.
@@ -90,10 +95,7 @@ func resolveEndpoint(
 ) (*remotehttp.ResolvedTarget, error) {
 	if cfg.BackendRef == nil {
 		target := remotehttp.FetchTarget{URL: discURL}
-		return &remotehttp.ResolvedTarget{
-			Key:    target.Key(),
-			Target: target,
-		}, nil
+		return &remotehttp.ResolvedTarget{Target: target}, nil
 	}
 
 	if resolver == nil {

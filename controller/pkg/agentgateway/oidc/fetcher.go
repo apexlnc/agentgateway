@@ -78,16 +78,16 @@ func (d *OidcDriver) Fetch(ctx context.Context, source SharedOidcRequest) (Disco
 }
 
 func oidcJWKSFetchURL(source SharedOidcRequest, jwksURI string) (string, error) {
-	if source.ProviderBackendTarget == nil {
+	if !source.ViaBackendRef {
 		return jwksURI, nil
 	}
 
-	targetURL, err := url.Parse(source.ProviderBackendTarget.URL)
+	targetURL, err := url.Parse(source.Target.URL)
 	if err != nil {
-		return "", fmt.Errorf("invalid resolved OIDC provider backend URL %q: %w", source.ProviderBackendTarget.URL, err)
+		return "", fmt.Errorf("invalid resolved OIDC provider backend URL %q: %w", source.Target.URL, err)
 	}
 	if !targetURL.IsAbs() || targetURL.Host == "" {
-		return "", fmt.Errorf("resolved OIDC provider backend URL %q must be absolute with a host", source.ProviderBackendTarget.URL)
+		return "", fmt.Errorf("resolved OIDC provider backend URL %q must be absolute with a host", source.Target.URL)
 	}
 	jwksURL, err := url.Parse(jwksURI)
 	if err != nil {

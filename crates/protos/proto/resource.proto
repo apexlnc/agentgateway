@@ -1058,9 +1058,10 @@ message TrafficPolicySpec {
       NONE = 3;
     }
 
-    // Runtime session namespace. Encoded as "route/<key>" or "policy/<key>",
-    // where <key> is the effective emitted xDS resource key.
-    string policy_id = 1;
+    // Was policy_id; the dataplane now derives the session namespace from the
+    // enclosing resource key ("policy/<key>" or "route/<key>").
+    reserved 1;
+
     // IdP issuer identifier (matches the "iss" claim on id tokens).
     string issuer = 2;
 
@@ -1092,7 +1093,8 @@ message TrafficPolicySpec {
     // Absolute callback URI registered with the IdP.
     string redirect_uri = 9;
 
-    // Requested scopes. When empty, the dataplane falls back to ["openid"].
+    // Requested scopes. The dataplane always includes `openid` and drops
+    // duplicates (normalize_scopes, shared with the local-config path).
     repeated string scopes = 10;
 
     // Optional backend reference used for token-endpoint calls. When set, the

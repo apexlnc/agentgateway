@@ -24,7 +24,6 @@ func (t FetchTarget) Equals(other FetchTarget) bool {
 }
 
 type ResolvedTarget struct {
-	Key            FetchKey
 	Target         FetchTarget
 	TLSConfig      *tls.Config
 	ProxyTLSConfig *tls.Config

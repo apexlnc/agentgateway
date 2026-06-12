@@ -41,7 +41,7 @@ func NewCollections(inputs CollectionInputs) Collections {
 		return &JwksSource{
 			OwnerKey: resolved.OwnerID,
 			jwksRequestSpec: jwksRequestSpec{
-				RequestKey:     resolved.Target.Key,
+				RequestKey:     resolved.RequestKey(),
 				Target:         resolved.Target.Target,
 				TLSConfig:      resolved.Target.TLSConfig,
 				ProxyTLSConfig: resolved.Target.ProxyTLSConfig,

@@ -7,50 +7,45 @@ import (
 	"istio.io/istio/pkg/kube/krt"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/agentgateway/agentgateway/api"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	"github.com/agentgateway/agentgateway/controller/pkg/utils/kubeutils"
 )
 
-func TestNormalizedOIDCScopesAlwaysIncludesOpenidFirst(t *testing.T) {
-	tests := []struct {
-		name string
-		in   []string
-		want []string
-	}{
-		{
-			name: "empty input",
-			in:   nil,
-			want: []string{"openid"},
-		},
-		{
-			name: "without openid",
-			in:   []string{"email", "profile"},
-			want: []string{"openid", "email", "profile"},
-		},
-		{
-			name: "openid already present",
-			in:   []string{"openid", "email"},
-			want: []string{"openid", "email"},
-		},
-		{
-			name: "openid present at non-first position is preserved at first",
-			in:   []string{"email", "openid", "profile"},
-			want: []string{"openid", "email", "profile"},
-		},
-		{
-			name: "duplicates collapsed in input order",
-			in:   []string{"email", "profile", "email", "openid"},
-			want: []string{"openid", "email", "profile"},
-		},
-	}
+type staticOIDCLookup struct {
+	provider *oidc.DiscoveredProvider
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, normalizedOIDCScopes(tc.in))
-		})
-	}
+func (s staticOIDCLookup) ResolveForOwner(krt.HandlerContext, oidc.RemoteOidcOwner) (*oidc.DiscoveredProvider, error) {
+	return s.provider, nil
+}
+
+func TestOIDCPolicyKeyFormatIsStable(t *testing.T) {
+	// The dataplane derives the OIDC session PolicyId — hashed into browser
+	// cookie names — as "policy/" + this Key. Changing the format invalidates
+	// every live session on upgrade; change it together with
+	// cookie_names_are_stable_for_the_cross_plane_policy_key_contract in
+	// crates/agentgateway/src/http/oidc/tests.rs.
+	policy, err := processOIDCPolicy(
+		PolicyCtx{OidcLookup: staticOIDCLookup{provider: &oidc.DiscoveredProvider{
+			IssuerURL:             "https://issuer.example",
+			AuthorizationEndpoint: "https://issuer.example/auth",
+			TokenEndpoint:         "https://issuer.example/token",
+			JwksInline:            `{"keys":[]}`,
+		}}},
+		&agentgateway.OIDC{
+			IssuerURL:   "https://issuer.example",
+			ClientID:    "client",
+			RedirectURI: "https://app.example/callback",
+		},
+		nil,
+		types.NamespacedName{Namespace: "default", Name: "test"},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "default/test:oidc", policy.Key)
 }
 
 func TestConfiguredOIDCTokenEndpointAuth(t *testing.T) {

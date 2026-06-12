@@ -25,6 +25,16 @@ func TestPlanConfigMapSyncUpsertWhenExists(t *testing.T) {
 	require.ElementsMatch(t, []string{"stale-1", "stale-2"}, plan.DeleteNames)
 }
 
+func TestPlanConfigMapSyncMigratesLegacyOnlyNameToCanonical(t *testing.T) {
+	plan := PlanConfigMapSync(
+		[]string{"legacy-name"},
+		"canonical",
+		true,
+	)
+	require.Equal(t, "canonical", plan.UpsertName)
+	require.Equal(t, []string{"legacy-name"}, plan.DeleteNames)
+}
+
 func TestPlanConfigMapSyncDeleteAllWhenAbsent(t *testing.T) {
 	plan := PlanConfigMapSync(
 		[]string{"orphan-1", "orphan-2"},

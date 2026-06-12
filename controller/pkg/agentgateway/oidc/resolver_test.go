@@ -46,7 +46,7 @@ func TestDefaultResolverDirectFetchSkipsResolver(t *testing.T) {
 	require.NotNil(t, resolved)
 	require.Equal(t, owner.ID, resolved.OwnerID)
 	require.Equal(t, owner.Config.IssuerURL, resolved.ExpectedIssuer)
-	require.Nil(t, resolved.ProviderBackendTarget)
+	require.False(t, resolved.ViaBackendRef)
 	require.Equal(t, owner.TTL, resolved.TTL)
 	require.Equal(t, testOidcIssuer+"/.well-known/openid-configuration", resolved.Target.Target.URL)
 	require.Nil(t, resolved.Target.TLSConfig)
@@ -258,7 +258,6 @@ func TestResolveEndpoint(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, resolved)
 			require.Equal(t, tt.expectedURL, resolved.Target.Target.URL)
-			require.Equal(t, resolved.Target.Key, resolved.Target.Target.Key())
 			if tt.expectedTLS == nil {
 				require.Nil(t, resolved.Target.TLSConfig)
 				return

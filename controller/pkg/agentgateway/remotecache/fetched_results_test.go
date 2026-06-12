@@ -65,10 +65,10 @@ func TestFetchedResultsDeleteRemovesRecord(t *testing.T) {
 	results := NewFetchedResults[fetchedResultsTestResult]()
 	results.Put(fetchedResultsTestResult{Key: "issuer-a", FetchedAt: time.Unix(100, 0), Value: "v1"})
 
-	require.True(t, results.Delete("issuer-a"))
+	results.Delete("issuer-a")
 	_, ok := results.Get("issuer-a")
 	require.False(t, ok)
-	require.False(t, results.Delete("issuer-a"))
+	results.Delete("issuer-a") // absent key is a safe no-op
 }
 
 func TestFetchedResultsDeleteObjectsRemovesMatchingRecords(t *testing.T) {
