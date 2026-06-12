@@ -41,12 +41,12 @@ func TestFetcherFetchesAndValidatesDiscovery(t *testing.T) {
 	f, driver := NewFetcher(results)
 	driver.DefaultClient = backend.Client()
 
-	source := SharedOidcRequest{
+	source := SharedOidcRequest{oidcRequestSpec{
 		RequestKey:     remotehttp.FetchTarget{URL: backendURL}.Key(),
 		ExpectedIssuer: backendURL,
 		Target:         remotehttp.FetchTarget{URL: backendURL},
 		TTL:            time.Hour,
-	}
+	}}
 
 	f.AddOrUpdate(source)
 	go f.Run(ctx)
@@ -99,13 +99,13 @@ func TestOidcDriverRoutesBackendRefJWKSViaResolvedTarget(t *testing.T) {
 
 	target := remotehttp.FetchTarget{URL: backend.URL + discoveryPath}
 	driver := &OidcDriver{DefaultClient: backend.Client()}
-	source := SharedOidcRequest{
+	source := SharedOidcRequest{oidcRequestSpec{
 		RequestKey:            oidcRequestKey(target, expectedIssuer, &target),
 		ExpectedIssuer:        expectedIssuer,
 		Target:                target,
 		ProviderBackendTarget: &target,
 		TTL:                   time.Hour,
-	}
+	}}
 
 	provider, err := driver.Fetch(t.Context(), source)
 	require.NoError(t, err)
@@ -160,12 +160,12 @@ func TestOidcDriverRejectsInvalidJWKSBody(t *testing.T) {
 			backendURL = backend.URL
 
 			driver := &OidcDriver{DefaultClient: backend.Client()}
-			source := SharedOidcRequest{
+			source := SharedOidcRequest{oidcRequestSpec{
 				RequestKey:     remotehttp.FetchTarget{URL: backendURL}.Key(),
 				ExpectedIssuer: backendURL,
 				Target:         remotehttp.FetchTarget{URL: backendURL},
 				TTL:            time.Hour,
-			}
+			}}
 
 			_, err := driver.Fetch(t.Context(), source)
 			require.ErrorContains(t, err, tc.wantErrContains)

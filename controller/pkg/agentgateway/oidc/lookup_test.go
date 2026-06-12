@@ -5,7 +5,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"istio.io/istio/pkg/kube/krt"
-	"istio.io/istio/pkg/test"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -23,7 +22,7 @@ func (r staticLookupResolver) ResolveOwner(krt.HandlerContext, RemoteOidcOwner) 
 }
 
 func TestLookupUsesResolvedTargetKey(t *testing.T) {
-	stop := test.NewStop(t)
+	stop := t.Context().Done()
 	issuer := "https://issuer.example"
 	directTarget := remotehttp.FetchTarget{URL: issuer + "/.well-known/openid-configuration"}
 	backendTarget := remotehttp.FetchTarget{

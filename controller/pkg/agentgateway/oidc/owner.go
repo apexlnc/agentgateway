@@ -16,10 +16,9 @@ const OidcRefreshInterval = time.Hour
 // RemoteOidcOwner is the AgentgatewayPolicy that triggered the OIDC discovery
 // fetch, plus the config needed to perform it.
 type RemoteOidcOwner struct {
-	ID               remotecache.OwnerID
-	DefaultNamespace string
-	Config           agentgateway.OIDC
-	TTL              time.Duration
+	ID     remotecache.OwnerID
+	Config agentgateway.OIDC
+	TTL    time.Duration
 }
 
 func (o RemoteOidcOwner) ResourceName() string {
@@ -28,7 +27,6 @@ func (o RemoteOidcOwner) ResourceName() string {
 
 func (o RemoteOidcOwner) Equals(other RemoteOidcOwner) bool {
 	return o.ID == other.ID &&
-		o.DefaultNamespace == other.DefaultNamespace &&
 		o.TTL == other.TTL &&
 		equality.Semantic.DeepEqual(o.Config, other.Config)
 }
@@ -59,8 +57,7 @@ func PolicyOIDCLookupOwner(namespace, name string, oidcCfg *agentgateway.OIDC) (
 			Name:      name,
 			Path:      "spec.traffic.oidc",
 		},
-		DefaultNamespace: namespace,
-		Config:           *oidcCfg,
-		TTL:              OidcRefreshInterval,
+		Config: *oidcCfg,
+		TTL:    OidcRefreshInterval,
 	}, true
 }

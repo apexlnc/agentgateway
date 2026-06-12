@@ -855,7 +855,7 @@ type Traffic struct {
 	// +optional
 	APIKeyAuthentication *APIKeyAuthentication `json:"apiKeyAuthentication,omitempty"`
 
-	// Enables browser-based user login at the gateway using the OpenID
+	// `oidc` enables browser-based user login at the gateway using the OpenID
 	// Connect Authorization Code Flow with PKCE. The gateway terminates the
 	// redirect flow, validates the ID token, and issues an encrypted session
 	// cookie, so upstream services receive authenticated requests. For
@@ -956,8 +956,8 @@ func (d *DirectResponseOrConditional) ConditionalPolicy() (*DirectResponse, iter
 // +kubebuilder:validation:XValidation:rule="has(self.tokenEndpointAuthMethod) && self.tokenEndpointAuthMethod == 'None' ? !has(self.clientSecret) : true",message="tokenEndpointAuthMethod None must not be paired with a clientSecret"
 // +kubebuilder:validation:XValidation:rule="has(self.tokenEndpointAuthMethod) && self.tokenEndpointAuthMethod in ['ClientSecretBasic', 'ClientSecretPost'] ? has(self.clientSecret) : true",message="tokenEndpointAuthMethod ClientSecretBasic or ClientSecretPost requires a clientSecret"
 type OIDC struct {
-	// The OIDC issuer URL. Must be an absolute HTTPS URL with no query or
-	// fragment. The configured value is preserved exactly for
+	// `issuerURL` is the OIDC issuer URL. Must be an absolute HTTPS URL with
+	// no query or fragment. The configured value is preserved exactly for
 	// discovery-document issuer matching, including any trailing slash.
 	// +kubebuilder:validation:Pattern=`^https://[^/?#]+(/[^?#]*)?$`
 	// +kubebuilder:validation:MinLength=1
@@ -965,55 +965,67 @@ type OIDC struct {
 	// +required
 	IssuerURL string `json:"issuerURL"`
 
-	// The OIDC client identifier.
+	// `clientID` is the OIDC client identifier.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	// +required
 	ClientID string `json:"clientID"`
 
-	// References a Secret containing the OIDC client secret under the
-	// `clientSecret` data key. Omit for a public client; PKCE alone then
-	// protects the authorization code exchange and the IdP must accept the
-	// `none` token-endpoint auth method (see `tokenEndpointAuthMethod`).
+	// `clientSecret` references a Secret containing the OIDC client secret
+	// under the `clientSecret` data key. Omit for a public client; PKCE alone
+	// then protects the authorization code exchange and the IdP must accept
+	// the `none` token-endpoint auth method (see `tokenEndpointAuthMethod`).
 	// +optional
 	ClientSecret *corev1.LocalObjectReference `json:"clientSecret,omitempty"`
 
-	// The callback URL registered with the IdP. Must be an absolute http(s)
-	// URL with an explicit non-root path and no query or fragment. The `http`
-	// scheme is permitted only for `localhost` development; production
-	// deployments must use `https`.
+	// `redirectURI` is the callback URL registered with the IdP. Must be an
+	// absolute http(s) URL with an explicit non-root path and no query or
+	// fragment. The `http` scheme is permitted only for `localhost`
+	// development; production deployments must use `https`.
 	// +kubebuilder:validation:Pattern=`^https?://[^/?#\s]+/[^?#\s]+$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=2048
 	// +required
 	RedirectURI string `json:"redirectURI"`
 
-	// Scopes to request from the IdP. The `openid` scope is always included.
+	// `scopes` to request from the IdP. The `openid` scope is always
+	// included.
 	// +optional
+	// +listType=set
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=256
 	Scopes []string `json:"scopes,omitempty"`
 
-	// Overrides the auth method the IdP advertises in its discovery document.
-	// `None` selects public-client mode (no client authentication at the
-	// token endpoint; PKCE still protects the code exchange) and must not be
-	// paired with a `clientSecret`.
+	// `tokenEndpointAuthMethod` overrides the auth method the IdP advertises
+	// in its discovery document. `None` selects public-client mode (no client
+	// authentication at the token endpoint; PKCE still protects the code
+	// exchange) and must not be paired with a `clientSecret`.
 	// +optional
-	// +kubebuilder:validation:Enum=ClientSecretBasic;ClientSecretPost;None
-	TokenEndpointAuthMethod *string `json:"tokenEndpointAuthMethod,omitempty"`
+	TokenEndpointAuthMethod *OIDCTokenEndpointAuthMethod `json:"tokenEndpointAuthMethod,omitempty"`
 
-	// Configures the transport the controller uses for OIDC discovery and
-	// JWKS fetches; the issuer identity is unchanged (`issuerURL` is still
-	// matched against the discovery `issuer` claim). Applies only to
-	// controller-side fetches, not to the dataplane's token endpoint
-	// exchange. Supported referents: `Service`, static `Backend`. Attach an
-	// `AgentgatewayPolicy` with backend TLS config to set a private CA, SNI
-	// override, or `insecureSkipVerify`. Omit to fetch from `issuerURL` using
-	// system CA trust.
+	// `backendRef` configures the transport the controller uses for OIDC
+	// discovery and JWKS fetches; the issuer identity is unchanged
+	// (`issuerURL` is still matched against the discovery `issuer` claim).
+	// Applies only to controller-side fetches, not to the dataplane's token
+	// endpoint exchange. Supported referents: `Service`, static `Backend`.
+	// Attach an `AgentgatewayPolicy` with backend TLS config to set a private
+	// CA, SNI override, or `insecureSkipVerify`. Omit to fetch from
+	// `issuerURL` using system CA trust.
 	// +optional
 	BackendRef *gwv1.BackendObjectReference `json:"backendRef,omitempty"`
 }
+
+// OIDCTokenEndpointAuthMethod is the client authentication method used at the
+// IdP token endpoint.
+// +k8s:enum
+type OIDCTokenEndpointAuthMethod string
+
+const (
+	OIDCTokenEndpointAuthMethodClientSecretBasic OIDCTokenEndpointAuthMethod = "ClientSecretBasic"
+	OIDCTokenEndpointAuthMethodClientSecretPost  OIDCTokenEndpointAuthMethod = "ClientSecretPost"
+	OIDCTokenEndpointAuthMethodNone              OIDCTokenEndpointAuthMethod = "None"
+)
 
 // +k8s:enum
 type JWTAuthenticationMode string

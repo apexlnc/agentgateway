@@ -2,6 +2,7 @@ package remotehttp
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -16,6 +17,11 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/policyselection"
 	"github.com/agentgateway/agentgateway/controller/pkg/wellknown"
 )
+
+// ErrResolverNotInitialized is returned when a BackendRef-backed fetch is
+// attempted but no remotehttp.Resolver was wired in. Shared by the jwks and
+// oidc subsystems, which both gate their BackendRef path on a non-nil resolver.
+var ErrResolverNotInitialized = errors.New("remote http resolver hasn't been initialized")
 
 // ResolvedBackend is the normalized backend shape required by the remote HTTP
 // resolver. Additional backend kinds can resolve to this type to reuse the

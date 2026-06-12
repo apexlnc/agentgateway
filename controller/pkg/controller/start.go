@@ -79,9 +79,8 @@ type StartConfig struct {
 	Resolver       remotehttp.Resolver
 	JWKSLookup     jwks.Lookup
 	OidcLookup     oidc.Lookup
-
 	// CredentialResolverFactory builds the complete credential resolver chain.
-	// If nil, the default Secret-backed resolver is used.
+	// If unset, the built-in Secret resolver is used.
 	CredentialResolverFactory agwplugins.CredentialResolverFactory
 
 	KrtOptions                     krtutil.KrtOptions

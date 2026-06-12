@@ -30,10 +30,11 @@ func TestPluginsRegistersJWKSAwareBuiltins(t *testing.T) {
 	resolver := testutils.BuildRemoteHTTPResolver(collections)
 	jwksLookup := testutils.BuildJWKSLookup(collections)
 	oidcLookup := testutils.BuildOIDCLookup(collections)
+	credentialResolver := plugins.DefaultCredentialResolverFactory(collections)
 
-	plug := plugins.MergePlugins(controller.Plugins(collections, resolver, jwksLookup, oidcLookup)...)
+	plug := plugins.MergePlugins(controller.Plugins(collections, resolver, jwksLookup, oidcLookup, credentialResolver)...)
 
-	if got := len(controller.Plugins(collections, resolver, jwksLookup, oidcLookup)); got != 5 {
+	if got := len(controller.Plugins(collections, resolver, jwksLookup, oidcLookup, credentialResolver)); got != 5 {
 		t.Fatalf("expected 5 built-in plugins, got %d", got)
 	}
 	if _, ok := plug.ContributesPolicies[wellknown.AgentgatewayPolicyGVK.GroupKind()]; !ok {
@@ -51,7 +52,7 @@ func TestPluginsPreserveExtraContributionWhenMerged(t *testing.T) {
 	oidcLookup := testutils.BuildOIDCLookup(collections)
 	extraGK := schema.GroupKind{Group: "test.agentgateway.dev", Kind: "ExtraPolicy"}
 
-	plug := plugins.MergePlugins(append(controller.Plugins(collections, resolver, jwksLookup, oidcLookup), plugins.AgwPlugin{
+	plug := plugins.MergePlugins(append(controller.Plugins(collections, resolver, jwksLookup, oidcLookup, plugins.DefaultCredentialResolverFactory(collections)), plugins.AgwPlugin{
 		ContributesPolicies: map[schema.GroupKind]plugins.PolicyPlugin{
 			extraGK: {},
 		},

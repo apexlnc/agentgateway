@@ -10458,8 +10458,12 @@ type TrafficPolicySpec_OIDC struct {
 	AuthorizationEndpoint string `protobuf:"bytes,3,opt,name=authorization_endpoint,json=authorizationEndpoint,proto3" json:"authorization_endpoint,omitempty"`
 	// Absolute token endpoint URL (the /token URL).
 	TokenEndpoint string `protobuf:"bytes,4,opt,name=token_endpoint,json=tokenEndpoint,proto3" json:"token_endpoint,omitempty"`
-	// Client authentication method advertised by the IdP (or overridden by the
-	// user).
+	// Optional user override of the token-endpoint client authentication
+	// method. When `TOKEN_ENDPOINT_AUTH_UNSPECIFIED`, the dataplane selects the
+	// method from `token_endpoint_auth_methods_supported`, mirroring the
+	// local-config discovery path. The controller validates an explicit
+	// override's method/`client_secret` pairing at apply time; the
+	// "IdP advertises nothing usable" case is resolved at dataplane load.
 	TokenEndpointAuth TrafficPolicySpec_OIDC_TokenEndpointAuth `protobuf:"varint,5,opt,name=token_endpoint_auth,json=tokenEndpointAuth,proto3,enum=agentgateway.dev.resource.TrafficPolicySpec_OIDC_TokenEndpointAuth" json:"token_endpoint_auth,omitempty"`
 	// JWKS content, as JSON, resolved by the controller through the shared
 	// JWKS pipeline. The dataplane does not fetch jwks_uri.
@@ -10479,8 +10483,14 @@ type TrafficPolicySpec_OIDC struct {
 	// SNI, etc.). When unset, the dataplane connects directly to
 	// `token_endpoint` using the system trust store.
 	ProviderBackend *BackendReference `protobuf:"bytes,11,opt,name=provider_backend,json=providerBackend,proto3" json:"provider_backend,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Token-endpoint client authentication methods advertised by the IdP
+	// (OIDC Discovery `token_endpoint_auth_methods_supported`), passed through
+	// by the controller. The dataplane uses these to select the method when
+	// `token_endpoint_auth` is unspecified. Empty implies the spec default
+	// (`client_secret_basic`).
+	TokenEndpointAuthMethodsSupported []string `protobuf:"bytes,12,rep,name=token_endpoint_auth_methods_supported,json=tokenEndpointAuthMethodsSupported,proto3" json:"token_endpoint_auth_methods_supported,omitempty"`
+	unknownFields                     protoimpl.UnknownFields
+	sizeCache                         protoimpl.SizeCache
 }
 
 func (x *TrafficPolicySpec_OIDC) Reset() {
@@ -10586,6 +10596,13 @@ func (x *TrafficPolicySpec_OIDC) GetScopes() []string {
 func (x *TrafficPolicySpec_OIDC) GetProviderBackend() *BackendReference {
 	if x != nil {
 		return x.ProviderBackend
+	}
+	return nil
+}
+
+func (x *TrafficPolicySpec_OIDC) GetTokenEndpointAuthMethodsSupported() []string {
+	if x != nil {
+		return x.TokenEndpointAuthMethodsSupported
 	}
 	return nil
 }
@@ -14781,7 +14798,7 @@ const file_resource_proto_rawDesc = "" +
 	"\x03add\x18\x01 \x03(\v2;.agentgateway.dev.resource.FrontendPolicySpec.Metrics.FieldR\x03addB\x06\n" +
 	"\x04kind\"?\n" +
 	"\x14JWTValidationOptions\x12'\n" +
-	"\x0frequired_claims\x18\x01 \x03(\tR\x0erequiredClaims\"\xefQ\n" +
+	"\x0frequired_claims\x18\x01 \x03(\tR\x0erequiredClaims\"\xc1R\n" +
 	"\x11TrafficPolicySpec\x12N\n" +
 	"\x05phase\x18\x01 \x01(\x0e28.agentgateway.dev.resource.TrafficPolicySpec.PolicyPhaseR\x05phase\x12>\n" +
 	"\atimeout\x18\x02 \x01(\v2\".agentgateway.dev.resource.TimeoutH\x00R\atimeout\x128\n" +
@@ -15008,7 +15025,7 @@ const file_resource_proto_rawDesc = "" +
 	"\x04mode\x18\x01 \x01(\x0e2=.agentgateway.dev.resource.TrafficPolicySpec.HostRewrite.ModeR\x04mode\"\x1a\n" +
 	"\x04Mode\x12\b\n" +
 	"\x04NONE\x10\x00\x12\b\n" +
-	"\x04AUTO\x10\x01\x1a\xf9\x04\n" +
+	"\x04AUTO\x10\x01\x1a\xcb\x05\n" +
 	"\x04OIDC\x12\x1b\n" +
 	"\tpolicy_id\x18\x01 \x01(\tR\bpolicyId\x12\x16\n" +
 	"\x06issuer\x18\x02 \x01(\tR\x06issuer\x125\n" +
@@ -15022,7 +15039,8 @@ const file_resource_proto_rawDesc = "" +
 	"\fredirect_uri\x18\t \x01(\tR\vredirectUri\x12\x16\n" +
 	"\x06scopes\x18\n" +
 	" \x03(\tR\x06scopes\x12V\n" +
-	"\x10provider_backend\x18\v \x01(\v2+.agentgateway.dev.resource.BackendReferenceR\x0fproviderBackend\"s\n" +
+	"\x10provider_backend\x18\v \x01(\v2+.agentgateway.dev.resource.BackendReferenceR\x0fproviderBackend\x12P\n" +
+	"%token_endpoint_auth_methods_supported\x18\f \x03(\tR!tokenEndpointAuthMethodsSupported\"s\n" +
 	"\x11TokenEndpointAuth\x12#\n" +
 	"\x1fTOKEN_ENDPOINT_AUTH_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13CLIENT_SECRET_BASIC\x10\x01\x12\x16\n" +

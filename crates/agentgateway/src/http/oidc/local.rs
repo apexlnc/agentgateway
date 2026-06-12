@@ -28,50 +28,27 @@ struct OidcDiscoveryDocument {
 }
 
 pub(crate) struct PreparedOidcPolicy {
-	policy_id: PolicyId,
-	issuer: String,
-	authorization_endpoint: ProviderEndpoint,
-	token_endpoint: ProviderEndpoint,
-	id_token_jwks: JwkSet,
-	client_id: String,
-	credentials: ClientCredentials,
-	redirect_uri: RedirectUri,
-	scopes: Vec<String>,
-	provider_backend: Option<SimpleBackendReference>,
+	pub(crate) policy_id: PolicyId,
+	pub(crate) issuer: String,
+	pub(crate) authorization_endpoint: ProviderEndpoint,
+	pub(crate) token_endpoint: ProviderEndpoint,
+	pub(crate) id_token_jwks: JwkSet,
+	pub(crate) client_id: String,
+	pub(crate) credentials: ClientCredentials,
+	pub(crate) redirect_uri: RedirectUri,
+	pub(crate) scopes: Vec<String>,
+	pub(crate) provider_backend: Option<SimpleBackendReference>,
 }
 
-/// Decode a fully-resolved OIDC policy delivered over xDS into typed config.
-/// Mirrors the JWT path: the controller has already resolved provider metadata
-/// and JWKS, while runtime cookie crypto is applied later at store ingestion.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn resolve_oidc_policy_from_xds(
-	policy_id: PolicyId,
-	issuer: String,
-	authorization_endpoint: ProviderEndpoint,
-	token_endpoint: ProviderEndpoint,
-	jwks_inline: &str,
-	client_id: String,
-	credentials: ClientCredentials,
-	redirect_uri: RedirectUri,
-	scopes: Vec<String>,
-	provider_backend: Option<SimpleBackendReference>,
-) -> Result<PreparedOidcPolicy, Error> {
-	let id_token_jwks: JwkSet = serde_json::from_str(jwks_inline).map_err(|e| {
+/// Parse the controller-resolved inline JWKS delivered over xDS. The controller
+/// has already resolved provider metadata and JWKS; the xDS decoder builds
+/// [`PreparedOidcPolicy`] directly and applies runtime cookie crypto later at
+/// store ingestion.
+pub(crate) fn parse_jwks_inline(jwks_inline: &str) -> Result<JwkSet, Error> {
+	serde_json::from_str(jwks_inline).map_err(|e| {
 		Error::Config(format!(
 			"failed to parse inline oidc jwks delivered by xds: {e}"
 		))
-	})?;
-	Ok(PreparedOidcPolicy {
-		policy_id,
-		issuer,
-		authorization_endpoint,
-		token_endpoint,
-		id_token_jwks,
-		client_id,
-		credentials,
-		redirect_uri,
-		scopes,
-		provider_backend,
 	})
 }
 

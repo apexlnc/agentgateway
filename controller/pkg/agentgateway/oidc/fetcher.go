@@ -113,14 +113,10 @@ func validateDiscoveryDocument(doc discoveryDocument, expectedIssuer string) err
 	if err := validateAbsoluteHTTPSURL(doc.TokenEndpoint, "token_endpoint"); err != nil {
 		return err
 	}
-	if err := validateJwksURI(doc.JwksURI); err != nil {
+	if err := validateAbsoluteHTTPSURL(doc.JwksURI, "jwks_uri"); err != nil {
 		return err
 	}
 	return nil
-}
-
-func validateJwksURI(raw string) error {
-	return validateAbsoluteHTTPSURL(raw, "jwks_uri")
 }
 
 func validateAbsoluteHTTPSURL(raw, field string) error {

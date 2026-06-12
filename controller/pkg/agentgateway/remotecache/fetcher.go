@@ -189,15 +189,11 @@ func (f *Fetcher[S, R]) Retire(key remotehttp.FetchKey) {
 // to clear ConfigMaps whose owner has gone away.
 func (f *Fetcher[S, R]) SweepOrphans() {
 	f.mu.Lock()
-	live := make(map[remotehttp.FetchKey]struct{}, len(f.requests))
-	for key := range f.requests {
-		live[key] = struct{}{}
-	}
+	defer f.mu.Unlock()
 	f.retireDirty = false
-	f.mu.Unlock()
 
 	f.Results.DeleteObjects(func(record R) bool {
-		_, ok := live[record.RemoteRequestKey()]
+		_, ok := f.requests[record.RemoteRequestKey()]
 		return !ok
 	})
 }

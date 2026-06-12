@@ -11,10 +11,9 @@ import (
 )
 
 type RemoteJwksOwner struct {
-	ID               remotecache.OwnerID
-	DefaultNamespace string
-	Remote           agentgateway.RemoteJWKS
-	TTL              time.Duration
+	ID     remotecache.OwnerID
+	Remote agentgateway.RemoteJWKS
+	TTL    time.Duration
 }
 
 func (o RemoteJwksOwner) ResourceName() string {
@@ -23,7 +22,6 @@ func (o RemoteJwksOwner) ResourceName() string {
 
 func (o RemoteJwksOwner) Equals(other RemoteJwksOwner) bool {
 	return o.ID == other.ID &&
-		o.DefaultNamespace == other.DefaultNamespace &&
 		o.TTL == other.TTL &&
 		equality.Semantic.DeepEqual(o.Remote, other.Remote)
 }
@@ -80,9 +78,8 @@ func PolicyJWTProviderLookupOwner(namespace, name string, providerIndex int, pro
 			Name:      name,
 			Path:      fmt.Sprintf("spec.traffic.jwtAuthentication.providers[%d].jwks.remote", providerIndex),
 		},
-		DefaultNamespace: namespace,
-		Remote:           *provider.JWKS.Remote.DeepCopy(),
-		TTL:              TTLForRemote(*provider.JWKS.Remote),
+		Remote: *provider.JWKS.Remote.DeepCopy(),
+		TTL:    TTLForRemote(*provider.JWKS.Remote),
 	}, true
 }
 
@@ -94,9 +91,8 @@ func PolicyBackendMCPAuthenticationLookupOwner(namespace, name string, remote ag
 			Name:      name,
 			Path:      "spec.backend.mcp.authentication.jwks",
 		},
-		DefaultNamespace: namespace,
-		Remote:           *remote.DeepCopy(),
-		TTL:              TTLForRemote(remote),
+		Remote: *remote.DeepCopy(),
+		TTL:    TTLForRemote(remote),
 	}
 }
 
@@ -108,9 +104,8 @@ func backendMCPAuthenticationOwner(namespace, name string, remote agentgateway.R
 			Name:      name,
 			Path:      "spec.policies.mcp.authentication.jwks",
 		},
-		DefaultNamespace: namespace,
-		Remote:           *remote.DeepCopy(),
-		TTL:              TTLForRemote(remote),
+		Remote: *remote.DeepCopy(),
+		TTL:    TTLForRemote(remote),
 	}
 }
 

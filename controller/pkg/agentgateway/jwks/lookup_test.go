@@ -6,7 +6,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"istio.io/istio/pkg/kube/krt"
-	"istio.io/istio/pkg/test"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -29,7 +28,7 @@ func (r staticLookupResolver) ResolveOwner(krt.HandlerContext, RemoteJwksOwner) 
 }
 
 func TestLookupFailsClosedWhenKeysetIsMissing(t *testing.T) {
-	stop := test.NewStop(t)
+	stop := t.Context().Done()
 	target := remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}
 	persisted := NewPersistedEntriesFromCollection(
 		krt.NewStaticCollection[*corev1.ConfigMap](alwaysSynced{}, nil, krt.WithName("jwks/LookupMissingPersistedConfigMaps")),
@@ -54,7 +53,7 @@ func TestLookupFailsClosedWhenKeysetIsMissing(t *testing.T) {
 }
 
 func TestLookupReturnsPersistedKeyset(t *testing.T) {
-	stop := test.NewStop(t)
+	stop := t.Context().Done()
 	target := remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}
 	keyset := Keyset{
 		RequestKey: target.Key(),
@@ -94,7 +93,7 @@ func TestLookupReturnsPersistedKeyset(t *testing.T) {
 }
 
 func TestLookupRequiresCanonicalPersistedKeysetName(t *testing.T) {
-	stop := test.NewStop(t)
+	stop := t.Context().Done()
 	target := remotehttp.FetchTarget{URL: "https://issuer.example/jwks"}
 	keyset := Keyset{
 		RequestKey: target.Key(),

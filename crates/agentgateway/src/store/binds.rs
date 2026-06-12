@@ -3002,6 +3002,7 @@ mod tests {
 
 		XdsPolicy {
 			key: "test-oidc".to_string(),
+			inheritance: Default::default(),
 			name: Some(agent::TypedResourceName {
 				name: "test-oidc".to_string(),
 				namespace: "default".to_string(),
@@ -3030,6 +3031,7 @@ mod tests {
 						jwks_inline: jwks_inline.to_string(),
 						scopes: vec![],
 						provider_backend: None,
+						token_endpoint_auth_methods_supported: vec![],
 					},
 				)),
 				phase: agent::traffic_policy_spec::PolicyPhase::Route.into(),
@@ -3066,6 +3068,7 @@ mod tests {
 			false,
 			crate::ThreadingMode::Multithreaded,
 			Some(oidc_encoder),
+			Default::default(),
 		);
 		let mut diagnostics = Diagnostics::default();
 

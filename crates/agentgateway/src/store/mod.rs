@@ -78,7 +78,7 @@ impl Stores {
 		)
 	}
 
-	pub fn new_with_dynamic_ca_cert_cache(
+	pub(crate) fn new_with_dynamic_ca_cert_cache(
 		ipv6_enabled: bool,
 		threading_mode: crate::ThreadingMode,
 		oidc_cookie_encoder: Option<crate::http::oidc::OidcCookieEncoder>,

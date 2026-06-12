@@ -134,9 +134,8 @@ func TestResolveEndpoint(t *testing.T) {
 					Name:      "gw-policy",
 					Path:      "spec.traffic.jwtAuthentication.providers[0].jwks.remote",
 				},
-				DefaultNamespace: "default",
-				Remote:           tt.remoteProvider,
-				TTL:              jwks.TTLForRemote(tt.remoteProvider),
+				Remote: tt.remoteProvider,
+				TTL:    jwks.TTLForRemote(tt.remoteProvider),
 			}
 
 			r := jwks.NewResolver(resolver)

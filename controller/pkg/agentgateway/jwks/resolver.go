@@ -1,7 +1,6 @@
 package jwks
 
 import (
-	"errors"
 	"time"
 
 	"istio.io/istio/pkg/kube/krt"
@@ -9,10 +8,6 @@ import (
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
-)
-
-var (
-	errResolverNotInitialized = errors.New("remote http resolver hasn't been initialized")
 )
 
 type ResolvedJwksRequest struct {
@@ -34,7 +29,7 @@ func NewResolver(endpointResolver remotehttp.Resolver) Resolver {
 }
 
 func (r *defaultResolver) ResolveOwner(krtctx krt.HandlerContext, owner RemoteJwksOwner) (*ResolvedJwksRequest, error) {
-	endpoint, err := resolveEndpoint(krtctx, r.endpointResolver, owner.ID.Name, owner.DefaultNamespace, owner.Remote)
+	endpoint, err := resolveEndpoint(krtctx, r.endpointResolver, owner.ID.Name, owner.ID.Namespace, owner.Remote)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +48,7 @@ func resolveEndpoint(
 	remoteProvider agentgateway.RemoteJWKS,
 ) (*remotehttp.ResolvedTarget, error) {
 	if resolver == nil {
-		return nil, errResolverNotInitialized
+		return nil, remotehttp.ErrResolverNotInitialized
 	}
 
 	return resolver.Resolve(krtctx, remotehttp.ResolveInput{

@@ -8962,7 +8962,7 @@ spec:
                       rule: '!has(self.mcp) || !has(self.mode) || self.mode == ''Strict'''
                   oidc:
                     description: |-
-                      Enables browser-based user login at the gateway using the OpenID
+                      `oidc` enables browser-based user login at the gateway using the OpenID
                       Connect Authorization Code Flow with PKCE. The gateway terminates the
                       redirect flow, validates the ID token, and issues an encrypted session
                       cookie, so upstream services receive authenticated requests. For
@@ -8972,14 +8972,14 @@ spec:
                     properties:
                       backendRef:
                         description: |-
-                          Configures the transport the controller uses for OIDC discovery and
-                          JWKS fetches; the issuer identity is unchanged (`issuerURL` is still
-                          matched against the discovery `issuer` claim). Applies only to
-                          controller-side fetches, not to the dataplane's token endpoint
-                          exchange. Supported referents: `Service`, static `Backend`. Attach an
-                          `AgentgatewayPolicy` with backend TLS config to set a private CA, SNI
-                          override, or `insecureSkipVerify`. Omit to fetch from `issuerURL` using
-                          system CA trust.
+                          `backendRef` configures the transport the controller uses for OIDC
+                          discovery and JWKS fetches; the issuer identity is unchanged
+                          (`issuerURL` is still matched against the discovery `issuer` claim).
+                          Applies only to controller-side fetches, not to the dataplane's token
+                          endpoint exchange. Supported referents: `Service`, static `Backend`.
+                          Attach an `AgentgatewayPolicy` with backend TLS config to set a private
+                          CA, SNI override, or `insecureSkipVerify`. Omit to fetch from
+                          `issuerURL` using system CA trust.
                         properties:
                           group:
                             default: ""
@@ -9049,16 +9049,16 @@ spec:
                           rule: '(size(self.group) == 0 && self.kind == ''Service'')
                             ? has(self.port) : true'
                       clientID:
-                        description: The OIDC client identifier.
+                        description: '`clientID` is the OIDC client identifier.'
                         maxLength: 256
                         minLength: 1
                         type: string
                       clientSecret:
                         description: |-
-                          References a Secret containing the OIDC client secret under the
-                          `clientSecret` data key. Omit for a public client; PKCE alone then
-                          protects the authorization code exchange and the IdP must accept the
-                          `none` token-endpoint auth method (see `tokenEndpointAuthMethod`).
+                          `clientSecret` references a Secret containing the OIDC client secret
+                          under the `clientSecret` data key. Omit for a public client; PKCE alone
+                          then protects the authorization code exchange and the IdP must accept
+                          the `none` token-endpoint auth method (see `tokenEndpointAuthMethod`).
                         properties:
                           name:
                             default: ""
@@ -9073,8 +9073,8 @@ spec:
                         x-kubernetes-map-type: atomic
                       issuerURL:
                         description: |-
-                          The OIDC issuer URL. Must be an absolute HTTPS URL with no query or
-                          fragment. The configured value is preserved exactly for
+                          `issuerURL` is the OIDC issuer URL. Must be an absolute HTTPS URL with
+                          no query or fragment. The configured value is preserved exactly for
                           discovery-document issuer matching, including any trailing slash.
                         maxLength: 512
                         minLength: 1
@@ -9082,29 +9082,31 @@ spec:
                         type: string
                       redirectURI:
                         description: |-
-                          The callback URL registered with the IdP. Must be an absolute http(s)
-                          URL with an explicit non-root path and no query or fragment. The `http`
-                          scheme is permitted only for `localhost` development; production
-                          deployments must use `https`.
+                          `redirectURI` is the callback URL registered with the IdP. Must be an
+                          absolute http(s) URL with an explicit non-root path and no query or
+                          fragment. The `http` scheme is permitted only for `localhost`
+                          development; production deployments must use `https`.
                         maxLength: 2048
                         minLength: 1
                         pattern: ^https?://[^/?#\s]+/[^?#\s]+$
                         type: string
                       scopes:
-                        description: Scopes to request from the IdP. The `openid`
-                          scope is always included.
+                        description: |-
+                          `scopes` to request from the IdP. The `openid` scope is always
+                          included.
                         items:
                           maxLength: 256
                           minLength: 1
                           type: string
                         maxItems: 64
                         type: array
+                        x-kubernetes-list-type: set
                       tokenEndpointAuthMethod:
                         description: |-
-                          Overrides the auth method the IdP advertises in its discovery document.
-                          `None` selects public-client mode (no client authentication at the
-                          token endpoint; PKCE still protects the code exchange) and must not be
-                          paired with a `clientSecret`.
+                          `tokenEndpointAuthMethod` overrides the auth method the IdP advertises
+                          in its discovery document. `None` selects public-client mode (no client
+                          authentication at the token endpoint; PKCE still protects the code
+                          exchange) and must not be paired with a `clientSecret`.
                         enum:
                         - ClientSecretBasic
                         - ClientSecretPost

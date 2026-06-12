@@ -1,7 +1,6 @@
 package remotecache
 
 import (
-	"cmp"
 	"time"
 
 	"istio.io/istio/pkg/kube/krt"
@@ -14,10 +13,8 @@ import (
 // CollapseSources collapses sources sharing a fetch key: lowest ownerKey
 // (stable across input order) and minimum TTL. Panics on len 0.
 func CollapseSources[S any](sources []S, ownerKey func(S) string, ttl func(S) time.Duration) (S, time.Duration) {
-	sorted := append([]S(nil), sources...)
-	slices.SortFunc(sorted, func(a, b S) int {
-		return cmp.Compare(ownerKey(a), ownerKey(b))
-	})
+	sorted := slices.Clone(sources)
+	slices.SortBy(sorted, ownerKey)
 	primary := sorted[0]
 	minTTL := ttl(primary)
 	for _, s := range sorted[1:] {
@@ -28,21 +25,21 @@ func CollapseSources[S any](sources []S, ownerKey func(S) string, ttl func(S) ti
 	return primary, minTTL
 }
 
-// NewSharedRequestCollection groups sources by FetchKey and collapses each group via `collapse`.
+// NewSharedRequestCollection groups sources by FetchKey and collapses each group
+// via `collapse`. namePrefix (e.g. "jwks", "oidc") names the three derived KRT
+// collections consistently.
 func NewSharedRequestCollection[S any, R any](
 	sources krt.Collection[S],
-	indexName string,
-	groupsName string,
-	requestsName string,
+	namePrefix string,
 	krtOpts krtutil.KrtOptions,
 	requestKey func(S) remotehttp.FetchKey,
 	collapse func(krt.IndexObject[remotehttp.FetchKey, S]) *R,
 ) krt.Collection[R] {
-	byRequestKey := krt.NewIndex(sources, indexName, func(source S) []remotehttp.FetchKey {
+	byRequestKey := krt.NewIndex(sources, namePrefix+"-request-key", func(source S) []remotehttp.FetchKey {
 		return []remotehttp.FetchKey{requestKey(source)}
 	})
-	groups := byRequestKey.AsCollection(append(krtOpts.ToOptions(groupsName), FetchKeyIndexCollectionOption)...)
+	groups := byRequestKey.AsCollection(append(krtOpts.ToOptions(namePrefix+"/requestGroups"), FetchKeyIndexCollectionOption)...)
 	return krt.NewCollection(groups, func(kctx krt.HandlerContext, grouped krt.IndexObject[remotehttp.FetchKey, S]) *R {
 		return collapse(grouped)
-	}, krtOpts.ToOptions(requestsName)...)
+	}, krtOpts.ToOptions(namePrefix+"/sharedRequests")...)
 }

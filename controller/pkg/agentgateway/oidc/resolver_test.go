@@ -11,7 +11,6 @@ import (
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
-	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/shared"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
@@ -34,7 +33,6 @@ func TestDefaultResolverDirectFetchSkipsResolver(t *testing.T) {
 			Name:      "p1",
 			Path:      "spec.traffic.oidc",
 		},
-		DefaultNamespace: "default",
 		Config: agentgateway.OIDC{
 			IssuerURL:   testOidcIssuer,
 			ClientID:    "agw",
@@ -58,8 +56,7 @@ func TestDefaultResolverDirectFetchSkipsResolver(t *testing.T) {
 func TestDefaultResolverPropagatesDiscoveryURLError(t *testing.T) {
 	r := oidc.NewResolver(nil)
 	owner := oidc.RemoteOidcOwner{
-		ID:               remotecache.OwnerID{Name: "bad"},
-		DefaultNamespace: "default",
+		ID: remotecache.OwnerID{Name: "bad"},
 		Config: agentgateway.OIDC{
 			IssuerURL: "http://insecure.example",
 		},
@@ -246,9 +243,8 @@ func TestResolveEndpoint(t *testing.T) {
 					Name:      "gw-policy",
 					Path:      "spec.traffic.oidc",
 				},
-				DefaultNamespace: "default",
-				Config:           tt.cfg,
-				TTL:              oidc.OidcRefreshInterval,
+				Config: tt.cfg,
+				TTL:    oidc.OidcRefreshInterval,
 			}
 
 			r := oidc.NewResolver(resolver)
@@ -291,8 +287,8 @@ func gatewayOIDCPolicy(backendRef *gwv1.BackendObjectReference) *agentgateway.Ag
 	return &agentgateway.AgentgatewayPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "gw-policy", Namespace: "default"},
 		Spec: agentgateway.AgentgatewayPolicySpec{
-			TargetRefs: []shared.LocalPolicyTargetReferenceWithSectionName{{
-				LocalPolicyTargetReference: shared.LocalPolicyTargetReference{
+			TargetRefs: []agentgateway.LocalPolicyTargetReferenceWithSectionName{{
+				LocalPolicyTargetReference: agentgateway.LocalPolicyTargetReference{
 					Group: gwv1.Group(gwv1.GroupVersion.Group),
 					Kind:  gwv1.Kind("Gateway"),
 					Name:  gwv1.ObjectName("super-gateway"),
@@ -307,8 +303,8 @@ func attachedBackendPolicy(group gwv1.Group, kind gwv1.Kind, name string, tlsPol
 	return &agentgateway.AgentgatewayPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "idp-policy", Namespace: "default"},
 		Spec: agentgateway.AgentgatewayPolicySpec{
-			TargetRefs: []shared.LocalPolicyTargetReferenceWithSectionName{{
-				LocalPolicyTargetReference: shared.LocalPolicyTargetReference{
+			TargetRefs: []agentgateway.LocalPolicyTargetReferenceWithSectionName{{
+				LocalPolicyTargetReference: agentgateway.LocalPolicyTargetReference{
 					Group: group,
 					Kind:  kind,
 					Name:  gwv1.ObjectName(name),

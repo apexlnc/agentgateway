@@ -79,35 +79,3 @@ func SetProviderInConfigMap(cm *corev1.ConfigMap, provider DiscoveredProvider) e
 	cm.Data[oidcConfigMapKey] = string(b)
 	return nil
 }
-
-// ConfigMapController synchronizes fetched OIDC providers to persisted ConfigMaps.
-type ConfigMapController struct {
-	*remotecache.ConfigMapController[DiscoveredProvider]
-}
-
-// ConfigMapControllerOptions configures NewConfigMapController.
-type ConfigMapControllerOptions struct {
-	APIClient           apiclient.Client
-	DeploymentNamespace string
-	Store               *Store
-	PersistedEntries    *PersistedEntries
-}
-
-func NewConfigMapController(opts ConfigMapControllerOptions) *ConfigMapController {
-	cmLogger := logger.With("subcomponent", "configmap_controller")
-	cmLogger.Info("creating oidc store configmap controller")
-
-	controllerOpts := remotecache.ConfigMapControllerOptions[DiscoveredProvider]{
-		APIClient:           opts.APIClient,
-		DeploymentNamespace: opts.DeploymentNamespace,
-		ControllerName:      "OidcStoreConfigMapController",
-		Results:             opts.Store.FetchedResults().Collection(),
-		Entries:             opts.PersistedEntries,
-		StoreHasSynced:      opts.Store.HasSynced,
-		Logger:              cmLogger,
-	}
-
-	return &ConfigMapController{
-		ConfigMapController: remotecache.NewConfigMapController(controllerOpts),
-	}
-}

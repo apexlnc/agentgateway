@@ -14,16 +14,16 @@ import (
 	"github.com/go-jose/go-jose/v4"
 )
 
-const ClientTimeout = 10 * time.Second
+const clientTimeout = 10 * time.Second
 
 // NewDefaultFetchClient returns an http.Client configured with the package's
-// shared timeouts and TLS defaults. It is equivalent to NewFetchClient with
+// shared timeouts and TLS defaults. It is equivalent to newFetchClient with
 // no per-target TLS or proxy overrides, but cannot fail and so removes the
 // silent-error pitfall at constructor sites.
 func NewDefaultFetchClient() *http.Client {
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	return &http.Client{
-		Timeout: ClientTimeout,
+		Timeout: clientTimeout,
 		Transport: &http.Transport{
 			DialContext:       dialer.DialContext,
 			DisableKeepAlives: true,
@@ -31,7 +31,7 @@ func NewDefaultFetchClient() *http.Client {
 	}
 }
 
-func NewFetchClient(tlsConfig *tls.Config, proxyURL string, proxyTLSConfig *tls.Config) (*http.Client, error) {
+func newFetchClient(tlsConfig *tls.Config, proxyURL string, proxyTLSConfig *tls.Config) (*http.Client, error) {
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	transport := &http.Transport{
 		TLSClientConfig:   tlsConfig,
@@ -56,7 +56,7 @@ func NewFetchClient(tlsConfig *tls.Config, proxyURL string, proxyTLSConfig *tls.
 		}
 	}
 	return &http.Client{
-		Timeout:   ClientTimeout,
+		Timeout:   clientTimeout,
 		Transport: transport,
 	}, nil
 }
@@ -86,12 +86,12 @@ func PickClient(defaultClient *http.Client, target FetchTarget, tlsConfig, proxy
 	if tlsConfig == nil && target.ProxyURL == "" {
 		return defaultClient, nil
 	}
-	return NewFetchClient(tlsConfig, target.ProxyURL, proxyTLSConfig)
+	return newFetchClient(tlsConfig, target.ProxyURL, proxyTLSConfig)
 }
 
 func FetchJSON[T any](ctx context.Context, client *http.Client, target FetchTarget, description string) (T, error) {
 	var out T
-	body, err := FetchBody(ctx, client, target.URL, description)
+	body, err := fetchBody(ctx, client, target.URL, description)
 	if err != nil {
 		return out, err
 	}
@@ -101,7 +101,7 @@ func FetchJSON[T any](ctx context.Context, client *http.Client, target FetchTarg
 	return out, nil
 }
 
-func FetchBody(ctx context.Context, client *http.Client, requestURL, description string) ([]byte, error) {
+func fetchBody(ctx context.Context, client *http.Client, requestURL, description string) ([]byte, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("could not build request to get %s: %w", description, err)
@@ -130,18 +130,18 @@ func FetchBody(ctx context.Context, client *http.Client, requestURL, description
 // IdP's JWKS material downstream verbatim; the parsed value is used by direct
 // JWKS consumers.
 func FetchJWKSBody(ctx context.Context, client *http.Client, requestURL, description string) ([]byte, jose.JSONWebKeySet, error) {
-	body, err := FetchBody(ctx, client, requestURL, description)
+	body, err := fetchBody(ctx, client, requestURL, description)
 	if err != nil {
 		return nil, jose.JSONWebKeySet{}, err
 	}
-	keyset, err := ValidateJWKSBody(body, requestURL, description)
+	keyset, err := validateJWKSBody(body, requestURL, description)
 	if err != nil {
 		return nil, jose.JSONWebKeySet{}, err
 	}
 	return body, keyset, nil
 }
 
-func ValidateJWKSBody(body []byte, requestURL, description string) (jose.JSONWebKeySet, error) {
+func validateJWKSBody(body []byte, requestURL, description string) (jose.JSONWebKeySet, error) {
 	var keyset jose.JSONWebKeySet
 	if err := json.Unmarshal(body, &keyset); err != nil {
 		return jose.JSONWebKeySet{}, fmt.Errorf("%s response from %s is not a valid JWKS document: %w", description, requestURL, err)

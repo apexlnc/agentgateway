@@ -24,7 +24,7 @@ mod session;
 mod tests;
 
 pub use local::LocalOidcConfig;
-pub(crate) use local::{PreparedOidcPolicy, resolve_oidc_policy_from_xds};
+pub(crate) use local::{PreparedOidcPolicy, parse_jwks_inline};
 pub use redirect::RedirectUri;
 pub(crate) use session::OidcCookieEncoder;
 pub use session::{
@@ -437,17 +437,11 @@ pub(crate) fn now_unix() -> u64 {
 		.as_secs()
 }
 
-pub(crate) fn normalize_scopes(scopes: Vec<String>) -> Vec<String> {
-	let mut seen = HashSet::with_capacity(scopes.len() + 1);
-	let mut normalized = Vec::with_capacity(scopes.len() + 1);
-	normalized.push("openid".to_string());
-	seen.insert("openid".to_string());
-	for scope in scopes {
-		if seen.insert(scope.clone()) {
-			normalized.push(scope);
-		}
-	}
-	normalized
+pub(crate) fn normalize_scopes(mut scopes: Vec<String>) -> Vec<String> {
+	scopes.insert(0, "openid".into());
+	let mut seen = HashSet::new();
+	scopes.retain(|scope| seen.insert(scope.clone()));
+	scopes
 }
 
 pub(crate) fn cap_session_expiry(now: u64, ttl: Duration, claims: &Map<String, Value>) -> u64 {

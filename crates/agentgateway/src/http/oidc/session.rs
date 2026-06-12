@@ -205,11 +205,11 @@ impl SessionConfig {
 			self.secure,
 			is_https,
 			Some(ttl),
-			false,
 		)
 	}
 
 	pub fn clear_cookie(&self, name: &str, is_https: bool) -> String {
+		// Duration::ZERO yields Max-Age=0, expiring the cookie immediately.
 		cookie_header(
 			name,
 			"",
@@ -217,7 +217,6 @@ impl SessionConfig {
 			self.secure,
 			is_https,
 			Some(Duration::ZERO),
-			true,
 		)
 	}
 
@@ -306,7 +305,6 @@ fn cookie_header(
 	secure_mode: CookieSecureMode,
 	is_https: bool,
 	max_age: Option<Duration>,
-	expire_now: bool,
 ) -> String {
 	let secure = match secure_mode {
 		CookieSecureMode::Always => true,
@@ -323,7 +321,7 @@ fn cookie_header(
 		})
 		.secure(secure);
 	if let Some(max_age) = max_age {
-		let secs = if expire_now { 0 } else { max_age.as_secs() };
+		let secs = max_age.as_secs();
 		let secs = i64::try_from(secs).unwrap_or(i64::MAX);
 		cookie = cookie.max_age(cookie::time::Duration::seconds(secs));
 	}

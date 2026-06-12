@@ -1330,18 +1330,18 @@ fn compile_test_oidc_from_xds(
 		TokenEndpointAuth::ClientSecretBasic,
 		Some(SecretString::new("client-secret".into())),
 	)?;
-	super::resolve_oidc_policy_from_xds(
+	super::PreparedOidcPolicy {
 		policy_id,
-		TEST_ISSUER.into(),
-		provider_endpoint("https://issuer.example.com/authorize"),
-		provider_endpoint("https://issuer.example.com/token"),
-		jwks_inline,
-		TEST_CLIENT_ID.into(),
+		issuer: TEST_ISSUER.into(),
+		authorization_endpoint: provider_endpoint("https://issuer.example.com/authorize"),
+		token_endpoint: provider_endpoint("https://issuer.example.com/token"),
+		id_token_jwks: super::parse_jwks_inline(jwks_inline)?,
+		client_id: TEST_CLIENT_ID.into(),
 		credentials,
-		test_redirect_uri(),
-		vec!["profile".into(), "email".into()],
-		None,
-	)?
+		redirect_uri: test_redirect_uri(),
+		scopes: vec!["profile".into(), "email".into()],
+		provider_backend: None,
+	}
 	.compile(encoder)
 }
 

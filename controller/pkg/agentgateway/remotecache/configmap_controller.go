@@ -10,6 +10,7 @@ import (
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/kclient"
 	"istio.io/istio/pkg/kube/krt"
+	"istio.io/istio/pkg/slices"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -36,7 +37,6 @@ type ConfigMapController[T Result[T]] struct {
 	entries             *Entries[T]
 	deploymentNamespace string
 	controllerName      string
-	reconcileCtx        context.Context
 	waitForSync         []cache.InformerSynced
 	logger              *slog.Logger
 }
@@ -89,8 +89,6 @@ func (c *ConfigMapController[T]) Init() {
 }
 
 func (c *ConfigMapController[T]) Start(ctx context.Context) error {
-	c.reconcileCtx = ctx
-
 	c.logger.Info("waiting for cache to sync")
 	c.apiClient.Core().WaitForCacheSync(
 		c.controllerName,
@@ -130,14 +128,12 @@ func (c *ConfigMapController[T]) Start(ctx context.Context) error {
 
 func (c *ConfigMapController[T]) Reconcile(req types.NamespacedName) error {
 	c.logger.Debug("syncing fetched result to ConfigMap(s)")
-	ctx := c.reconcileCtx
 	requestKey := remotehttp.FetchKey(req.Name)
 
 	existingEntries := c.entries.EntriesForRequestKey(requestKey)
-	existingNames := make([]string, 0, len(existingEntries))
-	for _, entry := range existingEntries {
-		existingNames = append(existingNames, entry.GetName())
-	}
+	existingNames := slices.Map(existingEntries, func(entry Entry[T]) string {
+		return entry.GetName()
+	})
 
 	result := c.results.GetKey(string(requestKey))
 	var record T
@@ -151,13 +147,13 @@ func (c *ConfigMapController[T]) Reconcile(req types.NamespacedName) error {
 	plan := PlanConfigMapSync(existingNames, canonicalName, exists)
 
 	if plan.UpsertName != "" {
-		if err := c.upsertConfigMap(ctx, req.Namespace, plan.UpsertName, record); err != nil {
+		if err := c.upsertConfigMap(req.Namespace, plan.UpsertName, record); err != nil {
 			return err
 		}
 	}
 	for _, deleteName := range plan.DeleteNames {
 		c.logger.Debug("deleting ConfigMap", "name", deleteName)
-		if err := client.IgnoreNotFound(c.apiClient.Kube().CoreV1().ConfigMaps(req.Namespace).Delete(ctx, deleteName, metav1.DeleteOptions{})); err != nil {
+		if err := client.IgnoreNotFound(c.cmClient.Delete(deleteName, req.Namespace)); err != nil {
 			return err
 		}
 	}
@@ -204,7 +200,7 @@ func (c *ConfigMapController[T]) enqueuePersistedEntry(entry *Entry[T]) {
 	c.eventQueue.Add(RequestQueueKey(c.deploymentNamespace, requestKey))
 }
 
-func (c *ConfigMapController[T]) upsertConfigMap(ctx context.Context, namespace, name string, record T) error {
+func (c *ConfigMapController[T]) upsertConfigMap(namespace, name string, record T) error {
 	existingCmRaw := c.cmClient.Get(name, namespace)
 	if existingCmRaw == nil {
 		c.logger.Debug("creating ConfigMap", "name", name)
@@ -214,7 +210,7 @@ func (c *ConfigMapController[T]) upsertConfigMap(ctx context.Context, namespace,
 			return err
 		}
 
-		if _, err := c.apiClient.Kube().CoreV1().ConfigMaps(namespace).Create(ctx, newCm, metav1.CreateOptions{}); err != nil {
+		if _, err := c.cmClient.Create(newCm); err != nil {
 			c.logger.Error("error creating ConfigMap", "error", err)
 			return err
 		}
@@ -227,7 +223,7 @@ func (c *ConfigMapController[T]) upsertConfigMap(ctx context.Context, namespace,
 		c.logger.Error("error setting record in ConfigMap", "error", err)
 		return err
 	}
-	if _, err := c.apiClient.Kube().CoreV1().ConfigMaps(namespace).Update(ctx, existingCm, metav1.UpdateOptions{}); err != nil {
+	if _, err := c.cmClient.Update(existingCm); err != nil {
 		c.logger.Error("error updating ConfigMap", "error", err)
 		return err
 	}
@@ -242,15 +238,11 @@ type SyncPlan struct {
 // PlanConfigMapSync chooses upsert/delete names from existing names and the canonical name.
 func PlanConfigMapSync(existingNames []string, canonicalName string, exists bool) SyncPlan {
 	if exists {
-		deleteNames := make([]string, 0, len(existingNames))
-		for _, name := range existingNames {
-			if name != canonicalName {
-				deleteNames = append(deleteNames, name)
-			}
-		}
 		return SyncPlan{
-			UpsertName:  canonicalName,
-			DeleteNames: deleteNames,
+			UpsertName: canonicalName,
+			DeleteNames: slices.Filter(existingNames, func(name string) bool {
+				return name != canonicalName
+			}),
 		}
 	}
 
@@ -264,4 +256,36 @@ func RequestQueueKey(namespace string, requestKey remotehttp.FetchKey) types.Nam
 		Namespace: namespace,
 		Name:      string(requestKey),
 	}
+}
+
+// ResultStore is the subset of a subsystem Store that
+// NewStoreConfigMapController consumes: the fetched-results collection plus a
+// readiness signal.
+type ResultStore[R Result[R]] interface {
+	FetchedResults() *FetchedResults[R]
+	HasSynced() bool
+}
+
+// NewStoreConfigMapController wires a subsystem Store and its persisted Entries
+// into a ConfigMapController. It replaces the identical per-subsystem
+// constructor boilerplate; callers supply only the controller name, store,
+// entries and logger.
+func NewStoreConfigMapController[R Result[R]](
+	apiClient apiclient.Client,
+	deploymentNamespace string,
+	controllerName string,
+	store ResultStore[R],
+	entries *Entries[R],
+	logger *slog.Logger,
+) *ConfigMapController[R] {
+	logger.Info("creating store configmap controller", "controller", controllerName)
+	return NewConfigMapController(ConfigMapControllerOptions[R]{
+		APIClient:           apiClient,
+		DeploymentNamespace: deploymentNamespace,
+		ControllerName:      controllerName,
+		Results:             store.FetchedResults().Collection(),
+		Entries:             entries,
+		StoreHasSynced:      store.HasSynced,
+		Logger:              logger,
+	})
 }

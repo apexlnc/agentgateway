@@ -32,7 +32,7 @@ func (l *lookup) InlineForOwner(krtctx krt.HandlerContext, owner RemoteJwksOwner
 		return "", err
 	}
 
-	keyset, ok := l.persisted.CanonicalGet(krtctx, resolved.Target.Target.Key())
+	keyset, ok := l.persisted.CanonicalGet(krtctx, resolved.Target.Key)
 	if !ok {
 		return "", fmt.Errorf("jwks keyset for %q isn't available (not yet fetched or fetch failed)", resolved.Target.Target.URL)
 	}

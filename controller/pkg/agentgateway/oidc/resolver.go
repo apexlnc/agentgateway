@@ -1,7 +1,6 @@
 package oidc
 
 import (
-	"errors"
 	"fmt"
 	"net/url"
 	"time"
@@ -14,8 +13,6 @@ import (
 )
 
 const discoveryPath = "/.well-known/openid-configuration"
-
-var errResolverNotInitialized = errors.New("remote http resolver hasn't been initialized")
 
 // ResolvedOidcRequest is the input to the shared-request collapse step.
 // Target may differ from ExpectedIssuer when BackendRef is used.
@@ -49,7 +46,7 @@ func (r *defaultResolver) ResolveOwner(krtctx krt.HandlerContext, owner RemoteOi
 		return nil, err
 	}
 
-	endpoint, err := resolveEndpoint(krtctx, r.endpointResolver, owner.ID.Name, owner.DefaultNamespace, owner.Config, discURL)
+	endpoint, err := resolveEndpoint(krtctx, r.endpointResolver, owner.ID.Name, owner.ID.Namespace, owner.Config, discURL)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +97,7 @@ func resolveEndpoint(
 	}
 
 	if resolver == nil {
-		return nil, errResolverNotInitialized
+		return nil, remotehttp.ErrResolverNotInitialized
 	}
 
 	return resolver.Resolve(krtctx, remotehttp.ResolveInput{

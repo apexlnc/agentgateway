@@ -2,6 +2,7 @@ package oidc
 
 import (
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 )
 
@@ -67,6 +69,57 @@ func TestDiscoveredProviderJSONRoundTrip(t *testing.T) {
 			require.Equal(t, tc.provider.FetchedAt, got.FetchedAt)
 		})
 	}
+}
+
+// TestOidcRequestSpecEqualsDistinguishesEveryComparedField guards the embedded
+// spec: every compared field must break equality, while the +noKrtEquals
+// *tls.Config fields must not. A regression here silently breaks KRT cache
+// invalidation, so this is the lockstep check for OidcSource/SharedOidcRequest.
+func TestOidcRequestSpecEqualsDistinguishesEveryComparedField(t *testing.T) {
+	shared := &tls.Config{ServerName: "shared"} //nolint:gosec // test data
+	base := func() OidcSource {
+		return OidcSource{
+			OwnerKey: remotecache.OwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "ns", Name: "n", Path: "p"},
+			oidcRequestSpec: oidcRequestSpec{
+				RequestKey:            "rk",
+				ExpectedIssuer:        "https://idp.example",
+				Target:                remotehttp.FetchTarget{URL: "https://idp.example/.well-known"},
+				ProviderBackendTarget: &remotehttp.FetchTarget{URL: "https://backend"},
+				TLSConfig:             shared,
+				ProxyTLSConfig:        shared,
+				TTL:                   5 * time.Minute,
+			},
+		}
+	}
+
+	require.True(t, base().Equals(base()), "identical sources must be equal")
+
+	mutators := map[string]func(*OidcSource){
+		"OwnerKey":              func(s *OidcSource) { s.OwnerKey.Name = "other" },
+		"RequestKey":            func(s *OidcSource) { s.RequestKey = "other" },
+		"ExpectedIssuer":        func(s *OidcSource) { s.ExpectedIssuer = "https://other" },
+		"Target":                func(s *OidcSource) { s.Target = remotehttp.FetchTarget{URL: "https://other"} },
+		"ProviderBackendTarget": func(s *OidcSource) { s.ProviderBackendTarget = nil },
+		"TTL":                   func(s *OidcSource) { s.TTL = time.Hour },
+	}
+	for name, mutate := range mutators {
+		got := base()
+		mutate(&got)
+		require.Falsef(t, base().Equals(got), "mutating %s must break equality", name)
+	}
+
+	// *tls.Config fields are +noKrtEquals: differences must NOT affect equality.
+	diffTLS := base()
+	diffTLS.TLSConfig = &tls.Config{ServerName: "different"}      //nolint:gosec // test data
+	diffTLS.ProxyTLSConfig = &tls.Config{ServerName: "different"} //nolint:gosec // test data
+	require.True(t, base().Equals(diffTLS), "tls.Config differences must not affect equality")
+
+	// SharedOidcRequest shares the spec: same contract, minus OwnerKey.
+	sharedReq := SharedOidcRequest{base().oidcRequestSpec}
+	other := sharedReq
+	other.RequestKey = "other"
+	require.False(t, sharedReq.Equals(other))
+	require.True(t, sharedReq.Equals(SharedOidcRequest{base().oidcRequestSpec}))
 }
 
 func TestOidcRequestKeyIsDomainSeparated(t *testing.T) {

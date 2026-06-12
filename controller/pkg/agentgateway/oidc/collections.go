@@ -33,22 +33,22 @@ func NewCollections(inputs CollectionInputs) Collections {
 			return nil
 		}
 		return &OidcSource{
-			OwnerKey:              resolved.OwnerID,
-			RequestKey:            oidcRequestKey(resolved.Target.Target, resolved.ExpectedIssuer, resolved.ProviderBackendTarget),
-			ExpectedIssuer:        resolved.ExpectedIssuer,
-			Target:                resolved.Target.Target,
-			ProviderBackendTarget: resolved.ProviderBackendTarget,
-			TLSConfig:             resolved.Target.TLSConfig,
-			ProxyTLSConfig:        resolved.Target.ProxyTLSConfig,
-			TTL:                   resolved.TTL,
+			OwnerKey: resolved.OwnerID,
+			oidcRequestSpec: oidcRequestSpec{
+				RequestKey:            oidcRequestKey(resolved.Target.Target, resolved.ExpectedIssuer, resolved.ProviderBackendTarget),
+				ExpectedIssuer:        resolved.ExpectedIssuer,
+				Target:                resolved.Target.Target,
+				ProviderBackendTarget: resolved.ProviderBackendTarget,
+				TLSConfig:             resolved.Target.TLSConfig,
+				ProxyTLSConfig:        resolved.Target.ProxyTLSConfig,
+				TTL:                   resolved.TTL,
+			},
 		}
 	}, inputs.KrtOpts.ToOptions("oidc/sources")...)
 
 	sharedRequests := remotecache.NewSharedRequestCollection(
 		sources,
-		"oidc-request-key",
-		"oidc/requestGroups",
-		"oidc/sharedRequests",
+		"oidc",
 		inputs.KrtOpts,
 		func(source OidcSource) remotehttp.FetchKey { return source.RequestKey },
 		collapseOidcSources,
@@ -66,7 +66,7 @@ func collapseOidcSources(grouped krt.IndexObject[remotehttp.FetchKey, OidcSource
 	primary, minTTL := remotecache.CollapseSources(grouped.Objects,
 		func(s OidcSource) string { return s.OwnerKey.String() },
 		func(s OidcSource) time.Duration { return s.TTL })
-	return &SharedOidcRequest{
+	return &SharedOidcRequest{oidcRequestSpec{
 		RequestKey:            grouped.Key,
 		ExpectedIssuer:        primary.ExpectedIssuer,
 		Target:                primary.Target,
@@ -74,5 +74,5 @@ func collapseOidcSources(grouped krt.IndexObject[remotehttp.FetchKey, OidcSource
 		TLSConfig:             primary.TLSConfig,
 		ProxyTLSConfig:        primary.ProxyTLSConfig,
 		TTL:                   minTTL,
-	}
+	}}
 }

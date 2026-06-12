@@ -10,7 +10,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
-	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/shared"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/pluginsdk/krtutil"
@@ -47,7 +46,7 @@ func TestOwnerFromPolicyReturnsNoneWhenOidcAbsent(t *testing.T) {
 			policy: &agentgateway.AgentgatewayPolicy{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "p"},
 				Spec: agentgateway.AgentgatewayPolicySpec{
-					TargetRefs: make([]shared.LocalPolicyTargetReferenceWithSectionName, 1),
+					TargetRefs: make([]agentgateway.LocalPolicyTargetReferenceWithSectionName, 1),
 				},
 			},
 		},
@@ -56,7 +55,7 @@ func TestOwnerFromPolicyReturnsNoneWhenOidcAbsent(t *testing.T) {
 			policy: &agentgateway.AgentgatewayPolicy{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "p"},
 				Spec: agentgateway.AgentgatewayPolicySpec{
-					TargetRefs: make([]shared.LocalPolicyTargetReferenceWithSectionName, 1),
+					TargetRefs: make([]agentgateway.LocalPolicyTargetReferenceWithSectionName, 1),
 					Traffic:    &agentgateway.Traffic{},
 				},
 			},
@@ -78,18 +77,22 @@ func TestCollapseOidcSourcesPicksMinTTL(t *testing.T) {
 		Key: requestKey,
 		Objects: []OidcSource{
 			{
-				OwnerKey:       remotecache.OwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "default", Name: "long", Path: "spec.traffic.oidc"},
-				RequestKey:     requestKey,
-				ExpectedIssuer: "https://idp.example",
-				Target:         target,
-				TTL:            30 * time.Minute,
+				OwnerKey: remotecache.OwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "default", Name: "long", Path: "spec.traffic.oidc"},
+				oidcRequestSpec: oidcRequestSpec{
+					RequestKey:     requestKey,
+					ExpectedIssuer: "https://idp.example",
+					Target:         target,
+					TTL:            30 * time.Minute,
+				},
 			},
 			{
-				OwnerKey:       remotecache.OwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "default", Name: "short", Path: "spec.traffic.oidc"},
-				RequestKey:     requestKey,
-				ExpectedIssuer: "https://idp.example",
-				Target:         target,
-				TTL:            5 * time.Minute,
+				OwnerKey: remotecache.OwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "default", Name: "short", Path: "spec.traffic.oidc"},
+				oidcRequestSpec: oidcRequestSpec{
+					RequestKey:     requestKey,
+					ExpectedIssuer: "https://idp.example",
+					Target:         target,
+					TTL:            5 * time.Minute,
+				},
 			},
 		},
 	}
@@ -106,11 +109,13 @@ func TestCollapseOidcSourcesIsDeterministicAcrossOwnerOrder(t *testing.T) {
 	requestKey := oidcRequestKey(target, "https://idp.example", nil)
 	source := func(name string, ttl time.Duration) OidcSource {
 		return OidcSource{
-			OwnerKey:       remotecache.OwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "default", Name: name, Path: "spec.traffic.oidc"},
-			RequestKey:     requestKey,
-			ExpectedIssuer: "https://idp.example",
-			Target:         target,
-			TTL:            ttl,
+			OwnerKey: remotecache.OwnerID{Kind: remotecache.OwnerKindPolicy, Namespace: "default", Name: name, Path: "spec.traffic.oidc"},
+			oidcRequestSpec: oidcRequestSpec{
+				RequestKey:     requestKey,
+				ExpectedIssuer: "https://idp.example",
+				Target:         target,
+				TTL:            ttl,
+			},
 		}
 	}
 
@@ -145,18 +150,22 @@ func TestCollapseOidcSourcesUsesSortedOwnerForTargetAndTLSConfig(t *testing.T) {
 		Key: requestKey,
 		Objects: []OidcSource{
 			{
-				OwnerKey:   remotecache.OwnerID{Name: "z-owner"},
-				RequestKey: requestKey,
-				Target:     laterTarget,
-				TLSConfig:  laterTLS,
-				TTL:        5 * time.Minute,
+				OwnerKey: remotecache.OwnerID{Name: "z-owner"},
+				oidcRequestSpec: oidcRequestSpec{
+					RequestKey: requestKey,
+					Target:     laterTarget,
+					TLSConfig:  laterTLS,
+					TTL:        5 * time.Minute,
+				},
 			},
 			{
-				OwnerKey:   remotecache.OwnerID{Name: "a-owner"},
-				RequestKey: requestKey,
-				Target:     earlierTarget,
-				TLSConfig:  earlierTLS,
-				TTL:        10 * time.Minute,
+				OwnerKey: remotecache.OwnerID{Name: "a-owner"},
+				oidcRequestSpec: oidcRequestSpec{
+					RequestKey: requestKey,
+					Target:     earlierTarget,
+					TLSConfig:  earlierTLS,
+					TTL:        10 * time.Minute,
+				},
 			},
 		},
 	})
@@ -192,7 +201,7 @@ func testOidcPolicy(name string) *agentgateway.AgentgatewayPolicy {
 			Name:      name,
 		},
 		Spec: agentgateway.AgentgatewayPolicySpec{
-			TargetRefs: make([]shared.LocalPolicyTargetReferenceWithSectionName, 1),
+			TargetRefs: make([]agentgateway.LocalPolicyTargetReferenceWithSectionName, 1),
 			Traffic: &agentgateway.Traffic{
 				OIDC: &agentgateway.OIDC{
 					IssuerURL:   testOidcIssuer,

@@ -18,16 +18,20 @@ func TestCollapseJwksSourcesUsesLowestTTL(t *testing.T) {
 		Key: target.Key(),
 		Objects: []JwksSource{
 			{
-				OwnerKey:   remotecache.OwnerID{Name: "one"},
-				RequestKey: target.Key(),
-				Target:     target,
-				TTL:        5 * time.Minute,
+				OwnerKey: remotecache.OwnerID{Name: "one"},
+				jwksRequestSpec: jwksRequestSpec{
+					RequestKey: target.Key(),
+					Target:     target,
+					TTL:        5 * time.Minute,
+				},
 			},
 			{
-				OwnerKey:   remotecache.OwnerID{Name: "two"},
-				RequestKey: target.Key(),
-				Target:     target,
-				TTL:        2 * time.Minute,
+				OwnerKey: remotecache.OwnerID{Name: "two"},
+				jwksRequestSpec: jwksRequestSpec{
+					RequestKey: target.Key(),
+					Target:     target,
+					TTL:        2 * time.Minute,
+				},
 			},
 		},
 	})
@@ -54,18 +58,22 @@ func TestCollapseJwksSourcesUsesSortedOwnerForTargetAndTLSConfig(t *testing.T) {
 		Key: requestKey,
 		Objects: []JwksSource{
 			{
-				OwnerKey:   remotecache.OwnerID{Name: "z-owner"},
-				RequestKey: requestKey,
-				Target:     laterTarget,
-				TLSConfig:  laterTLS,
-				TTL:        5 * time.Minute,
+				OwnerKey: remotecache.OwnerID{Name: "z-owner"},
+				jwksRequestSpec: jwksRequestSpec{
+					RequestKey: requestKey,
+					Target:     laterTarget,
+					TLSConfig:  laterTLS,
+					TTL:        5 * time.Minute,
+				},
 			},
 			{
-				OwnerKey:   remotecache.OwnerID{Name: "a-owner"},
-				RequestKey: requestKey,
-				Target:     earlierTarget,
-				TLSConfig:  earlierTLS,
-				TTL:        10 * time.Minute,
+				OwnerKey: remotecache.OwnerID{Name: "a-owner"},
+				jwksRequestSpec: jwksRequestSpec{
+					RequestKey: requestKey,
+					Target:     earlierTarget,
+					TLSConfig:  earlierTLS,
+					TTL:        10 * time.Minute,
+				},
 			},
 		},
 	})

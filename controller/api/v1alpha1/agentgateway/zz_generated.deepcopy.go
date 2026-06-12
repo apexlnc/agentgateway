@@ -3243,7 +3243,7 @@ func (in *OIDC) DeepCopyInto(out *OIDC) {
 	}
 	if in.TokenEndpointAuthMethod != nil {
 		in, out := &in.TokenEndpointAuthMethod, &out.TokenEndpointAuthMethod
-		*out = new(string)
+		*out = new(OIDCTokenEndpointAuthMethod)
 		**out = **in
 	}
 	if in.BackendRef != nil {

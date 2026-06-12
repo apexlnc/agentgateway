@@ -3,9 +3,8 @@
 package oidc
 
 import (
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
+	"encoding/json"
 	"time"
 
 	"istio.io/istio/pkg/kube/krt"
@@ -61,10 +60,12 @@ var (
 	_ krt.Equaler[DiscoveredProvider] = DiscoveredProvider{}
 )
 
-// OidcSource is a per-owner OIDC discovery request before KRT collapses
-// equivalent sources onto a shared request key.
-type OidcSource struct {
-	OwnerKey       remotecache.OwnerID
+// oidcRequestSpec is the shared identity of an OIDC discovery request: the
+// fields that decide what to fetch and how to reach it. OidcSource adds the
+// per-owner key; SharedOidcRequest is the collapsed canonical form. Both embed
+// this so a field added here automatically participates in equality, the krt
+// snapshot JSON, and the runtime request for both — no lockstep duplication.
+type oidcRequestSpec struct {
 	RequestKey     remotehttp.FetchKey
 	ExpectedIssuer string
 	Target         remotehttp.FetchTarget
@@ -78,61 +79,75 @@ type OidcSource struct {
 	TTL            time.Duration
 }
 
-func (s OidcSource) ResourceName() string {
-	return s.OwnerKey.String()
-}
+func (s oidcRequestSpec) RemoteRequestKey() remotehttp.FetchKey { return s.RequestKey }
+func (s oidcRequestSpec) RemoteTTL() time.Duration              { return s.TTL }
 
-func (s OidcSource) RemoteRequestKey() remotehttp.FetchKey {
-	return s.RequestKey
-}
-
-func (s OidcSource) RemoteTTL() time.Duration {
-	return s.TTL
-}
-
-func (s OidcSource) Equals(other OidcSource) bool {
-	return s.OwnerKey == other.OwnerKey &&
-		s.RequestKey == other.RequestKey &&
+func (s oidcRequestSpec) equals(other oidcRequestSpec) bool {
+	return s.RequestKey == other.RequestKey &&
 		s.ExpectedIssuer == other.ExpectedIssuer &&
 		s.Target.Equals(other.Target) &&
 		fetchTargetPtrEqual(s.ProviderBackendTarget, other.ProviderBackendTarget) &&
 		s.TTL == other.TTL
 }
 
+// oidcRequestJSON is the krt-snapshot view of a spec: the embedded *tls.Config
+// objects are not serializable, so their presence is reported as booleans.
+type oidcRequestJSON struct {
+	RequestKey            remotehttp.FetchKey     `json:"requestKey"`
+	ExpectedIssuer        string                  `json:"expectedIssuer"`
+	Target                remotehttp.FetchTarget  `json:"target"`
+	ProviderBackendTarget *remotehttp.FetchTarget `json:"providerBackendTarget,omitempty"`
+	HasTLSConfig          bool                    `json:"hasTLSConfig"`
+	HasProxyTLSConfig     bool                    `json:"hasProxyTLSConfig"`
+	TTL                   time.Duration           `json:"ttl"`
+}
+
+func (s oidcRequestSpec) snapshot() oidcRequestJSON {
+	return oidcRequestJSON{
+		RequestKey:            s.RequestKey,
+		ExpectedIssuer:        s.ExpectedIssuer,
+		Target:                s.Target,
+		ProviderBackendTarget: s.ProviderBackendTarget,
+		HasTLSConfig:          s.TLSConfig != nil,
+		HasProxyTLSConfig:     s.ProxyTLSConfig != nil,
+		TTL:                   s.TTL,
+	}
+}
+
+// OidcSource is a per-owner OIDC discovery request before KRT collapses
+// equivalent sources onto a shared request key.
+type OidcSource struct {
+	OwnerKey remotecache.OwnerID
+	oidcRequestSpec
+}
+
+func (s OidcSource) ResourceName() string { return s.OwnerKey.String() }
+
+func (s OidcSource) Equals(other OidcSource) bool {
+	return s.OwnerKey == other.OwnerKey && s.oidcRequestSpec.equals(other.oidcRequestSpec)
+}
+
+func (s OidcSource) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		OwnerKey remotecache.OwnerID `json:"ownerKey"`
+		oidcRequestJSON
+	}{OwnerKey: s.OwnerKey, oidcRequestJSON: s.oidcRequestSpec.snapshot()})
+}
+
 // SharedOidcRequest is the canonical OIDC discovery request KRT produces per
 // shared fetch key; the unit the Fetcher and persistence layer watch.
 type SharedOidcRequest struct {
-	RequestKey     remotehttp.FetchKey
-	ExpectedIssuer string
-	Target         remotehttp.FetchTarget
-	// ProviderBackendTarget is set when provider calls should go through a
-	// resolved backend transport instead of connecting directly to provider URLs.
-	ProviderBackendTarget *remotehttp.FetchTarget
-	// +noKrtEquals
-	TLSConfig *tls.Config
-	// +noKrtEquals
-	ProxyTLSConfig *tls.Config
-	TTL            time.Duration
+	oidcRequestSpec
 }
 
-func (r SharedOidcRequest) ResourceName() string {
-	return string(r.RequestKey)
-}
-
-func (r SharedOidcRequest) RemoteRequestKey() remotehttp.FetchKey {
-	return r.RequestKey
-}
-
-func (r SharedOidcRequest) RemoteTTL() time.Duration {
-	return r.TTL
-}
+func (r SharedOidcRequest) ResourceName() string { return string(r.RequestKey) }
 
 func (r SharedOidcRequest) Equals(other SharedOidcRequest) bool {
-	return r.RequestKey == other.RequestKey &&
-		r.ExpectedIssuer == other.ExpectedIssuer &&
-		r.Target.Equals(other.Target) &&
-		fetchTargetPtrEqual(r.ProviderBackendTarget, other.ProviderBackendTarget) &&
-		r.TTL == other.TTL
+	return r.oidcRequestSpec.equals(other.oidcRequestSpec)
+}
+
+func (r SharedOidcRequest) MarshalJSON() ([]byte, error) {
+	return json.Marshal(r.oidcRequestSpec.snapshot())
 }
 
 // fetchTargetPtrEqual compares two optional FetchTarget pointers without
@@ -151,21 +166,11 @@ func fetchTargetPtrEqual(a, b *remotehttp.FetchTarget) bool {
 // oidcRequestKey domain-separates by (target, expectedIssuer,
 // providerBackendTarget) — all three are part of trust identity.
 func oidcRequestKey(target remotehttp.FetchTarget, expectedIssuer string, providerBackendTarget *remotehttp.FetchTarget) remotehttp.FetchKey {
-	hash := sha256.New()
-	writeHashPart := func(value string) {
-		_, _ = hash.Write([]byte(value))
-		_, _ = hash.Write([]byte{0})
-	}
-
-	writeHashPart(oidcRequestKeyDomain)
-	writeHashPart(target.Key().String())
-	writeHashPart(expectedIssuer)
+	parts := []string{oidcRequestKeyDomain, target.Key().String(), expectedIssuer}
 	if providerBackendTarget == nil {
-		writeHashPart("direct")
+		parts = append(parts, "direct")
 	} else {
-		writeHashPart("provider-backend")
-		writeHashPart(providerBackendTarget.Key().String())
+		parts = append(parts, "provider-backend", providerBackendTarget.Key().String())
 	}
-
-	return remotehttp.FetchKey(hex.EncodeToString(hash.Sum(nil)))
+	return remotehttp.HashKey(parts...)
 }

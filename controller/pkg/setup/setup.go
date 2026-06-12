@@ -32,6 +32,7 @@ import (
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/oidc"
 	agwplugins "github.com/agentgateway/agentgateway/controller/pkg/agentgateway/plugins"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/policyselection"
+	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotecache"
 	"github.com/agentgateway/agentgateway/controller/pkg/agentgateway/remotehttp"
 	"github.com/agentgateway/agentgateway/controller/pkg/apiclient"
 	"github.com/agentgateway/agentgateway/controller/pkg/common"
@@ -72,6 +73,9 @@ type Options struct {
 	GlobalSettings              *apisettings.Settings
 	LeaderElectionID            string
 	ExtraStatusHandlers         map[schema.GroupVersionKind]syncer.ResourceStatusSyncer
+	// CredentialResolverFactory builds the complete credential resolver chain.
+	// If unset, the built-in Secret resolver is used.
+	CredentialResolverFactory agwplugins.CredentialResolverFactory
 
 	AgentGatewaySyncerOptions []syncer.AgentgatewaySyncerOption
 
@@ -372,6 +376,7 @@ func (s *setup) buildSyncer(
 		Resolver:                       resolver,
 		JWKSLookup:                     jwksLookup,
 		OidcLookup:                     oidcLookup,
+		CredentialResolverFactory:      s.CredentialResolverFactory,
 		ExtraAgwResourceStatusHandlers: s.ExtraStatusHandlers,
 		GatewayControllerExtension:     s.GatewayControllerExtension,
 		AgentgatewaySyncerOptions:      s.AgentGatewaySyncerOptions,
@@ -451,12 +456,14 @@ func buildJwksStore(
 		return err
 	}
 
-	jwksStoreCMCtrl := jwks.NewConfigMapController(jwks.ConfigMapControllerOptions{
-		APIClient:           apiClient,
-		DeploymentNamespace: namespaces.GetPodNamespace(),
-		Store:               jwksStore,
-		PersistedEntries:    persistedJWKS,
-	})
+	jwksStoreCMCtrl := remotecache.NewStoreConfigMapController[jwks.Keyset](
+		apiClient,
+		namespaces.GetPodNamespace(),
+		"JwksStoreConfigMapController",
+		jwksStore,
+		persistedJWKS,
+		logging.New("agentgateway/jwks/configmap_controller"),
+	)
 	jwksStoreCMCtrl.Init()
 	if err := mgr.Add(jwksStoreCMCtrl); err != nil {
 		return err
@@ -483,12 +490,14 @@ func buildOidcStore(
 		return err
 	}
 
-	oidcStoreCMCtrl := oidc.NewConfigMapController(oidc.ConfigMapControllerOptions{
-		APIClient:           apiClient,
-		DeploymentNamespace: namespaces.GetPodNamespace(),
-		Store:               oidcStore,
-		PersistedEntries:    persistedOIDC,
-	})
+	oidcStoreCMCtrl := remotecache.NewStoreConfigMapController[oidc.DiscoveredProvider](
+		apiClient,
+		namespaces.GetPodNamespace(),
+		"OidcStoreConfigMapController",
+		oidcStore,
+		persistedOIDC,
+		logging.New("agentgateway/oidc/configmap_controller"),
+	)
 	oidcStoreCMCtrl.Init()
 	if err := mgr.Add(oidcStoreCMCtrl); err != nil {
 		return err

@@ -538,11 +538,11 @@ func resolvedJwksRequest(owner RemoteJwksOwner, requestURL string) *ResolvedJwks
 
 func testStoreSharedJwksRequest(requestURL string, ttl time.Duration) SharedJwksRequest {
 	target := remotehttp.FetchTarget{URL: requestURL}
-	return SharedJwksRequest{
+	return SharedJwksRequest{jwksRequestSpec{
 		RequestKey: target.Key(),
 		Target:     target,
 		TTL:        ttl,
-	}
+	}}
 }
 
 func seedStoreJwksResultForTest(results *JwksResults, requestKey remotehttp.FetchKey, url string) {

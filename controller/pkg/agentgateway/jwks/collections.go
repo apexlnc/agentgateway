@@ -39,20 +39,20 @@ func NewCollections(inputs CollectionInputs) Collections {
 		}
 
 		return &JwksSource{
-			OwnerKey:       resolved.OwnerID,
-			RequestKey:     resolved.Target.Key,
-			Target:         resolved.Target.Target,
-			TLSConfig:      resolved.Target.TLSConfig,
-			ProxyTLSConfig: resolved.Target.ProxyTLSConfig,
-			TTL:            resolved.TTL,
+			OwnerKey: resolved.OwnerID,
+			jwksRequestSpec: jwksRequestSpec{
+				RequestKey:     resolved.Target.Key,
+				Target:         resolved.Target.Target,
+				TLSConfig:      resolved.Target.TLSConfig,
+				ProxyTLSConfig: resolved.Target.ProxyTLSConfig,
+				TTL:            resolved.TTL,
+			},
 		}
 	}, inputs.KrtOpts.ToOptions("jwks/sources")...)
 
 	sharedRequests := remotecache.NewSharedRequestCollection(
 		sources,
-		"jwks-request-key",
-		"jwks/requestGroups",
-		"jwks/sharedRequests",
+		"jwks",
 		inputs.KrtOpts,
 		func(source JwksSource) remotehttp.FetchKey { return source.RequestKey },
 		collapseJwksSources,
@@ -70,11 +70,11 @@ func collapseJwksSources(grouped krt.IndexObject[remotehttp.FetchKey, JwksSource
 	primary, minTTL := remotecache.CollapseSources(grouped.Objects,
 		func(s JwksSource) string { return s.OwnerKey.String() },
 		func(s JwksSource) time.Duration { return s.TTL })
-	return &SharedJwksRequest{
+	return &SharedJwksRequest{jwksRequestSpec{
 		RequestKey:     grouped.Key,
 		Target:         primary.Target,
 		TLSConfig:      primary.TLSConfig,
 		ProxyTLSConfig: primary.ProxyTLSConfig,
 		TTL:            minTTL,
-	}
+	}}
 }

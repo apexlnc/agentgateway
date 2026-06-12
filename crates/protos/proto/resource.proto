@@ -1070,8 +1070,12 @@ message TrafficPolicySpec {
     // Absolute token endpoint URL (the /token URL).
     string token_endpoint = 4;
 
-    // Client authentication method advertised by the IdP (or overridden by the
-    // user).
+    // Optional user override of the token-endpoint client authentication
+    // method. When `TOKEN_ENDPOINT_AUTH_UNSPECIFIED`, the dataplane selects the
+    // method from `token_endpoint_auth_methods_supported`, mirroring the
+    // local-config discovery path. The controller validates an explicit
+    // override's method/`client_secret` pairing at apply time; the
+    // "IdP advertises nothing usable" case is resolved at dataplane load.
     TokenEndpointAuth token_endpoint_auth = 5;
 
     // JWKS content, as JSON, resolved by the controller through the shared
@@ -1097,6 +1101,13 @@ message TrafficPolicySpec {
     // SNI, etc.). When unset, the dataplane connects directly to
     // `token_endpoint` using the system trust store.
     BackendReference provider_backend = 11;
+
+    // Token-endpoint client authentication methods advertised by the IdP
+    // (OIDC Discovery `token_endpoint_auth_methods_supported`), passed through
+    // by the controller. The dataplane uses these to select the method when
+    // `token_endpoint_auth` is unspecified. Empty implies the spec default
+    // (`client_secret_basic`).
+    repeated string token_endpoint_auth_methods_supported = 12;
   }
 
   PolicyPhase phase = 1;

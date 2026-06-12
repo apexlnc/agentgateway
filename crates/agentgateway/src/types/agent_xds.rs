@@ -1836,9 +1836,9 @@ fn phased_traffic_policy_from_proto(
 	spec: &proto::agent::TrafficPolicySpec,
 	diagnostics: &mut Diagnostics,
 	oidc_cookie_encoder: Option<&OidcCookieEncoder>,
-) -> Result<agent::PhasedTrafficPolicy, ProtoError> {
+) -> Result<PhasedTrafficPolicy, ProtoError> {
 	let policy = traffic_policy_from_proto(spec, diagnostics, oidc_cookie_encoder)?;
-	Ok(agent::PhasedTrafficPolicy {
+	Ok(PhasedTrafficPolicy {
 		phase: match proto::agent::traffic_policy_spec::PolicyPhase::try_from(spec.phase)? {
 			proto::agent::traffic_policy_spec::PolicyPhase::Route => PolicyPhase::Route,
 			proto::agent::traffic_policy_spec::PolicyPhase::Gateway => PolicyPhase::Gateway,
@@ -2537,7 +2537,9 @@ fn external_auth_from_proto(
 }
 
 fn convert_duration(d: prost_types::Duration) -> Duration {
-	Duration::from_secs(d.seconds as u64) + Duration::from_nanos(d.nanos as u64)
+	// prost_types::Duration is signed; `seconds as u64` would wrap a negative
+	// value into a ~584-year duration. Clamp invalid/negative durations to zero.
+	Duration::try_from(d).unwrap_or(Duration::ZERO)
 }
 
 fn oidc_policy_from_proto(
@@ -2548,7 +2550,8 @@ fn oidc_policy_from_proto(
 	use proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth as ProtoAuth;
 
 	use crate::http::oidc::{
-		ClientCredentials, PolicyId, ProviderEndpoint, RedirectUri, resolve_oidc_policy_from_xds,
+		ClientCredentials, PolicyId, PreparedOidcPolicy, ProviderEndpoint, RedirectUri,
+		parse_jwks_inline,
 	};
 
 	let err = |msg: String| ProtoError::Generic(format!("xDS OIDC: {msg}"));
@@ -2561,19 +2564,6 @@ fn oidc_policy_from_proto(
 		.map_err(|e| err(format!("invalid token_endpoint: {e}")))?;
 	let redirect_uri = RedirectUri::parse(oidc.redirect_uri.clone())
 		.map_err(|e| err(format!("invalid redirect_uri: {e}")))?;
-	let token_endpoint_auth = match ProtoAuth::try_from(oidc.token_endpoint_auth).map_err(|_| {
-		ProtoError::EnumParse(format!(
-			"xDS OIDC: invalid token_endpoint_auth value {}",
-			oidc.token_endpoint_auth
-		))
-	})? {
-		ProtoAuth::Unspecified => {
-			return Err(err("token_endpoint_auth must not be unspecified".into()));
-		},
-		ProtoAuth::ClientSecretBasic => http::oauth::TokenEndpointAuth::ClientSecretBasic,
-		ProtoAuth::ClientSecretPost => http::oauth::TokenEndpointAuth::ClientSecretPost,
-		ProtoAuth::None => http::oauth::TokenEndpointAuth::Public,
-	};
 	if oidc.issuer.is_empty() {
 		return Err(err("issuer must not be empty".into()));
 	}
@@ -2591,31 +2581,56 @@ fn oidc_policy_from_proto(
 			oidc.client_secret.clone().into(),
 		))
 	};
+
+	// `token_endpoint_auth` is an optional controller override. When unspecified,
+	// resolve the method from the IdP-advertised list exactly as the local-config
+	// discovery path does; an empty list maps to None so the spec default
+	// (`client_secret_basic`) applies rather than "IdP advertises nothing".
+	let token_endpoint_auth = match ProtoAuth::try_from(oidc.token_endpoint_auth).map_err(|_| {
+		ProtoError::EnumParse(format!(
+			"xDS OIDC: invalid token_endpoint_auth value {}",
+			oidc.token_endpoint_auth
+		))
+	})? {
+		ProtoAuth::Unspecified => {
+			let advertised = if oidc.token_endpoint_auth_methods_supported.is_empty() {
+				None
+			} else {
+				Some(oidc.token_endpoint_auth_methods_supported.clone())
+			};
+			http::oauth::parse_token_endpoint_auth_methods(advertised, client_secret.as_ref())
+				.map_err(err)?
+		},
+		ProtoAuth::ClientSecretBasic => http::oauth::TokenEndpointAuth::ClientSecretBasic,
+		ProtoAuth::ClientSecretPost => http::oauth::TokenEndpointAuth::ClientSecretPost,
+		ProtoAuth::None => http::oauth::TokenEndpointAuth::Public,
+	};
+
 	let credentials = ClientCredentials::from_parts(token_endpoint_auth, client_secret)
 		.map_err(|e| err(e.to_string()))?;
 
-	// Filter `Invalid` so a proto BackendReference with no `kind` set falls back
-	// to direct call (system trust) rather than reaching `call_reference` and
-	// failing with ServiceNotFound at request time.
-	let provider_backend = oidc
-		.provider_backend
-		.as_ref()
-		.map(|r| resolve_simple_reference(Some(r)))
-		.filter(|r| !matches!(r, SimpleBackendReference::Invalid));
+	// Map `Invalid` to None so a proto BackendReference with no `kind` set (or
+	// absent entirely) falls back to direct call (system trust) rather than
+	// reaching `call_reference` and failing with ServiceNotFound at request time.
+	let provider_backend = match resolve_simple_reference(oidc.provider_backend.as_ref()) {
+		SimpleBackendReference::Invalid => None,
+		resolved => Some(resolved),
+	};
 
-	resolve_oidc_policy_from_xds(
+	let id_token_jwks = parse_jwks_inline(&oidc.jwks_inline).map_err(|e| err(e.to_string()))?;
+
+	Ok(PreparedOidcPolicy {
 		policy_id,
-		oidc.issuer.clone(),
+		issuer: oidc.issuer.clone(),
 		authorization_endpoint,
 		token_endpoint,
-		&oidc.jwks_inline,
-		oidc.client_id.clone(),
+		id_token_jwks,
+		client_id: oidc.client_id.clone(),
 		credentials,
 		redirect_uri,
-		oidc.scopes.clone(),
+		scopes: oidc.scopes.clone(),
 		provider_backend,
-	)
-	.map_err(|e| ProtoError::Generic(format!("failed to decode xDS OIDC policy: {e}")))
+	})
 }
 
 fn authorization_location(
@@ -3057,22 +3072,23 @@ pub(crate) fn targeted_policy_from_proto(
 		.ok_or(ProtoError::MissingRequiredField)
 		.and_then(policy_target_from_proto)?;
 
-	let policy =
-		match &p.kind {
-			Some(pol::Kind::Traffic(spec)) => agent::PolicyType::Traffic(
-				phased_traffic_policy_from_proto(spec, diagnostics, oidc_cookie_encoder)?,
-			),
-			Some(pol::Kind::Backend(spec)) => {
-				agent::PolicyType::Backend(backend_policy_from_proto(spec, diagnostics)?)
-			},
-			Some(pol::Kind::Frontend(spec)) => {
-				agent::PolicyType::Frontend(frontend_policy_from_proto(spec, diagnostics)?)
-			},
-			Some(pol::Kind::Conditional(cond)) => {
-				conditional_policy_from_proto(cond, diagnostics, oidc_cookie_encoder)?
-			},
-			None => return Err(ProtoError::MissingRequiredField),
-		};
+	let policy = match &p.kind {
+		Some(pol::Kind::Traffic(spec)) => PolicyType::Traffic(phased_traffic_policy_from_proto(
+			spec,
+			diagnostics,
+			oidc_cookie_encoder,
+		)?),
+		Some(pol::Kind::Backend(spec)) => {
+			PolicyType::Backend(backend_policy_from_proto(spec, diagnostics)?)
+		},
+		Some(pol::Kind::Frontend(spec)) => {
+			PolicyType::Frontend(frontend_policy_from_proto(spec, diagnostics)?)
+		},
+		Some(pol::Kind::Conditional(cond)) => {
+			conditional_policy_from_proto(cond, diagnostics, oidc_cookie_encoder)?
+		},
+		None => return Err(ProtoError::MissingRequiredField),
+	};
 
 	Ok(TargetedPolicy {
 		key: strng::new(&p.key),
@@ -3773,6 +3789,7 @@ mod tests {
 		let policy = proto::agent::Policy {
 			key: "policy".to_string(),
 			name: None,
+			inheritance: Default::default(),
 			target: Some(test_policy_target()),
 			kind: Some(proto::agent::policy::Kind::Conditional(
 				proto::agent::ConditionalPolicies {
@@ -3811,6 +3828,7 @@ mod tests {
 		let policy = proto::agent::Policy {
 			key: "policy".to_string(),
 			name: None,
+			inheritance: Default::default(),
 			target: Some(test_policy_target()),
 			kind: Some(proto::agent::policy::Kind::Conditional(
 				proto::agent::ConditionalPolicies {
@@ -4405,6 +4423,7 @@ mod tests {
 			redirect_uri: "https://app.example.com/oauth/callback".to_string(),
 			scopes: vec!["openid".to_string(), "profile".to_string()],
 			provider_backend: None,
+			token_endpoint_auth_methods_supported: Vec::new(),
 		}
 	}
 
@@ -4480,12 +4499,52 @@ mod tests {
 	}
 
 	#[test]
-	fn test_oidc_spec_rejects_unspecified_token_endpoint_auth() {
+	fn test_oidc_spec_resolves_unspecified_from_advertised_methods() -> Result<(), ProtoError> {
 		use proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth;
 
+		// No controller override: the dataplane selects the method from the
+		// advertised list (client_secret_post here for a confidential client),
+		// mirroring the local-config discovery path.
 		let mut oidc = sample_oidc_proto();
 		oidc.token_endpoint_auth = TokenEndpointAuth::Unspecified as i32;
-		assert_oidc_proto_rejected(oidc, "token_endpoint_auth");
+		oidc.token_endpoint_auth_methods_supported = vec!["client_secret_post".to_string()];
+
+		let spec = oidc_traffic_spec(oidc);
+		let encoder = test_oidc_cookie_encoder();
+		let policy = traffic_policy_from_proto(&spec, &mut Diagnostics::default(), Some(&encoder))?;
+		assert!(matches!(policy, TrafficPolicy::Oidc(_)));
+		Ok(())
+	}
+
+	#[test]
+	fn test_oidc_spec_unspecified_rejects_when_no_confidential_method_advertised() {
+		use proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth;
+
+		// Confidential client whose IdP advertises nothing usable: the error that
+		// previously surfaced in the controller now surfaces at dataplane load.
+		let mut oidc = sample_oidc_proto();
+		oidc.token_endpoint_auth = TokenEndpointAuth::Unspecified as i32;
+		oidc.token_endpoint_auth_methods_supported = vec!["private_key_jwt".to_string()];
+		assert_oidc_proto_rejected(oidc, "does not advertise");
+	}
+
+	#[test]
+	fn test_oidc_spec_override_takes_precedence_over_advertised_methods() -> Result<(), ProtoError> {
+		use proto::agent::traffic_policy_spec::oidc::TokenEndpointAuth;
+
+		// An explicit public-client override is honored even though the advertised
+		// list would reject a secretless client (no "none" advertised) on the
+		// discovery path — proving the override wins over the list.
+		let mut oidc = sample_oidc_proto();
+		oidc.token_endpoint_auth = TokenEndpointAuth::None as i32;
+		oidc.client_secret = String::new();
+		oidc.token_endpoint_auth_methods_supported = vec!["client_secret_basic".to_string()];
+
+		let spec = oidc_traffic_spec(oidc);
+		let encoder = test_oidc_cookie_encoder();
+		let policy = traffic_policy_from_proto(&spec, &mut Diagnostics::default(), Some(&encoder))?;
+		assert!(matches!(policy, TrafficPolicy::Oidc(_)));
+		Ok(())
 	}
 
 	#[test]

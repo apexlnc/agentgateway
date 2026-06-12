@@ -10,6 +10,7 @@ import (
 
 	"github.com/agentgateway/agentgateway/api"
 	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
+	"github.com/agentgateway/agentgateway/controller/pkg/utils/kubeutils"
 )
 
 func TestNormalizedOIDCScopesAlwaysIncludesOpenidFirst(t *testing.T) {
@@ -55,44 +56,44 @@ func TestNormalizedOIDCScopesAlwaysIncludesOpenidFirst(t *testing.T) {
 func TestConfiguredOIDCTokenEndpointAuth(t *testing.T) {
 	tests := []struct {
 		name            string
-		method          string
+		method          agentgateway.OIDCTokenEndpointAuthMethod
 		hasClientSecret bool
 		want            api.TrafficPolicySpec_OIDC_TokenEndpointAuth
 		wantErrContains string
 	}{
 		{
 			name:            "ClientSecretBasic with secret",
-			method:          oidcConfigTokenEndpointAuthMethodClientSecretBasic,
+			method:          agentgateway.OIDCTokenEndpointAuthMethodClientSecretBasic,
 			hasClientSecret: true,
 			want:            api.TrafficPolicySpec_OIDC_CLIENT_SECRET_BASIC,
 		},
 		{
 			name:            "ClientSecretBasic without secret rejected",
-			method:          oidcConfigTokenEndpointAuthMethodClientSecretBasic,
+			method:          agentgateway.OIDCTokenEndpointAuthMethodClientSecretBasic,
 			hasClientSecret: false,
 			wantErrContains: "requires a clientSecret",
 		},
 		{
 			name:            "ClientSecretPost with secret",
-			method:          oidcConfigTokenEndpointAuthMethodClientSecretPost,
+			method:          agentgateway.OIDCTokenEndpointAuthMethodClientSecretPost,
 			hasClientSecret: true,
 			want:            api.TrafficPolicySpec_OIDC_CLIENT_SECRET_POST,
 		},
 		{
 			name:            "ClientSecretPost without secret rejected",
-			method:          oidcConfigTokenEndpointAuthMethodClientSecretPost,
+			method:          agentgateway.OIDCTokenEndpointAuthMethodClientSecretPost,
 			hasClientSecret: false,
 			wantErrContains: "requires a clientSecret",
 		},
 		{
 			name:            "None without secret",
-			method:          oidcConfigTokenEndpointAuthMethodNone,
+			method:          agentgateway.OIDCTokenEndpointAuthMethodNone,
 			hasClientSecret: false,
 			want:            api.TrafficPolicySpec_OIDC_NONE,
 		},
 		{
 			name:            "None with secret rejected",
-			method:          oidcConfigTokenEndpointAuthMethodNone,
+			method:          agentgateway.OIDCTokenEndpointAuthMethodNone,
 			hasClientSecret: true,
 			wantErrContains: "must not be paired with a clientSecret",
 		},
@@ -122,71 +123,27 @@ func TestConfiguredOIDCTokenEndpointAuth(t *testing.T) {
 	}
 }
 
-func TestDiscoveredOIDCTokenEndpointAuth(t *testing.T) {
-	tests := []struct {
-		name            string
-		methods         []string
-		hasClientSecret bool
-		want            api.TrafficPolicySpec_OIDC_TokenEndpointAuth
-		wantErrContains string
-	}{
-		{
-			name:            "advertised list empty + secret defaults to client_secret_basic",
-			methods:         nil,
-			hasClientSecret: true,
-			want:            api.TrafficPolicySpec_OIDC_CLIENT_SECRET_BASIC,
-		},
-		{
-			name:            "advertised list empty + no secret requires explicit none",
-			methods:         nil,
-			hasClientSecret: false,
-			wantErrContains: "does not advertise",
-		},
-		{
-			name:            "secret prefers basic over post",
-			methods:         []string{"client_secret_post", "client_secret_basic"},
-			hasClientSecret: true,
-			want:            api.TrafficPolicySpec_OIDC_CLIENT_SECRET_BASIC,
-		},
-		{
-			name:            "secret falls back to post when basic missing",
-			methods:         []string{"client_secret_post", "private_key_jwt"},
-			hasClientSecret: true,
-			want:            api.TrafficPolicySpec_OIDC_CLIENT_SECRET_POST,
-		},
-		{
-			name:            "secret with no supported confidential method rejected",
-			methods:         []string{"private_key_jwt"},
-			hasClientSecret: true,
-			wantErrContains: "does not advertise",
-		},
-		{
-			name:            "no secret picks none when advertised",
-			methods:         []string{"none", "private_key_jwt"},
-			hasClientSecret: false,
-			want:            api.TrafficPolicySpec_OIDC_NONE,
-		},
-		{
-			name:            "no secret rejects when none not advertised",
-			methods:         []string{"client_secret_basic", "client_secret_post"},
-			hasClientSecret: false,
-			wantErrContains: "does not advertise",
-		},
-	}
+func TestResolveOIDCTokenEndpointAuth(t *testing.T) {
+	// Discovery-based selection now lives in the dataplane
+	// (parse_token_endpoint_auth_methods); the controller only resolves an
+	// explicit override and otherwise emits UNSPECIFIED + the advertised list.
+	t.Run("explicit override is validated and resolved by the controller", func(t *testing.T) {
+		method := agentgateway.OIDCTokenEndpointAuthMethodClientSecretBasic
+		got, err := resolveOIDCTokenEndpointAuth(
+			&agentgateway.OIDC{TokenEndpointAuthMethod: &method},
+			true,
+		)
+		require.NoError(t, err)
+		require.Equal(t, api.TrafficPolicySpec_OIDC_CLIENT_SECRET_BASIC, got)
+	})
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := discoveredOIDCTokenEndpointAuth(tc.methods, tc.hasClientSecret)
-
-			if tc.wantErrContains != "" {
-				require.Error(t, err)
-				require.Contains(t, err.Error(), tc.wantErrContains)
-				return
-			}
+	t.Run("no override defers selection to the dataplane via UNSPECIFIED", func(t *testing.T) {
+		for _, hasSecret := range []bool{true, false} {
+			got, err := resolveOIDCTokenEndpointAuth(&agentgateway.OIDC{}, hasSecret)
 			require.NoError(t, err)
-			require.Equal(t, tc.want, got)
-		})
-	}
+			require.Equal(t, api.TrafficPolicySpec_OIDC_TOKEN_ENDPOINT_AUTH_UNSPECIFIED, got)
+		}
+	})
 }
 
 func TestResolveOIDCClientSecret(t *testing.T) {
@@ -203,8 +160,9 @@ func TestResolveOIDCClientSecret(t *testing.T) {
 		}
 		secretsCol := krt.NewStaticCollection(nil, secrets)
 		return PolicyCtx{
-			Krt:         krt.TestingDummyContext{},
-			Collections: &AgwCollections{Secrets: secretsCol},
+			Krt:                krt.TestingDummyContext{},
+			Collections:        &AgwCollections{Secrets: secretsCol},
+			CredentialResolver: kubeutils.NewSecretCredentialResolver(secretsCol),
 		}
 	}
 
